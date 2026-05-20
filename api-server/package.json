@@ -1,0 +1,13 @@
+{
+  "name": "soccer-ai-predictor-api-bundled",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node -e \"console.log('Using prebuilt dist/index.mjs')\"",
+    "start": "node --enable-source-maps ./dist/index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
