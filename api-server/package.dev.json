@@ -1,0 +1,17 @@
+{
+  "name": "@workspace/api-server-dev",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "typescript": "^5.0.0"
+  },
+  "notes": "This package.json is for running unit tests during local development. The production deployment uses the bundled dist/ output and the root package.json."
+}
