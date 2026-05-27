@@ -9,15 +9,36 @@ import {
   applyCalibration,
 } from "../lib/predictionStore";
 import { saveLiveAlert, savePredictionSnapshot } from "../lib/predictionPlatformService";
-import { normalizeThreeWayPercent, valueEdge as computeValueEdge } from "../lib/mathUtils";
-import { statsRateLimit, safeInt } from "../lib/security";
 
 const router = Router();
 
 
-// S6: valueEdge imported as computeValueEdge from ../lib/mathUtils
+function valueEdge(modelPct: number, decimalOdds: number | null) {
+  if (!Number.isFinite(modelPct) || !decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
+  const fairOdds = Math.round((100 / modelPct) * 100) / 100;
+  const edgePct = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
+  return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
+}
 
-// S6: normalizeThreeWayPercent imported from ../lib/mathUtils
+function normalizeThreeWayPercent(home: number, draw: number, away: number) {
+  const safeHome = Number.isFinite(home) && home > 0 ? home : 0;
+  const safeDraw = Number.isFinite(draw) && draw > 0 ? draw : 0;
+  const safeAway = Number.isFinite(away) && away > 0 ? away : 0;
+  const total = safeHome + safeDraw + safeAway;
+  if (total <= 0) {
+    return { home: 33.34, draw: 33.33, away: 33.33 };
+  }
+  const normHome = Math.round((safeHome / total) * 10000) / 100;
+  const normDraw = Math.round((safeDraw / total) * 10000) / 100;
+  const normAway = Math.round(Math.max(0, 100 - normHome - normDraw) * 100) / 100;
+  // If rounding pushes the sum away from 100, put the adjustment on the largest leg.
+  const sum = Math.round((normHome + normDraw + normAway) * 100) / 100;
+  if (sum === 100) return { home: normHome, draw: normDraw, away: normAway };
+  const diff = Math.round((100 - sum) * 100) / 100;
+  if (normHome >= normDraw && normHome >= normAway) return { home: Math.round((normHome + diff) * 100) / 100, draw: normDraw, away: normAway };
+  if (normDraw >= normAway) return { home: normHome, draw: Math.round((normDraw + diff) * 100) / 100, away: normAway };
+  return { home: normHome, draw: normDraw, away: Math.round((normAway + diff) * 100) / 100 };
+}
 
 
 router.get("/xg", async (_req, res) => {
@@ -31,9 +52,9 @@ router.get("/xg", async (_req, res) => {
   }
 });
 
-router.get("/matches/:match_id/stats", statsRateLimit, async (req, res) => {
-  const matchId = safeInt(req.params.match_id, 1, 999_999_999);
-  if (matchId === null) return res.status(400).json({ error: "Invalid match_id: must be a positive integer" });
+router.get("/matches/:match_id/stats", async (req, res) => {
+  const matchId = parseInt(req.params.match_id, 10);
+  if (isNaN(matchId)) return res.status(400).json({ error: "Invalid match_id" });
 
   try {
     const matches = await getAllMatches(null, null);
@@ -55,25 +76,15 @@ router.get("/matches/:match_id/stats", statsRateLimit, async (req, res) => {
     let enhancedPred = null;
     if (result.home.matches_played > 0 && result.away.matches_played > 0) {
       try {
-        // Use shot-quality xG when available (more stable than season goals average).
-        // Blend 60% shot-based / 40% goals-based when shots data exists;
-        // fall back to pure goals-based when the API doesn't return shots.
-        const homeAttack = result.home.xg_from_shots != null
-          ? result.home.xg_from_shots * 0.60 + result.home.goals_per_game * 0.40
-          : result.home.goals_per_game;
-        const awayAttack = result.away.xg_from_shots != null
-          ? result.away.xg_from_shots * 0.60 + result.away.goals_per_game * 0.40
-          : result.away.goals_per_game;
-
         const [rawPred, calibFactors] = await Promise.all([
           getEnhancedPrediction(
             matchId,
             match.home_team.id,
             match.away_team.id,
             match.league_id,
-            homeAttack,
+            result.home.goals_per_game,
             result.home.conceded_per_game,
-            awayAttack,
+            result.away.goals_per_game,
             result.away.conceded_per_game,
             match.home_team.name,
             match.away_team.name,
@@ -109,9 +120,9 @@ router.get("/matches/:match_id/stats", statsRateLimit, async (req, res) => {
             away_win: normAway,
             calibration_sample_size: calibFactors.sampleSize,
             value_edges: {
-              home: computeValueEdge(normHome, match.odds?.home_odds ?? null),
-              draw: computeValueEdge(normDraw, match.odds?.draw_odds ?? null),
-              away: computeValueEdge(normAway, match.odds?.away_odds ?? null),
+              home: valueEdge(normHome, match.odds?.home_odds ?? null),
+              draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),
+              away: valueEdge(normAway, match.odds?.away_odds ?? null),
             },
           };
 

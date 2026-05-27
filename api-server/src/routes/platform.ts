@@ -3,7 +3,6 @@ import { logger } from "../lib/logger";
 import { getAllMatches } from "../lib/soccerService";
 import { createTrackedBet, getBetTrackerSummary, getLiveAlerts, getPredictionHistory, getTrainingRuns, runTrainingPipeline, saveLiveAlert, settleTrackedBet } from "../lib/predictionPlatformService";
 import { getCalibrationReport, getTrainingDataset, saveOutcome } from "../lib/predictionStore";
-import { requireAdminKey, adminRateLimit, sseConnectionLimit, safeInt, safeString } from "../lib/security";
 
 const router = Router();
 
@@ -79,10 +78,7 @@ router.get("/calibration", async (_req, res) => {
 
 router.get("/training/dataset", async (req, res) => {
   try {
-    // Cap at 2000 rows regardless of what the caller requests — prevents a
-    // single request from dumping the entire training history into memory.
-    const requestedLimit = req.query.limit ? Number(req.query.limit) : 1000;
-    const limit = Math.min(2000, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : 1000));
+    const limit = req.query.limit ? Number(req.query.limit) : 5000;
     const rows = await getTrainingDataset(limit);
     return res.json({ rows, count: rows.length });
   } catch (err) {
@@ -91,7 +87,7 @@ router.get("/training/dataset", async (req, res) => {
   }
 });
 
-router.post("/outcomes/settle-finished", requireAdminKey, adminRateLimit, async (_req, res) => {
+router.post("/outcomes/settle-finished", async (_req, res) => {
   try {
     const matches = await getAllMatches(null, null);
     let settled = 0;
@@ -115,7 +111,7 @@ router.get("/training", async (_req, res) => {
   catch (err) { logger.error({ err }, "training runs failed"); return res.status(500).json({ error: "Failed to fetch training runs" }); }
 });
 
-router.post("/training/run", requireAdminKey, adminRateLimit, async (_req, res) => {
+router.post("/training/run", async (_req, res) => {
   try { return res.status(201).json(await runTrainingPipeline()); }
   catch (err) { logger.error({ err }, "training failed"); return res.status(500).json({ error: "Failed to run training pipeline" }); }
 });
@@ -126,7 +122,7 @@ router.get("/live/alerts", async (req, res) => {
   catch (err) { logger.error({ err }, "alerts failed"); return res.status(500).json({ error: "Failed to fetch live alerts" }); }
 });
 
-router.get("/live/stream", sseConnectionLimit, async (req, res) => {
+router.get("/live/stream", async (req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
@@ -150,22 +146,19 @@ router.get("/live/stream", sseConnectionLimit, async (req, res) => {
 router.post("/live/alerts", async (req, res) => {
   try {
     const body = req.body ?? {};
-    const fixtureId = safeInt(body.fixtureId, 1, 999_999_999);
-    if (fixtureId === null) {
-      return res.status(400).json({ error: "Valid fixtureId is required (positive integer)" });
+    const fixtureId = Number(body.fixtureId);
+    if (!Number.isFinite(fixtureId)) {
+      return res.status(400).json({ error: "Valid fixtureId is required" });
     }
-    const minute = body.minute == null ? null : safeInt(body.minute, 0, 180);
-    const pressureScore = body.pressureScore == null ? null : safeFloat(body.pressureScore ?? null, 0, 100);
-    const alertType = safeString(body.alertType || "manual", 32).replace(/[^a-z_]/g, "");
-    const teamSide = body.teamSide ? safeString(body.teamSide, 8) : null;
-    const message = safeString(body.message || "Live alert", 256);
+    const minute = body.minute == null ? null : Number(body.minute);
+    const pressureScore = body.pressureScore == null ? null : Number(body.pressureScore);
     const created = await saveLiveAlert({
       fixtureId,
-      alertType: alertType || "manual",
-      teamSide,
-      minute,
-      pressureScore,
-      message,
+      alertType: String(body.alertType || "manual"),
+      teamSide: body.teamSide ?? null,
+      minute: minute == null || Number.isFinite(minute) ? minute : null,
+      pressureScore: pressureScore == null || Number.isFinite(pressureScore) ? pressureScore : null,
+      message: String(body.message || "Live alert"),
     });
     return res.status(201).json(created);
   } catch (err) {

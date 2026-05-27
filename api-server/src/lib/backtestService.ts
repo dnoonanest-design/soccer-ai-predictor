@@ -1,32 +1,17 @@
 import { logger } from "./logger";
-import { FOCUS_LEAGUE_IDS } from "./soccerService";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 
-// Derive the league list from FOCUS_LEAGUE_IDS so backtestService always
-// stays in sync when FOCUS_LEAGUE_IDS is changed or overridden via env.
-const LEAGUE_META: Record<number, { name: string; country: string }> = {
-  39:  { name: "Premier League",     country: "England" },
-  140: { name: "La Liga",            country: "Spain"   },
-  135: { name: "Serie A",            country: "Italy"   },
-  78:  { name: "Bundesliga",         country: "Germany" },
-  61:  { name: "Ligue 1",            country: "France"  },
-  2:   { name: "Champions League",   country: "Europe"  },
-  3:   { name: "Europa League",      country: "Europe"  },
-  848: { name: "Conference League",  country: "Europe"  },
-};
-
-// Build DEFAULT_LEAGUES from the live FOCUS_LEAGUE_IDS set so a single env
-// override (FOCUS_LEAGUE_IDS="39,140") automatically changes what the
-// backtest covers without any code changes.
-const DEFAULT_LEAGUES: Array<{ id: number; name: string; country: string }> =
-  FOCUS_LEAGUE_IDS.size > 0
-    ? Array.from(FOCUS_LEAGUE_IDS).map((id) => ({
-        id,
-        ...(LEAGUE_META[id] ?? { name: `League ${id}`, country: "" }),
-      }))
-    : Object.entries(LEAGUE_META).map(([id, meta]) => ({ id: Number(id), ...meta }));
+// Top European leagues by API-Football ID
+const DEFAULT_LEAGUES = [
+  { id: 39, name: "Premier League", country: "England" },
+  { id: 140, name: "La Liga", country: "Spain" },
+  { id: 135, name: "Serie A", country: "Italy" },
+  { id: 78, name: "Bundesliga", country: "Germany" },
+  { id: 61, name: "Ligue 1", country: "France" },
+  { id: 2, name: "Champions League", country: "Europe" },
+];
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min cache — expensive call
 let backtestCache: { data: BacktestResult; fetchedAt: number } | null = null;

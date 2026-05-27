@@ -1,7 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startBackgroundLearner, stopBackgroundLearner } from "./lib/backgroundLearnerService";
-import { getOfflineFallbackModel, invalidateOfflineModelCache } from "./lib/adaptiveLearningEngine";
 
 // Replit normally provides PORT, but default to 3000 so local/iPad/browser
 // testing does not crash before the app starts.
@@ -15,8 +14,6 @@ if (!Number.isFinite(port) || port <= 0) {
 const server = app.listen(port, () => {
   logger.info({ port }, "Server listening");
   startBackgroundLearner();
-  // Warm up the offline fallback model so it is ready for degraded-mode predictions
-  setTimeout(() => { getOfflineFallbackModel().catch(() => {}); }, 15_000);
 });
 
 server.on("error", (err) => {

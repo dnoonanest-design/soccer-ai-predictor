@@ -101,114 +101,45 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
   const EMPTY: CalibrationFactors = { home: {}, draw: {}, away: {}, sampleSize: 0 };
 
   try {
-    // ── S5: Push bucket aggregation into the DB with GROUP BY ─────────────
-    // Previously loaded every settled row into Node.js memory, then computed
-    // bucket counts in JS — O(n) memory for 2000+ rows every 5 minutes.
-    // Now the DB returns at most 30 rows (10 buckets × 3 outcomes) regardless
-    // of how many settled predictions exist.
-    //
-    // Normalise probabilities stored as 0-100 to 0-1 inline in SQL.
-    const bucketRows = await db.execute(sql`
-      SELECT
-        mo.outcome,
-        FLOOR(LEAST(
-          CASE WHEN mp.home_win_prob > 1
-            THEN (CASE mo.outcome
-              WHEN 'home' THEN mp.home_win_prob / 100.0
-              WHEN 'draw' THEN mp.draw_prob     / 100.0
-              ELSE             mp.away_win_prob  / 100.0
-            END)
-            ELSE (CASE mo.outcome
-              WHEN 'home' THEN mp.home_win_prob
-              WHEN 'draw' THEN mp.draw_prob
-              ELSE             mp.away_win_prob
-            END)
-          END * 10, 9
-        )) * 10 AS bucket,
-        COUNT(*)::int                                      AS total,
-        SUM(
-          CASE WHEN mp.home_win_prob > 1
-            THEN (CASE mo.outcome
-              WHEN 'home' THEN mp.home_win_prob / 100.0
-              WHEN 'draw' THEN mp.draw_prob     / 100.0
-              ELSE             mp.away_win_prob  / 100.0
-            END)
-            ELSE (CASE mo.outcome
-              WHEN 'home' THEN mp.home_win_prob
-              WHEN 'draw' THEN mp.draw_prob
-              ELSE             mp.away_win_prob
-            END)
-          END
-        )                                                  AS sum_pred,
-        SUM(CASE WHEN mo.outcome = mo.outcome THEN 1 ELSE 0 END)::int AS actual_count_all,
-        COUNT(*)::int                                                   AS row_count
-      FROM match_predictions mp
-      JOIN match_outcomes mo ON mo.fixture_id = mp.fixture_id
-      WHERE mp.is_live = false
-      GROUP BY mo.outcome, bucket
-      ORDER BY mo.outcome, bucket
-    `) as { rows: Array<{ outcome: string; bucket: string; total: number; sum_pred: string; actual_count_all: number; row_count: number }> };
+    // JOIN predictions (pre-match only) with outcomes
+    const rows = await db
+      .select({
+        homeWinProb: matchPredictions.homeWinProb,
+        drawProb:    matchPredictions.drawProb,
+        awayWinProb: matchPredictions.awayWinProb,
+        outcome:     matchOutcomes.outcome,
+      })
+      .from(matchPredictions)
+      .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
+      .where(eq(matchPredictions.isLive, false));
 
-    // Fall back to the old full-row path if SQL GROUP BY isn't supported
-    // (e.g. test environments with SQLite shims) — detected by empty rows
-    const aggRows = bucketRows.rows ?? [];
-
-    if (aggRows.length === 0) {
-      // Graceful fallback: count sample size via a lightweight COUNT query
-      const countResult = await db
-        .select({ count: sql<number>`COUNT(*)` })
-        .from(matchPredictions)
-        .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-        .where(eq(matchPredictions.isLive, false));
-      const sampleSize = Number(countResult[0]?.count ?? 0);
-      if (sampleSize < 10) {
-        _calibCache = { factors: EMPTY, fetchedAt: Date.now() };
-        return EMPTY;
-      }
-      // Not enough bucket rows to build calibration — return empty (will retry next cycle)
-      _calibCache = { factors: { ...EMPTY, sampleSize }, fetchedAt: Date.now() };
-      return { ...EMPTY, sampleSize };
-    }
-
-    // Compute total sample size from aggregate rows
-    const sampleSize = aggRows.reduce((s, r) => s + Number(r.total), 0) / 3; // divide by 3 outcomes
-
-    if (sampleSize < 10) {
+    if (rows.length < 10) {
       _calibCache = { factors: EMPTY, fetchedAt: Date.now() };
       return EMPTY;
     }
 
-    // Build per-outcome bucket factor maps from the aggregated rows
-    type BucketAgg = { sumPred: number; actualCount: number; total: number };
-    const outcomeMap: Record<string, Record<number, BucketAgg>> = { home: {}, draw: {}, away: {} };
+    // Accumulate per bucket: sum of predicted prob and count of actual occurrences
+    type Bucket = { sumPred: number; actualCount: number; total: number };
+    const buckets = (outcome: "home" | "draw" | "away"): Record<number, Bucket> => {
+      const b: Record<number, Bucket> = {};
+      for (const r of rows) {
+        const rawProb = outcome === "home" ? r.homeWinProb : outcome === "draw" ? r.drawProb : r.awayWinProb;
+        const prob = toUnitProb(rawProb);
+        const bucket = Math.min(9, Math.floor(prob * 10)) * 10;
+        if (!b[bucket]) b[bucket] = { sumPred: 0, actualCount: 0, total: 0 };
+        b[bucket].sumPred += prob;
+        b[bucket].total  += 1;
+        if (r.outcome === outcome) b[bucket].actualCount += 1;
+      }
+      return b;
+    };
 
-    // We need actual win counts per outcome×bucket; the GROUP BY above gives
-    // total rows per outcome×bucket.  The actual win count = rows where outcome
-    // matches the bucket's outcome — which equals total for that outcome bucket
-    // because we GROUP BY mo.outcome.
-    for (const r of aggRows) {
-      const outcome = String(r.outcome) as "home" | "draw" | "away";
-      if (!outcomeMap[outcome]) continue;
-      const bucket = Number(r.bucket);
-      const total = Number(r.total);
-      const sumPred = Number(r.sum_pred ?? 0);
-      // actual_count = rows where this team's predicted outcome = actual outcome
-      // Since we grouped by mo.outcome, every row in this group IS an actual win
-      // for the given outcome — so actualCount = total for this outcome bucket.
-      outcomeMap[outcome][bucket] = { sumPred, actualCount: total, total };
-    }
-
-    // We also need the total rows per bucket across ALL outcomes to compute
-    // actualCount correctly.  Re-derive: for a given outcome O and bucket B,
-    // actualCount = rows where mo.outcome=O grouped under outcome O (which is total).
-    // Non-winning rows for outcome O appear in OTHER outcome groups for the same bucket.
-    // So actualCount for outcome O bucket B = outcomeMap[O][B].total (correct).
-
-    const toFactors = (b: Record<number, BucketAgg>): Record<number, number> => {
+    const toFactors = (b: Record<number, Bucket>): Record<number, number> => {
       const factors: Record<number, number> = {};
       for (const [key, val] of Object.entries(b)) {
-        if (val.total < 5) continue;
+        if (val.total < 5) continue; // not enough data for this bucket
         const avgPred = val.sumPred / val.total;
+        // Bayesian smoothing prevents wild calibration swings on small samples.
         const smoothedActualFreq = (val.actualCount + avgPred * 8) / (val.total + 8);
         if (avgPred < 0.001) continue;
         factors[Number(key)] = Math.max(0.65, Math.min(1.65, smoothedActualFreq / avgPred));
@@ -217,10 +148,10 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
     };
 
     const factors: CalibrationFactors = {
-      home: toFactors(outcomeMap.home ?? {}),
-      draw: toFactors(outcomeMap.draw ?? {}),
-      away: toFactors(outcomeMap.away ?? {}),
-      sampleSize: Math.round(sampleSize),
+      home: toFactors(buckets("home")),
+      draw: toFactors(buckets("draw")),
+      away: toFactors(buckets("away")),
+      sampleSize: rows.length,
     };
 
     _calibCache = { factors, fetchedAt: Date.now() };
@@ -286,7 +217,6 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
     .where(eq(matchPredictions.isLive, false));
 
-  // ── A6: Single-pass computation — avoids iterating all rows twice ──────────
   const byOutcome = {
     home: { predicted: 0, actual: 0, correct: 0 },
     draw: { predicted: 0, actual: 0, correct: 0 },
@@ -295,16 +225,39 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
 
   let totalBrier = 0;
   let correct = 0;
-  const RECENT_N = 20;
-  // Rolling buffer: we only keep the last RECENT_N entries, filled as we iterate
-  const recentBuffer: typeof rows = [];
+
+  const recentResults = rows.slice(-20).reverse().map((r) => {
+    const probs = { home: r.homeWinProb, draw: r.drawProb, away: r.awayWinProb } as Record<string, number>;
+    const predicted = Object.entries(probs).sort((a, b) => b[1] - a[1])[0][0] as "home" | "draw" | "away";
+    const actual    = r.outcome as "home" | "draw" | "away";
+    const isCorrect = predicted === actual;
+
+    // Brier score for 3-class: Σ (p_i - o_i)^2
+    const brier =
+      Math.pow(toUnitProb(r.homeWinProb) - (actual === "home" ? 1 : 0), 2) +
+      Math.pow(toUnitProb(r.drawProb)    - (actual === "draw" ? 1 : 0), 2) +
+      Math.pow(toUnitProb(r.awayWinProb) - (actual === "away" ? 1 : 0), 2);
+
+    return {
+      fixtureId:   r.fixtureId,
+      homeTeam:    r.homeTeam,
+      awayTeam:    r.awayTeam,
+      homeWinProb: r.homeWinProb,
+      drawProb:    r.drawProb,
+      awayWinProb: r.awayWinProb,
+      predicted,
+      actual,
+      correct: isCorrect,
+      brierScore: Math.round(brier * 1000) / 1000,
+    };
+  });
 
   for (const r of rows) {
     const probs = { home: r.homeWinProb, draw: r.drawProb, away: r.awayWinProb } as Record<string, number>;
     const predicted = Object.entries(probs).sort((a, b) => b[1] - a[1])[0][0] as "home" | "draw" | "away";
     const actual    = r.outcome as "home" | "draw" | "away";
 
-    if (byOutcome[actual])    byOutcome[actual].actual++;
+    if (byOutcome[actual]) byOutcome[actual].actual++;
     if (byOutcome[predicted]) byOutcome[predicted].predicted++;
     if (predicted === actual) {
       correct++;
@@ -315,34 +268,7 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
       Math.pow(toUnitProb(r.homeWinProb) - (actual === "home" ? 1 : 0), 2) +
       Math.pow(toUnitProb(r.drawProb)    - (actual === "draw" ? 1 : 0), 2) +
       Math.pow(toUnitProb(r.awayWinProb) - (actual === "away" ? 1 : 0), 2);
-
-    // Maintain a rolling window of the most recent RECENT_N rows
-    recentBuffer.push(r);
-    if (recentBuffer.length > RECENT_N) recentBuffer.shift();
   }
-
-  // Build recentResults from the buffer (most recent first)
-  const recentResults = [...recentBuffer].reverse().map((r) => {
-    const probs = { home: r.homeWinProb, draw: r.drawProb, away: r.awayWinProb } as Record<string, number>;
-    const predicted = Object.entries(probs).sort((a, b) => b[1] - a[1])[0][0] as "home" | "draw" | "away";
-    const actual    = r.outcome as "home" | "draw" | "away";
-    const brier =
-      Math.pow(toUnitProb(r.homeWinProb) - (actual === "home" ? 1 : 0), 2) +
-      Math.pow(toUnitProb(r.drawProb)    - (actual === "draw" ? 1 : 0), 2) +
-      Math.pow(toUnitProb(r.awayWinProb) - (actual === "away" ? 1 : 0), 2);
-    return {
-      fixtureId:   r.fixtureId,
-      homeTeam:    r.homeTeam,
-      awayTeam:    r.awayTeam,
-      homeWinProb: r.homeWinProb,
-      drawProb:    r.drawProb,
-      awayWinProb: r.awayWinProb,
-      predicted,
-      actual,
-      correct: predicted === actual,
-      brierScore: Math.round(brier * 1000) / 1000,
-    };
-  });
 
   const n = rows.length;
   return {

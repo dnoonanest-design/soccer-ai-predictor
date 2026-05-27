@@ -6,126 +6,41 @@ const SEASON = process.env.FOOTBALL_SEASON ?? "2025";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
-// ─── Focus leagues ──────────────────────────────────────────────────────────
-// The prediction model performs best on competitions where API-Football
-// provides reliable lineup, injury, statistics, and H2H data.
-//
-// Override via environment: FOCUS_LEAGUE_IDS="39,140,78,135,61,2,3"
-// Disable filtering entirely: FOCUS_LEAGUE_IDS="*"
-//
-// Default: the six competitions with strongest data coverage and user interest.
-export const FOCUS_LEAGUE_IDS: ReadonlySet<number> = (() => {
-  const raw = process.env.FOCUS_LEAGUE_IDS ?? "";
-  if (raw.trim() === "*") return new Set<number>();   // empty set = no filter
-  if (raw.trim()) {
-    const parsed = raw.split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    if (parsed.length > 0) return new Set(parsed);
-  }
-  return new Set([
-    39,   // Premier League
-    140,  // La Liga
-    78,   // Bundesliga
-    135,  // Serie A
-    61,   // Ligue 1
-    2,    // UEFA Champions League
-  ]);
-})();
-
-/** Returns true when this league should be included in the dashboard and predictions. */
-export function isLeagueFocused(leagueId: number): boolean {
-  return FOCUS_LEAGUE_IDS.size === 0 || FOCUS_LEAGUE_IDS.has(leagueId);
-}
-
-// ─── Odds API sport-key filter ───────────────────────────────────────────────
-// The Odds API returns ALL soccer competitions in one response.
-// Filtering by these sport keys before caching reduces the events array from
-// hundreds of entries to ~6 competitions, which speeds up the name-matching
-// in extractOdds() and keeps memory usage low.
-// If FOCUS_LEAGUE_IDS is overridden via env, this map still covers the defaults;
-// unknown league IDs simply get no odds (handled gracefully by extractOdds).
-const FOCUS_SPORT_KEYS = new Set([
-  "soccer_epl",                   // Premier League
-  "soccer_spain_la_liga",         // La Liga
-  "soccer_germany_bundesliga",    // Bundesliga
-  "soccer_italy_serie_a",         // Serie A
-  "soccer_france_ligue_one",      // Ligue 1
-  "soccer_uefa_champs_league",    // UEFA Champions League
-]);
-
-// ── S3: Tiered cache TTLs ────────────────────────────────────────────────────
-// Live fixture lists need rapid refresh; upcoming/finished need far less.
-// Each cache entry stores its own TTL alongside the data.
-const LIVE_FIXTURE_TTL_MS    = 14_000;   // 14s — live score/minute updates
-const TODAY_FIXTURE_TTL_MS   = 60_000;   // 60s — upcoming/finished today
+const CACHE_TTL_MS = 14000;
 
 interface CacheEntry<T> {
   data: T;
   fetchedAt: number;
-  ttl: number;
 }
 
 const cache = new Map<string, CacheEntry<unknown>>();
 
-function getCached<T>(key: string, ttl?: number): T | null {
+function getCached<T>(key: string): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
   if (!entry) return null;
-  const effectiveTtl = ttl ?? entry.ttl;
-  if (Date.now() - entry.fetchedAt > effectiveTtl) return null;
+  if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
   return entry.data;
 }
 
-function setCache<T>(key: string, data: T, ttl: number = TODAY_FIXTURE_TTL_MS): void {
-  cache.set(key, { data, fetchedAt: Date.now(), ttl });
+function setCache<T>(key: string, data: T): void {
+  cache.set(key, { data, fetchedAt: Date.now() });
 }
-
-// ── S4: Cache pruning ────────────────────────────────────────────────────────
-function pruneCache(): void {
-  const now = Date.now();
-  const MAX_AGE = 24 * 60 * 60 * 1000;
-  for (const [key, entry] of cache) {
-    if (now - entry.fetchedAt > MAX_AGE) cache.delete(key);
-  }
-}
-if (typeof setInterval !== "undefined") {
-  setInterval(pruneCache, 60 * 60 * 1000);
-}
-
-// ── S1: In-flight deduplication ─────────────────────────────────────────────
-const _inFlight = new Map<string, Promise<unknown>>();
-// ── S2: 5-second timeout on all external API calls ──────────────────────────
-const API_TIMEOUT_MS = 5000;
 
 async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) {
     logger.warn("API_FOOTBALL_KEY not set");
     return null;
   }
-  if (_inFlight.has(path)) return _inFlight.get(path)!;
   const url = `${API_FOOTBALL_BASE}${path}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-  const promise = fetch(url, {
+  const res = await fetch(url, {
     headers: { "x-apisports-key": API_FOOTBALL_KEY },
-    signal: controller.signal,
-  })
-    .then(async (res) => {
-      if (!res.ok) { logger.error({ status: res.status, url }, "API-Football request failed"); return null; }
-      const json = (await res.json()) as { response: unknown };
-      return json.response ?? null;
-    })
-    .catch((err: unknown) => {
-      if ((err as any)?.name === "AbortError") logger.warn({ url }, "soccerService: api call timed out after 5s");
-      else logger.error({ err, url }, "soccerService: fetch error");
-      return null;
-    })
-    .finally(() => {
-      clearTimeout(timer);
-      _inFlight.delete(path);
-    });
-  _inFlight.set(path, promise);
-  return promise;
+  });
+  if (!res.ok) {
+    logger.error({ status: res.status, url }, "API-Football request failed");
+    return null;
+  }
+  const json = (await res.json()) as { response: unknown };
+  return json.response;
 }
 
 async function fetchOdds(path: string): Promise<unknown> {
@@ -318,8 +233,6 @@ function extractOdds(
 }
 
 async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
-  // S3: use 60s TTL for today's fixtures — scores rarely change in 14s anyway
-  // and this cuts fixture API calls dramatically under concurrent user load.
   const cached = getCached<ApiFootballFixture[]>("today_fixtures");
   if (cached) return cached;
 
@@ -328,12 +241,8 @@ async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
     `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`
   )) as ApiFootballFixture[] | null;
 
-  const allFixtures = data ?? [];
-  // Apply focus-league filter — keeps only the competitions where model accuracy
-  // is highest. This also reduces API quota usage downstream (stats, H2H, lineups).
-  const fixtures = allFixtures.filter((f) => isLeagueFocused(f.league.id));
-  const anyLive = fixtures.some(f => ["1H","2H","ET","BT","P","LIVE","HT"].includes(f.fixture.status.short));
-  setCache("today_fixtures", fixtures, anyLive ? LIVE_FIXTURE_TTL_MS : TODAY_FIXTURE_TTL_MS);
+  const fixtures = data ?? [];
+  setCache("today_fixtures", fixtures);
   return fixtures;
 }
 
@@ -345,10 +254,8 @@ async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
     `/fixtures?live=all`
   )) as ApiFootballFixture[] | null;
 
-  const allFixtures = data ?? [];
-  // Apply same focus-league filter to live fixtures
-  const fixtures = allFixtures.filter((f) => isLeagueFocused(f.league.id));
-  setCache("live_fixtures", fixtures, LIVE_FIXTURE_TTL_MS);
+  const fixtures = data ?? [];
+  setCache("live_fixtures", fixtures);
   return fixtures;
 }
 
@@ -360,13 +267,7 @@ async function getSoccerOdds(): Promise<OddsApiEvent[]> {
     `/sports/soccer/odds?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`
   )) as OddsApiEvent[] | null;
 
-  const allEvents = Array.isArray(data) ? (data as OddsApiEvent[]) : [];
-  // Filter to focus-league sport keys only — reduces array size ~10× and
-  // speeds up the name-matching in extractOdds() for every fixture.
-  // Falls back to unfiltered if FOCUS_SPORT_KEYS is empty (future expansion).
-  const events = FOCUS_SPORT_KEYS.size > 0
-    ? allEvents.filter((e) => FOCUS_SPORT_KEYS.has(e.sport_key))
-    : allEvents;
+  const events = Array.isArray(data) ? data : [];
   setCache("soccer_odds", events);
   return events;
 }

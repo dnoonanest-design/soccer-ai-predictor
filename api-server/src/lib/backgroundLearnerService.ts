@@ -1,6 +1,6 @@
-import { db, hasDatabase, backgroundJobRuns, betTracker, calibrationParameters, deepMatchStats } from "@workspace/db";
+import { db, backgroundJobRuns, betTracker, calibrationParameters, deepMatchStats } from "@workspace/db";
 import { desc, eq, sql } from "drizzle-orm";
-import { getAllMatches, isLeagueFocused, type Match } from "./soccerService";
+import { getAllMatches, type Match } from "./soccerService";
 import { getMatchStats } from "./statsService";
 import { getEnhancedPrediction, type LiveMatchStatsInput } from "./enhancedStatsService";
 import { saveOutcome, savePrediction, getCalibrationReport, getCalibrationFactors } from "./predictionStore";
@@ -9,9 +9,6 @@ import { logger } from "./logger";
 import { analyzeCircumstanceInfluence, applyCircumstanceCalibration, collectMatchCircumstances, getCircumstanceLearningReport } from "./circumstanceLearningService";
 import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningService";
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
-import { normalizeThreeWayPercent, valueEdge as computeValueEdge, round2 } from "./mathUtils";
-import { runAdaptiveLearningCycle, explainRecentPredictions, getAdaptiveLearningReport, getOfflineFallbackModel } from "./adaptiveLearningEngine";
-import { applyLeagueXgOverrides } from "./enhancedStatsService";
 
 type JobStatus = "idle" | "running" | "disabled";
 
@@ -51,14 +48,27 @@ function liveStatsPayload(stats: any): LiveMatchStatsInput {
   return { home: stats?.home ?? {}, away: stats?.away ?? {} };
 }
 
-// S6: normalizeThreeWayPercent imported from ./mathUtils
+function normalizeThreeWayPercent(home: number, draw: number, away: number) {
+  const safe = [home, draw, away].map((p) => Number.isFinite(p) && p > 0 ? p : 0);
+  const total = safe.reduce((a, b) => a + b, 0);
+  if (total <= 0) return { home: 33.34, draw: 33.33, away: 33.33 };
+  const h = Math.round((safe[0] / total) * 10000) / 100;
+  const d = Math.round((safe[1] / total) * 10000) / 100;
+  const a = Math.round(Math.max(0, 100 - h - d) * 100) / 100;
+  return { home: h, draw: d, away: a };
+}
 
-// S6: buildValueEdges uses shared computeValueEdge from ./mathUtils
 function buildValueEdges(match: Match, home: number, draw: number, away: number) {
+  const edge = (modelPct: number, decimalOdds: number | null) => {
+    if (!decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
+    const fairOdds = Math.round((100 / modelPct) * 100) / 100;
+    const edgePct = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
+    return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
+  };
   return {
-    home: computeValueEdge(home, match.odds?.home_odds ?? null),
-    draw: computeValueEdge(draw, match.odds?.draw_odds ?? null),
-    away: computeValueEdge(away, match.odds?.away_odds ?? null),
+    home: edge(home, match.odds?.home_odds ?? null),
+    draw: edge(draw, match.odds?.draw_odds ?? null),
+    away: edge(away, match.odds?.away_odds ?? null),
   };
 }
 
@@ -213,8 +223,6 @@ export async function runLiveDeepStatCollection() {
   try {
     const liveMatches = (await getAllMatches(null, "live")).slice(0, MAX_LIVE_MATCHES);
     for (const match of liveMatches) {
-      // Only process focus leagues — avoids wasting API quota on lower-quality data
-      if (!isLeagueFocused(match.league_id)) continue;
       checked++;
       try {
         if (await computeAndStoreMatch(match)) stored++;
@@ -243,8 +251,6 @@ export async function runFinishedSettlement() {
     const matches = await getAllMatches(null, null);
     for (const match of matches) {
       if (match.status !== "finished") continue;
-      // Only settle focus leagues
-      if (!isLeagueFocused(match.league_id)) continue;
       checked++;
       const home = match.score?.home;
       const away = match.score?.away;
@@ -252,7 +258,6 @@ export async function runFinishedSettlement() {
       await saveOutcome({ fixtureId: match.id, scoreHome: home, scoreAway: away });
       try { await computeAndStoreMatch(match); } catch {}
       settled++;
-      explainRecentPredictions(5).catch(() => {});
 
       const openBets = await db.select().from(betTracker).where(sql`${betTracker.fixtureId} = ${match.id} AND ${betTracker.status} = 'open'`);
       for (const bet of openBets) {
@@ -308,13 +313,8 @@ export async function runAutomaticRecalibration() {
       metricsJson: report as any,
       active: true,
     });
-    // Run the adaptive learning cycle alongside existing calibration
-    const adaptive = await runAdaptiveLearningCycle().catch((err) => { logger.warn({ err }, "adaptive learning cycle failed"); return null; });
-    // Apply learned xG averages as runtime overrides for future predictions
-    const offlineModel = await getOfflineFallbackModel().catch(() => null);
-    if (offlineModel?.leagueXgAverages) applyLeagueXgOverrides(offlineModel.leagueXgAverages);
     await recordJob("auto_recalibration", "success", Number(training.trainingRows ?? 0), 1 + Number(influence.stored ?? 0));
-    return { training, influence, aiAwareness, calibration: { sampleSize, report }, adaptive, finishedAt: new Date() };
+    return { training, influence, aiAwareness, calibration: { sampleSize, report }, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("auto_recalibration", "error", 0, 0, String(err?.message ?? err));
     throw err;
@@ -342,10 +342,6 @@ export async function runBiweeklyAiUpdate(force = false) {
 
 export function startBackgroundLearner() {
   if (started || !ENABLED) return;
-  if (!hasDatabase) {
-    logger.warn("DATABASE_URL not set — background learner disabled (no DB)");
-    return;
-  }
   started = true;
   liveTimer = setInterval(() => { runLiveDeepStatCollection().catch((err) => logger.warn({ err }, "live background learner failed")); }, LIVE_INTERVAL_MS);
   settleTimer = setInterval(() => { runFinishedSettlement().catch((err) => logger.warn({ err }, "settlement background learner failed")); }, SETTLE_INTERVAL_MS);
@@ -357,8 +353,6 @@ export function startBackgroundLearner() {
   setTimeout(() => { runLiveDeepStatCollection().catch(() => {}); }, 30_000);
   setTimeout(() => { runAutomaticRecalibration().catch(() => {}); }, 90_000);
   setTimeout(() => { runBiweeklyAiUpdate(false).catch(() => {}); }, 120_000);
-  // Apply any previously learned xG overrides on boot
-  setTimeout(() => { getOfflineFallbackModel().then(m => { if (m?.leagueXgAverages) applyLeagueXgOverrides(m.leagueXgAverages); }).catch(() => {}); }, 20_000);
   logger.info({ LIVE_INTERVAL_MS, SETTLE_INTERVAL_MS, TRAIN_INTERVAL_MS, BIWEEKLY_UPDATE_INTERVAL_MS }, "background prediction learner started");
 }
 
@@ -389,6 +383,5 @@ export async function getBackgroundLearnerStatus() {
     circumstanceLearning,
     aiAwareness,
     aiMemoryUpdates,
-    adaptiveLearning: await getAdaptiveLearningReport().catch(() => null),
   };
 }

@@ -12,7 +12,6 @@ import platformRouter from "./platform";
 import backgroundRouter from "./background";
 import pushRouter from "./push";
 import aiRouter from "./ai";
-import premiumRouter from "./premium";
 
 const router: IRouter = Router();
 
@@ -29,6 +28,5 @@ router.use(platformRouter);
 router.use(backgroundRouter);
 router.use(pushRouter);
 router.use(aiRouter);
-router.use(premiumRouter);
 
 export default router;

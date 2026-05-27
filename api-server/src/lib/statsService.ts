@@ -1,5 +1,4 @@
 import { logger } from "./logger";
-import { getCalibrationFactors, applyCalibration } from "./predictionStore";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -20,49 +19,12 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
 
-// ── S4: Cache pruning ────────────────────────────────────────────────────────
-function pruneCache(): void {
-  const now = Date.now();
-  // Remove entries older than 24 hours; service-specific functions use their
-  // own TTL checks on read, this just prevents indefinite memory growth.
-  const MAX_AGE = 24 * 60 * 60 * 1000;
-  for (const [key, entry] of cache) {
-    if (now - entry.fetchedAt > MAX_AGE) cache.delete(key);
-  }
-}
-if (typeof setInterval !== "undefined") {
-  setInterval(pruneCache, 60 * 60 * 1000);
-}
-
-// ── S1: In-flight deduplication  S2: 5s timeout ─────────────────────────────
-const _inFlight = new Map<string, Promise<unknown>>();
-const API_TIMEOUT_MS = 5000;
-
 async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) { logger.warn("API_FOOTBALL_KEY not set"); return null; }
-  if (_inFlight.has(path)) return _inFlight.get(path)!;
   const url = `${API_FOOTBALL_BASE}${path}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-  const promise = fetch(url, {
-    headers: { "x-apisports-key": API_FOOTBALL_KEY },
-    signal: controller.signal,
-  })
-    .then(async (res) => {
-      if (!res.ok) { logger.error({ status: res.status, url }, "API-Football failed"); return null; }
-      return res.json();
-    })
-    .catch((err: unknown) => {
-      if ((err as any)?.name === "AbortError") logger.warn({ url }, "statsService: api call timed out after 5s");
-      else logger.error({ err, url }, "statsService: fetch error");
-      return null;
-    })
-    .finally(() => {
-      clearTimeout(timer);
-      _inFlight.delete(path);
-    });
-  _inFlight.set(path, promise);
-  return promise;
+  const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
+  if (!res.ok) { logger.error({ status: res.status, url }, "API-Football failed"); return null; }
+  return res.json();
 }
 
 export interface TeamStats {
@@ -71,15 +33,6 @@ export interface TeamStats {
   form: string;
   goals_per_game: number;
   conceded_per_game: number;
-  /** Shot-quality xG estimate: (shots_on_target×0.33 + shots_total×0.08) / matches_played.
-   *  null when the API does not return season shot totals for this league.
-   *  When available, this replaces goals_per_game as the attack proxy in the
-   *  Poisson model because shot quality is more stable week-to-week than goals. */
-  xg_from_shots: number | null;
-  /** Season-average shots on target per game */
-  shots_on_target_per_game: number | null;
-  /** Season-average total shots per game */
-  shots_per_game: number | null;
   clean_sheets: number;
   matches_played: number;
   wins: number;
@@ -126,16 +79,6 @@ type ApiTeamStatsResp = {
       against?: { average?: { total?: string } };
     };
     clean_sheet?: { total?: number };
-    // Shot data from /teams/statistics — available for most top-flight leagues
-    shots?: {
-      on?: { total?: number | null };
-      off?: { total?: number | null };
-      total?: { total?: number | null };
-    };
-    passes?: {
-      total?: { total?: number | null };
-      accurate?: { total?: number | null };
-    };
   };
 };
 
@@ -170,31 +113,12 @@ async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamSta
   const rawForm = r.form ?? "";
   const form = rawForm.slice(-5);
 
-  // ── Shot-quality xG ──────────────────────────────────────────────────────
-  // The /teams/statistics endpoint returns season shot totals.
-  // xG from shots = (shots_on_target × 0.33 + shots_total × 0.08) / matches_played
-  //   • 0.33 per shot on target ≈ average conversion rate from direct attempts
-  //   • 0.08 per shot off target / blocked ≈ contribution of long-range/blocked shots
-  // This is more stable than goals_per_game because it captures shot volume and
-  // quality even when a team is unlucky (or lucky) with finishing.
-  const shotsOnTotal   = r.shots?.on?.total ?? null;
-  const shotsTotalStat = r.shots?.total?.total ?? null;
-  const shotsOnPerGame = (shotsOnTotal   != null && played > 0) ? shotsOnTotal   / played : null;
-  const shotsTotPerGame = (shotsTotalStat != null && played > 0) ? shotsTotalStat / played : null;
-  const xgFromShots =
-    shotsOnPerGame != null && shotsTotPerGame != null
-      ? Math.max(0.1, Math.min(4.0, shotsOnPerGame * 0.33 + shotsTotPerGame * 0.08))
-      : null;
-
   const stats: TeamStats = {
     team_id: teamId,
     team: "",
     form,
     goals_per_game: gpg,
     conceded_per_game: cpg,
-    xg_from_shots: xgFromShots != null ? Math.round(xgFromShots * 100) / 100 : null,
-    shots_on_target_per_game: shotsOnPerGame != null ? Math.round(shotsOnPerGame * 100) / 100 : null,
-    shots_per_game: shotsTotPerGame != null ? Math.round(shotsTotPerGame * 100) / 100 : null,
     clean_sheets: cs,
     matches_played: played,
     wins,
@@ -374,9 +298,6 @@ export async function getAllXGPredictions(
     statsMap.set(aKey, getCached<TeamStats>(aKey, TEAM_CACHE_TTL));
   }
 
-  // Load calibration factors once for the whole batch
-  const calibFactors = await getCalibrationFactors().catch(() => null);
-
   const predictions: XGPrediction[] = [];
   for (const m of matches) {
     const home = statsMap.get(`teamstats:${m.home_team.id}:${m.league_id}`);
@@ -384,30 +305,13 @@ export async function getAllXGPredictions(
     if (!home || !away || home.matches_played === 0 || away.matches_played === 0) continue;
 
     const xg = computeXG(home.goals_per_game, home.conceded_per_game, away.goals_per_game, away.conceded_per_game);
-
-    // Apply calibration when enough settled samples are available
-    let homeWin = xg.homeWin;
-    let draw    = xg.draw;
-    let awayWin = xg.awayWin;
-    if (calibFactors && calibFactors.sampleSize >= 10) {
-      const calHome = applyCalibration(homeWin, "home", calibFactors);
-      const calDraw = applyCalibration(draw,    "draw", calibFactors);
-      const calAway = applyCalibration(awayWin, "away", calibFactors);
-      const total = calHome + calDraw + calAway;
-      if (total > 0) {
-        homeWin = Math.round((calHome / total) * 10000) / 100;
-        draw    = Math.round((calDraw / total) * 10000) / 100;
-        awayWin = Math.round((calAway / total) * 10000) / 100;
-      }
-    }
-
     predictions.push({
       match_id: m.id,
       home_xg: xg.homeXG,
       away_xg: xg.awayXG,
-      home_win: homeWin,
-      draw,
-      away_win: awayWin,
+      home_win: xg.homeWin,
+      draw: xg.draw,
+      away_win: xg.awayWin,
     });
   }
 

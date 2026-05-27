@@ -1,24 +1,12 @@
 import express, { type Express } from "express";
 import path from "node:path";
 import fs from "node:fs";
+import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
-import {
-  securityHeaders,
-  corsMiddleware,
-  generalRateLimit,
-  JSON_BODY_LIMIT,
-  URLENCODED_BODY_LIMIT,
-} from "./lib/security";
 
 const app: Express = express();
-
-// ── Security headers first — applied before any route or logging ──────────────
-app.use(securityHeaders);
-
-// ── CORS — replaces the open cors() wildcard ──────────────────────────────────
-app.use(corsMiddleware);
 
 app.use(
   pinoHttp({
@@ -39,15 +27,9 @@ app.use(
     },
   }),
 );
-
-// ── Body parsing — explicit size limits, no prototype pollution ───────────────
-// extended: false uses the built-in querystring parser which does NOT support
-// nested objects, preventing __proto__ pollution via URL-encoded bodies.
-app.use(express.json({ limit: JSON_BODY_LIMIT }));
-app.use(express.urlencoded({ extended: false, limit: URLENCODED_BODY_LIMIT }));
-
-// ── General rate limit — 120 req/min per IP across all /api routes ────────────
-app.use("/api", generalRateLimit);
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
