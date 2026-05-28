@@ -8,8 +8,8 @@
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
-    "railway:build": "pnpm --filter @workspace/soccer-dashboard run build && pnpm --filter @workspace/api-server run build",
-    "railway:start": "node --enable-source-maps artifacts/api-server/dist/index.mjs",
+    "railway:build": "pnpm --filter soccer-ai-predictor-api-bundled run build",
+    "railway:start": "node --enable-source-maps api-server/dist/index.mjs",
     "migrate": "psql \"$DATABASE_URL\" -f db/001_prediction_platform.sql",
     "healthcheck": "node ./scripts/railway-healthcheck.mjs"
   },
