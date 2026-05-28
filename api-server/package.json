@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "echo \"Using pre-built dist files\"",
+    "build": "node build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "test": "vitest run --config vitest.config.ts"
   },
@@ -12,12 +12,14 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@types/cors": "^2.8.19",
+    "cors": "^2.8.6",
     "drizzle-orm": "^0.45.2",
     "esbuild": "0.25.8",
-    "express": "^5.2.1",
-    "pino-http": "^11.0.0",
     "esbuild-plugin-pino": "^2.3.3",
+    "express": "^5.2.1",
     "pino": "^9.14.0",
+    "pino-http": "^11.0.0",
     "pino-pretty": "^13.1.3"
   }
 }
