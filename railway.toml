@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile && pnpm run railway:build"
+buildCommand = "COREPACK_INTEGRITY_KEYS=\"\" corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile && pnpm run railway:build"
 
 [deploy]
 startCommand = "pnpm run railway:start"
