@@ -8,13 +8,12 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
 const CACHE_TTL_MS = 14000;
 
-// Rate limiter: 150ms between requests = max 400/min
-let lastRequestTime = 0;
-async function waitForRateLimit(): Promise<void> {
-  const now = Date.now();
-  const wait = 150 - (now - lastRequestTime);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  lastRequestTime = Date.now();
+// Serial request queue - one request at a time, 150ms apart
+let requestChain = Promise.resolve();
+function waitForRateLimit(): Promise<void> {
+  const slot = requestChain.then(() => new Promise<void>(r => setTimeout(r, 150)));
+  requestChain = slot;
+  return slot;
 }
 const cache = new Map<string, CacheEntry<unknown>>();
 
