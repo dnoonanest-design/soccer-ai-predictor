@@ -8,22 +8,14 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
 const CACHE_TTL_MS = 14000;
 
-// Rate limiter: max 7 requests/second (420/min, safely under Ultra 450/min)
-let requestQueue: Array<() => void> = [];
-let requestsThisSecond = 0;
-setInterval(() => { requestsThisSecond = 0; const toRun = requestQueue.splice(0, 7); toRun.forEach(fn => fn()); }, 1000);
-function waitForRateLimit(): Promise<void> {
-  return new Promise(resolve => {
-    if (requestsThisSecond < 7) { requestsThisSecond++; resolve(); }
-    else { requestQueue.push(resolve); }
-  });
+// Rate limiter: 150ms between requests = max 400/min
+let lastRequestTime = 0;
+async function waitForRateLimit(): Promise<void> {
+  const now = Date.now();
+  const wait = 150 - (now - lastRequestTime);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastRequestTime = Date.now();
 }
-
-interface CacheEntry<T> {
-  data: T;
-  fetchedAt: number;
-}
-
 const cache = new Map<string, CacheEntry<unknown>>();
 
 function getCached<T>(key: string): T | null {

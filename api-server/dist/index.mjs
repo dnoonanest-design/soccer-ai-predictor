@@ -40104,22 +40104,12 @@ var SEASON = process.env.FOOTBALL_SEASON ?? "2025";
 var API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 var ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 var CACHE_TTL_MS = 14e3;
-var requestQueue = [];
-var requestsThisSecond = 0;
-setInterval(() => {
-  requestsThisSecond = 0;
-  const toRun = requestQueue.splice(0, 7);
-  toRun.forEach((fn) => fn());
-}, 1e3);
-function waitForRateLimit() {
-  return new Promise((resolve) => {
-    if (requestsThisSecond < 7) {
-      requestsThisSecond++;
-      resolve();
-    } else {
-      requestQueue.push(resolve);
-    }
-  });
+var lastRequestTime = 0;
+async function waitForRateLimit() {
+  const now = Date.now();
+  const wait = 150 - (now - lastRequestTime);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastRequestTime = Date.now();
 }
 var cache = /* @__PURE__ */ new Map();
 function getCached(key) {
