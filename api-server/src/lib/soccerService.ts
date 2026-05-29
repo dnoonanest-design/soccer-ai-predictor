@@ -8,6 +8,17 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
 const CACHE_TTL_MS = 14000;
 
+// Rate limiter: max 7 requests/second (420/min, safely under Ultra 450/min)
+let requestQueue: Array<() => void> = [];
+let requestsThisSecond = 0;
+setInterval(() => { requestsThisSecond = 0; const toRun = requestQueue.splice(0, 7); toRun.forEach(fn => fn()); }, 1000);
+function waitForRateLimit(): Promise<void> {
+  return new Promise(resolve => {
+    if (requestsThisSecond < 7) { requestsThisSecond++; resolve(); }
+    else { requestQueue.push(resolve); }
+  });
+}
+
 interface CacheEntry<T> {
   data: T;
   fetchedAt: number;
@@ -32,6 +43,7 @@ async function fetchFootball(path: string): Promise<unknown> {
     return null;
   }
   const url = `${API_FOOTBALL_BASE}${path}`;
+  await waitForRateLimit();
   const res = await fetch(url, {
     headers: { "x-apisports-key": API_FOOTBALL_KEY },
   });

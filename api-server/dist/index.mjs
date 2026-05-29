@@ -40104,6 +40104,23 @@ var SEASON = process.env.FOOTBALL_SEASON ?? "2025";
 var API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 var ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 var CACHE_TTL_MS = 14e3;
+var requestQueue = [];
+var requestsThisSecond = 0;
+setInterval(() => {
+  requestsThisSecond = 0;
+  const toRun = requestQueue.splice(0, 7);
+  toRun.forEach((fn) => fn());
+}, 1e3);
+function waitForRateLimit() {
+  return new Promise((resolve) => {
+    if (requestsThisSecond < 7) {
+      requestsThisSecond++;
+      resolve();
+    } else {
+      requestQueue.push(resolve);
+    }
+  });
+}
 var cache = /* @__PURE__ */ new Map();
 function getCached(key) {
   const entry = cache.get(key);
@@ -40120,6 +40137,7 @@ async function fetchFootball(path2) {
     return null;
   }
   const url2 = `${API_FOOTBALL_BASE}${path2}`;
+  await waitForRateLimit();
   const res = await fetch(url2, {
     headers: { "x-apisports-key": API_FOOTBALL_KEY }
   });
