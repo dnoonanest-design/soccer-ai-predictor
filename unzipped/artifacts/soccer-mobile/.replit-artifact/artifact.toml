@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/soccer-mobile/"
+title = "Soccer Probability – Mobile"
+version = "1.0.0"
+id = "artifacts/soccer-mobile"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/soccer-mobile/" ]
+localPort = 20327
+
+[services.development]
+run = "pnpm --filter @workspace/soccer-mobile run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/soccer-mobile", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/soccer-mobile", "run", "serve" ]
+
+[services.env]
+PORT = "20327"
+BASE_PATH = "/soccer-mobile/"

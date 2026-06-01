@@ -9,6 +9,8 @@ import { logger } from "./logger";
 import { analyzeCircumstanceInfluence, applyCircumstanceCalibration, collectMatchCircumstances, getCircumstanceLearningReport } from "./circumstanceLearningService";
 import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningService";
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
+import { collectPlayerStatsForFixture } from "./playerService.js";
+import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
 
 type JobStatus = "idle" | "running" | "disabled";
 
@@ -210,6 +212,20 @@ async function computeAndStoreMatch(match: Match) {
 
   void factors;
   void circumstances; // keeps circumstance collection explicit without changing response shape
+
+  // Collect player stats for this fixture
+  const homeResult = match.score?.home > match.score?.away ? "win" : match.score?.home < match.score?.away ? "loss" : "draw";
+  collectPlayerStatsForFixture(
+    match.id,
+    match.league?.id ?? 0,
+    new Date(match.date ?? Date.now()),
+    match.home_team?.id ?? 0,
+    match.away_team?.id ?? 0,
+    homeResult as "win" | "draw" | "loss",
+    match.score?.home ?? 0,
+    match.score?.away ?? 0
+  ).catch((err) => logger.warn({ err, fixtureId: match.id }, "player stats collection failed"));
+
   return true;
 }
 

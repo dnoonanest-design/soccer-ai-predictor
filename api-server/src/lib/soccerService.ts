@@ -28,7 +28,7 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
 
-async function fetchFootball(path: string): Promise<unknown> {
+export async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) {
     logger.warn("API_FOOTBALL_KEY not set");
     return null;
@@ -401,3 +401,4 @@ export async function getDashboardSummary(): Promise<DashboardSummary> {
     last_updated: new Date().toISOString(),
   };
 }
+

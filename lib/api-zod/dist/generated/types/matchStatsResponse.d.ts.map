@@ -1,0 +1,1 @@
+{"version":3,"file":"matchStatsResponse.d.ts","sourceRoot":"","sources":["../../../src/generated/types/matchStatsResponse.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AACH,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,aAAa,CAAC;AAE7C,MAAM,WAAW,kBAAkB;IACjC,IAAI,EAAE,SAAS,CAAC;IAChB,IAAI,EAAE,SAAS,CAAC;IAChB,MAAM,EAAE,MAAM,CAAC;IACf,cAAc,EAAE,OAAO,CAAC;CACzB"}

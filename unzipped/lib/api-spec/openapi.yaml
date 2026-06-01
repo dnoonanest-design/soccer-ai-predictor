@@ -1,0 +1,714 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: Live Soccer Probability Dashboard API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: matches
+    description: Live and upcoming soccer matches
+  - name: leagues
+    description: League information
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /matches:
+    get:
+      operationId: getMatches
+      tags: [matches]
+      summary: Get live and upcoming matches with probabilities
+      description: Returns live and today's upcoming matches enriched with win/draw/loss probabilities
+      parameters:
+        - name: league_id
+          in: query
+          required: false
+          schema:
+            type: ["integer", "null"]
+          description: Filter by league ID
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: ["string", "null"]
+            enum: [live, upcoming, finished, all]
+          description: Filter by match status
+      responses:
+        "200":
+          description: List of matches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Match"
+
+  /matches/{match_id}:
+    get:
+      operationId: getMatch
+      tags: [matches]
+      summary: Get a single match with full details
+      parameters:
+        - name: match_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Match details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Match"
+        "404":
+          description: Match not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /xg:
+    get:
+      operationId: getXg
+      tags: [matches]
+      summary: Bulk xG predictions for all active matches
+      description: Returns Poisson xG predictions for all currently tracked matches in one call
+      responses:
+        "200":
+          description: xG predictions keyed by match ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XGPredictionsResponse"
+
+  /matches/{match_id}/stats:
+    get:
+      operationId: getMatchStats
+      tags: [matches]
+      summary: Get team stats and form for a match
+      description: Returns season averages, last-5 form, and live fixture stats for both teams
+      parameters:
+        - name: match_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Match stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatchStatsResponse"
+        "404":
+          description: Match not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /matches/{match_id}/h2h:
+    get:
+      operationId: getMatchH2H
+      tags: [matches]
+      summary: Get head-to-head history for a match
+      description: Returns last 5 meetings between the two teams with a win/draw/loss summary
+      parameters:
+        - name: match_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Head-to-head history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/H2HResponse"
+        "404":
+          description: Match not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /matches/{match_id}/events:
+    get:
+      operationId: getMatchEvents
+      tags: [matches]
+      summary: Get timeline events for a match
+      description: Returns goals, cards, and substitutions for a match in chronological order
+      parameters:
+        - name: match_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Match events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatchEventsResponse"
+        "404":
+          description: Match not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /leagues:
+    get:
+      operationId: getLeagues
+      tags: [leagues]
+      summary: Get active leagues for today
+      responses:
+        "200":
+          description: List of leagues with match counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/League"
+
+  /backtest:
+    get:
+      operationId: getBacktest
+      tags: [matches]
+      summary: Get halftime backtest analysis
+      description: Analyzes historical completed matches grouped by half-time score to show real outcome distributions
+      parameters:
+        - name: season
+          in: query
+          required: false
+          schema:
+            type: ["integer", "null"]
+          description: Season year to analyze (defaults to last full season)
+        - name: league_ids
+          in: query
+          required: false
+          schema:
+            type: ["string", "null"]
+          description: Comma-separated league IDs to include (defaults to top 6 European leagues)
+      responses:
+        "200":
+          description: Backtest results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BacktestResult"
+
+  /summary:
+    get:
+      operationId: getDashboardSummary
+      tags: [matches]
+      summary: Get dashboard summary stats
+      description: Returns counts of live, upcoming, finished matches and top leagues
+      responses:
+        "200":
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    Team:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        logo:
+          type: ["string", "null"]
+      required:
+        - id
+        - name
+
+    Odds:
+      type: object
+      properties:
+        home_win:
+          type: ["number", "null"]
+          description: Probability 0-100 for home win
+        draw:
+          type: ["number", "null"]
+          description: Probability 0-100 for draw
+        away_win:
+          type: ["number", "null"]
+          description: Probability 0-100 for away win
+        home_odds:
+          type: ["number", "null"]
+          description: Decimal odds for home win
+        draw_odds:
+          type: ["number", "null"]
+          description: Decimal odds for draw
+        away_odds:
+          type: ["number", "null"]
+          description: Decimal odds for away win
+      required: []
+
+    Score:
+      type: object
+      properties:
+        home:
+          type: ["integer", "null"]
+        away:
+          type: ["integer", "null"]
+
+    Match:
+      type: object
+      properties:
+        id:
+          type: integer
+        league_id:
+          type: integer
+        league_name:
+          type: string
+        league_logo:
+          type: ["string", "null"]
+        country:
+          type: string
+        home_team:
+          $ref: "#/components/schemas/Team"
+        away_team:
+          $ref: "#/components/schemas/Team"
+        status:
+          type: string
+          description: "Match status: live, upcoming, finished"
+        status_detail:
+          type: string
+          description: "Detailed status e.g. '45+2', 'HT', 'FT', 'NS'"
+        minute:
+          type: ["integer", "null"]
+          description: Current match minute if live
+        score:
+          $ref: "#/components/schemas/Score"
+        score_ht:
+          allOf:
+            - $ref: "#/components/schemas/Score"
+          nullable: true
+          description: Half-time score (null if not yet reached HT)
+        kickoff:
+          type: string
+          format: date-time
+        odds:
+          $ref: "#/components/schemas/Odds"
+      required:
+        - id
+        - league_id
+        - league_name
+        - country
+        - home_team
+        - away_team
+        - status
+        - status_detail
+        - kickoff
+
+    League:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        logo:
+          type: ["string", "null"]
+        country:
+          type: string
+        match_count:
+          type: integer
+        live_count:
+          type: integer
+      required:
+        - id
+        - name
+        - country
+        - match_count
+        - live_count
+
+    DashboardSummary:
+      type: object
+      properties:
+        live_count:
+          type: integer
+        upcoming_count:
+          type: integer
+        finished_count:
+          type: integer
+        total_matches:
+          type: integer
+        leagues_active:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+      required:
+        - live_count
+        - upcoming_count
+        - finished_count
+        - total_matches
+        - leagues_active
+        - last_updated
+
+    XGPrediction:
+      type: object
+      properties:
+        match_id:
+          type: integer
+        home_xg:
+          type: number
+        away_xg:
+          type: number
+        home_win:
+          type: number
+          description: "0-100"
+        draw:
+          type: number
+          description: "0-100"
+        away_win:
+          type: number
+          description: "0-100"
+      required:
+        - match_id
+        - home_xg
+        - away_xg
+        - home_win
+        - draw
+        - away_win
+
+    XGPredictionsResponse:
+      type: object
+      properties:
+        predictions:
+          type: array
+          items:
+            $ref: "#/components/schemas/XGPrediction"
+      required:
+        - predictions
+
+    TeamStats:
+      type: object
+      properties:
+        team_id:
+          type: integer
+        team:
+          type: string
+        form:
+          type: string
+          description: "Last 5 results e.g. WWDLW (most recent last)"
+        goals_per_game:
+          type: number
+        conceded_per_game:
+          type: number
+        clean_sheets:
+          type: integer
+        matches_played:
+          type: integer
+        wins:
+          type: integer
+        draws:
+          type: integer
+        losses:
+          type: integer
+        possession:
+          type: ["string", "null"]
+          description: "Live fixture possession e.g. '55%'"
+        shots_total:
+          type: ["integer", "null"]
+        shots_on_target:
+          type: ["integer", "null"]
+        corners:
+          type: ["integer", "null"]
+        fouls:
+          type: ["integer", "null"]
+      required:
+        - team_id
+        - team
+        - form
+        - goals_per_game
+        - conceded_per_game
+        - clean_sheets
+        - matches_played
+        - wins
+        - draws
+        - losses
+
+    MatchStatsResponse:
+      type: object
+      properties:
+        home:
+          $ref: "#/components/schemas/TeamStats"
+        away:
+          $ref: "#/components/schemas/TeamStats"
+        season:
+          type: integer
+        has_live_stats:
+          type: boolean
+      required:
+        - home
+        - away
+        - season
+        - has_live_stats
+
+    H2HMatch:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date-time
+        competition:
+          type: string
+        home_team:
+          type: string
+        home_team_id:
+          type: integer
+        away_team:
+          type: string
+        away_team_id:
+          type: integer
+        home_score:
+          type: integer
+        away_score:
+          type: integer
+        result:
+          type: string
+          description: "win | draw | loss from ref_team perspective"
+      required:
+        - date
+        - competition
+        - home_team
+        - home_team_id
+        - away_team
+        - away_team_id
+        - home_score
+        - away_score
+        - result
+
+    H2HSummary:
+      type: object
+      properties:
+        wins:
+          type: integer
+        draws:
+          type: integer
+        losses:
+          type: integer
+        goals_scored:
+          type: integer
+        goals_conceded:
+          type: integer
+      required:
+        - wins
+        - draws
+        - losses
+        - goals_scored
+        - goals_conceded
+
+    H2HResponse:
+      type: object
+      properties:
+        ref_team_id:
+          type: integer
+        ref_team:
+          type: string
+        opponent_team:
+          type: string
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/H2HMatch"
+        summary:
+          $ref: "#/components/schemas/H2HSummary"
+      required:
+        - ref_team_id
+        - ref_team
+        - opponent_team
+        - matches
+        - summary
+
+    MatchEvent:
+      type: object
+      properties:
+        minute:
+          type: integer
+        extra_time:
+          type: ["integer", "null"]
+        team_side:
+          type: string
+          description: "home or away"
+        team_name:
+          type: string
+        player:
+          type: ["string", "null"]
+        assist:
+          type: ["string", "null"]
+        type:
+          type: string
+          description: "goal | yellow_card | red_card | yellow_red_card | substitution | var | other"
+        detail:
+          type: string
+        comments:
+          type: ["string", "null"]
+      required:
+        - minute
+        - team_side
+        - team_name
+        - type
+        - detail
+
+    MatchEventsResponse:
+      type: object
+      properties:
+        match_id:
+          type: integer
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatchEvent"
+      required:
+        - match_id
+        - events
+
+    BacktestLeague:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        country:
+          type: string
+      required:
+        - id
+        - name
+        - country
+
+    BacktestScenario:
+      type: object
+      properties:
+        halftime_score:
+          type: string
+        home_goals_ht:
+          type: integer
+        away_goals_ht:
+          type: integer
+        match_count:
+          type: integer
+        home_win_count:
+          type: integer
+        draw_count:
+          type: integer
+        away_win_count:
+          type: integer
+        home_win_pct:
+          type: number
+        draw_pct:
+          type: number
+        away_win_pct:
+          type: number
+        lead_held:
+          type: ["boolean", "null"]
+      required:
+        - halftime_score
+        - home_goals_ht
+        - away_goals_ht
+        - match_count
+        - home_win_count
+        - draw_count
+        - away_win_count
+        - home_win_pct
+        - draw_pct
+        - away_win_pct
+
+    BacktestSummary:
+      type: object
+      properties:
+        most_common_ht_score:
+          type: string
+        comeback_rate:
+          type: number
+        draw_ht_home_win_pct:
+          type: number
+        draw_ht_draw_pct:
+          type: number
+        draw_ht_away_win_pct:
+          type: number
+        home_leading_ht_win_pct:
+          type: number
+        away_leading_ht_win_pct:
+          type: number
+      required:
+        - most_common_ht_score
+        - comeback_rate
+        - draw_ht_home_win_pct
+        - draw_ht_draw_pct
+        - draw_ht_away_win_pct
+        - home_leading_ht_win_pct
+        - away_leading_ht_win_pct
+
+    BacktestResult:
+      type: object
+      properties:
+        total_matches:
+          type: integer
+        season:
+          type: integer
+        leagues:
+          type: array
+          items:
+            $ref: "#/components/schemas/BacktestLeague"
+        scenarios:
+          type: array
+          items:
+            $ref: "#/components/schemas/BacktestScenario"
+        summary:
+          $ref: "#/components/schemas/BacktestSummary"
+        generated_at:
+          type: string
+          format: date-time
+      required:
+        - total_matches
+        - season
+        - leagues
+        - scenarios
+        - summary
+        - generated_at

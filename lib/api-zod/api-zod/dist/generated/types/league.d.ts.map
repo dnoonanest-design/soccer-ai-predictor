@@ -1,0 +1,1 @@
+{"version":3,"file":"league.d.ts","sourceRoot":"","sources":["../../../src/generated/types/league.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,MAAM,WAAW,MAAM;IACrB,EAAE,EAAE,MAAM,CAAC;IACX,IAAI,EAAE,MAAM,CAAC;IACb,gBAAgB;IAChB,IAAI,CAAC,EAAE,MAAM,GAAG,IAAI,CAAC;IACrB,OAAO,EAAE,MAAM,CAAC;IAChB,WAAW,EAAE,MAAM,CAAC;IACpB,UAAU,EAAE,MAAM,CAAC;CACpB"}

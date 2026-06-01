@@ -1,0 +1,14 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "zLnCkkLCpkyF_r_BrItdw"
+uri = "file://artifacts/soccer-mobile/assets/images/icon.png"
+type = "image"
+title = "soccer app icon"
+
+[[generated]]
+id = "26iOnp9FfvgU3IlFGq3y0"
+uri = "file://artifacts/soccer-mobile/assets/images/kick-logo.png"
+type = "image"
+title = "kick wordmark logo"
