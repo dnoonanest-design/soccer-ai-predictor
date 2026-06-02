@@ -4,8 +4,8 @@ const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const SEASON = parseInt(process.env.FOOTBALL_SEASON ?? "2025", 10);
 
-const TEAM_CACHE_TTL = 10 * 60 * 1000; // 10 min — season averages rarely change
-const LIVE_CACHE_TTL = 12 * 1000;       // 12s — match-page refresh is 15s, so each poll can receive fresh live stats
+const TEAM_CACHE_TTL = 10 * 60 * 1000;
+const LIVE_CACHE_TTL = 12 * 1000;
 
 interface CacheEntry<T> { data: T; fetchedAt: number; }
 const cache = new Map<string, CacheEntry<unknown>>();
@@ -19,9 +19,18 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
 
+// ── FIXED: Added rate limiter ─────────────────────────────────────────────────
+let requestChain = Promise.resolve();
+function waitForRateLimit(): Promise<void> {
+  const slot = requestChain.then(() => new Promise<void>(r => setTimeout(r, 150)));
+  requestChain = slot;
+  return slot;
+}
+
 async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) { logger.warn("API_FOOTBALL_KEY not set"); return null; }
   const url = `${API_FOOTBALL_BASE}${path}`;
+  await waitForRateLimit(); // FIXED: was missing entirely
   const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
   if (!res.ok) { logger.error({ status: res.status, url }, "API-Football failed"); return null; }
   return res.json();
@@ -109,7 +118,6 @@ async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamSta
   const gpg    = parseFloat(r.goals?.for?.average?.total ?? "0") || 0;
   const cpg    = parseFloat(r.goals?.against?.average?.total ?? "0") || 0;
   const cs     = r.clean_sheet?.total ?? 0;
-  // Keep only last 5 chars of form string (most recent last)
   const rawForm = r.form ?? "";
   const form = rawForm.slice(-5);
 
@@ -174,7 +182,9 @@ function toInt(v: string | number | null): number | null {
 }
 
 function hasAnyLiveMetric(stats: Partial<TeamStats>): boolean {
-  return Object.entries(stats).some(([key, value]) => key !== "team" && key !== "team_id" && value !== null && value !== undefined);
+  return Object.entries(stats).some(([key, value]) =>
+    key !== "team" && key !== "team_id" && value !== null && value !== undefined
+  );
 }
 
 async function fetchLiveFixtureStats(
@@ -187,14 +197,15 @@ async function fetchLiveFixtureStats(
   const cached = getCached<LFResult>(key, LIVE_CACHE_TTL);
   if (cached) return cached;
 
-  const data = (await fetchFootball(`/fixtures/statistics?fixture=${fixtureId}`)) as ApiFixtureStatResp | null;
+  const data = (await fetchFootball(
+    `/fixtures/statistics?fixture=${fixtureId}`
+  )) as ApiFixtureStatResp | null;
   if (!data?.response || data.response.length === 0) return null;
 
   const parse = (teamEntry: TeamStatEntry): Partial<TeamStats> => {
     const s = teamEntry.statistics ?? [];
     const possession = pickStat(s, "Ball Possession", "Possession");
     const passPct = pickStat(s, "Passes %", "Passes Percent", "Pass Accuracy", "Passes Accuracy");
-
     return {
       possession: possession == null ? null : String(possession),
       shots_total: toInt(pickStat(s, "Total Shots", "Shots Total")),
@@ -217,8 +228,6 @@ async function fetchLiveFixtureStats(
     };
   };
 
-  // Match entries to home/away by team ID. If the provider ever omits one team,
-  // still return the available side rather than dropping all live stats.
   const homeEntry = data.response.find((e) => e.team.id === homeTeamId);
   const awayEntry = data.response.find((e) => e.team.id === awayTeamId);
   const result: LFResult = {
@@ -231,8 +240,6 @@ async function fetchLiveFixtureStats(
   setCache(key, result);
   return result;
 }
-
-// ─── Poisson xG engine (server-side mirror of frontend lib/xg.ts) ──────────
 
 const MAX_GOALS = 8;
 
@@ -287,9 +294,6 @@ export async function getAllXGPredictions(
     league_id: number;
   }>
 ): Promise<XGPrediction[]> {
-  // Bulk endpoint is cache-only — only return xG for teams whose stats are
-  // already cached (populated by individual detail-page visits). This avoids
-  // firing hundreds of API calls at once and hitting rate limits.
   const statsMap = new Map<string, TeamStats | null>();
   for (const m of matches) {
     const hKey = `teamstats:${m.home_team.id}:${m.league_id}`;
@@ -303,8 +307,10 @@ export async function getAllXGPredictions(
     const home = statsMap.get(`teamstats:${m.home_team.id}:${m.league_id}`);
     const away = statsMap.get(`teamstats:${m.away_team.id}:${m.league_id}`);
     if (!home || !away || home.matches_played === 0 || away.matches_played === 0) continue;
-
-    const xg = computeXG(home.goals_per_game, home.conceded_per_game, away.goals_per_game, away.conceded_per_game);
+    const xg = computeXG(
+      home.goals_per_game, home.conceded_per_game,
+      away.goals_per_game, away.conceded_per_game
+    );
     predictions.push({
       match_id: m.id,
       home_xg: xg.homeXG,
@@ -314,10 +320,10 @@ export async function getAllXGPredictions(
       away_win: xg.awayWin,
     });
   }
-
   return predictions;
 }
 
+// ── FIXED: Sequential fetching instead of Promise.all ────────────────────────
 export async function getMatchStats(
   fixtureId: number,
   homeTeamId: number,
@@ -327,20 +333,25 @@ export async function getMatchStats(
   leagueId: number,
   isLiveOrFinished: boolean
 ): Promise<MatchStatsResult> {
-  // Fetch team stats + live fixture stats in parallel
-  const [homeStats, awayStats, liveStats] = await Promise.all([
-    fetchTeamStats(homeTeamId, leagueId),
-    fetchTeamStats(awayTeamId, leagueId),
-    isLiveOrFinished ? fetchLiveFixtureStats(fixtureId, homeTeamId, awayTeamId) : Promise.resolve(null),
-  ]);
+
+  const homeStats = await fetchTeamStats(homeTeamId, leagueId);
+  const awayStats = await fetchTeamStats(awayTeamId, leagueId);
+  const liveStats = isLiveOrFinished
+    ? await fetchLiveFixtureStats(fixtureId, homeTeamId, awayTeamId)
+    : null;
 
   const empty = (id: number, name: string): TeamStats => ({
-    team_id: id, team: name, form: "", goals_per_game: 0, conceded_per_game: 0,
-    clean_sheets: 0, matches_played: 0, wins: 0, draws: 0, losses: 0,
-    possession: null, shots_total: null, shots_on_target: null, corners: null, fouls: null,
-    offsides: null, yellow_cards: null, red_cards: null, goalkeeper_saves: null,
-    shots_off_target: null, blocked_shots: null, shots_inside_box: null, shots_outside_box: null,
-    total_passes: null, accurate_passes: null, pass_accuracy: null, expected_goals_live: null, dangerous_attacks: null,
+    team_id: id, team: name, form: "",
+    goals_per_game: 0, conceded_per_game: 0,
+    clean_sheets: 0, matches_played: 0,
+    wins: 0, draws: 0, losses: 0,
+    possession: null, shots_total: null, shots_on_target: null,
+    corners: null, fouls: null, offsides: null,
+    yellow_cards: null, red_cards: null, goalkeeper_saves: null,
+    shots_off_target: null, blocked_shots: null,
+    shots_inside_box: null, shots_outside_box: null,
+    total_passes: null, accurate_passes: null, pass_accuracy: null,
+    expected_goals_live: null, dangerous_attacks: null,
   });
 
   const home: TeamStats = {
