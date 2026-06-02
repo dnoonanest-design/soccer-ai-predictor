@@ -1,4 +1,6 @@
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
+
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -17,12 +19,6 @@ const CACHE_TTL = {
   player_stats:   60_000,
 };
 
-// ─── Serial request queue ─────────────────────────────────────────────────────
-let requestChain = Promise.resolve();
-function waitForRateLimit(): Promise<void> {
-  const slot = requestChain.then(() => new Promise<void>(r => setTimeout(r, 150)));
-  requestChain = slot;
-  return slot;
 }
 
 // ─── Cache store ──────────────────────────────────────────────────────────────
