@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -19,12 +20,7 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
 
-// ── FIXED: Added rate limiter ─────────────────────────────────────────────────
-let requestChain = Promise.resolve();
-function waitForRateLimit(): Promise<void> {
-  const slot = requestChain.then(() => new Promise<void>(r => setTimeout(r, 150)));
-  requestChain = slot;
-  return slot;
+
 }
 
 async function fetchFootball(path: string): Promise<unknown> {
