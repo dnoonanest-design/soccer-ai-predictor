@@ -25,6 +25,7 @@ function setCache<T>(key: string, data: T): void {
 async function apiFetch(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) return null;
   const url = `${API_FOOTBALL_BASE}${path}`;
+  await waitForRateLimit();
   try {
     const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
     if (!res.ok) { logger.warn({ status: res.status, url }, "enhanced: api-football failed"); return null; }
