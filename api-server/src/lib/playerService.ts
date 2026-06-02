@@ -4,10 +4,9 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import { fetchFootball } from "./soccerService.js";
 import { logger } from "./logger.js";
 
-// International league IDs from API-Football
 const INTERNATIONAL_LEAGUE_IDS = new Set([
-  4, 5, 6, 7, 8, 9, 10, // World Cup, Nations League, etc
-  152, 153, 154, 155, 156, 157, 158, 159, 160, // Continental competitions
+  4, 5, 6, 7, 8, 9, 10,
+  152, 153, 154, 155, 156, 157, 158, 159, 160,
 ]);
 
 interface ApiPlayerStat {
@@ -26,6 +25,7 @@ interface ApiPlayerStat {
   }>;
 }
 
+// ── FIXED: now returns a Promise so callers can await it properly ─────────────
 export async function collectPlayerStatsForFixture(
   fixtureId: number,
   leagueId: number,
@@ -37,6 +37,15 @@ export async function collectPlayerStatsForFixture(
   awayGoals: number
 ): Promise<void> {
   try {
+    // Check if already collected for this fixture
+    const existing = await db.select().from(playerMatchStats)
+      .where(eq(playerMatchStats.fixtureId, fixtureId))
+      .limit(1);
+    if (existing.length > 0) {
+      logger.info({ fixtureId }, "player stats already collected, skipping");
+      return;
+    }
+
     const isInternational = INTERNATIONAL_LEAGUE_IDS.has(leagueId);
     const data = await fetchFootball(`/fixtures/players?fixture=${fixtureId}`) as any;
     if (!data?.response?.length) return;
@@ -101,7 +110,6 @@ export async function collectPlayerStatsForFixture(
           teamGoalsConceded,
         }).onConflictDoNothing();
 
-        // Update player profile after each match
         await updatePlayerProfile(p.id, p.name, {
           isInternational, teamId, minutesPlayed, rating, goals, assists,
           shots, shotsOnTarget, passAccuracy, keyPasses, successfulTackles,
@@ -134,7 +142,6 @@ async function updatePlayerProfile(
     where: eq(playerProfiles.playerId, playerId)
   });
 
-  // Get last 10 matches for momentum calculation
   const recentMatches = await db.select().from(playerMatchStats)
     .where(eq(playerMatchStats.playerId, playerId))
     .orderBy(desc(playerMatchStats.matchDate))
@@ -144,18 +151,18 @@ async function updatePlayerProfile(
   const last5Goals = last5.reduce((s, m) => s + m.goals, 0);
   const last5Assists = last5.reduce((s, m) => s + (m.assists ?? 0), 0);
   const last5Ratings = last5.filter(m => m.rating).map(m => m.rating as number);
-  const last5AvgRating = last5Ratings.length ? last5Ratings.reduce((a, b) => a + b, 0) / last5Ratings.length : null;
+  const last5AvgRating = last5Ratings.length
+    ? last5Ratings.reduce((a, b) => a + b, 0) / last5Ratings.length
+    : null;
   const last10Goals = recentMatches.reduce((s, m) => s + m.goals, 0);
 
-  // Scoring momentum: weighted recent goals (recent = higher weight)
   let momentumScore = 0;
   for (let i = 0; i < last5.length; i++) {
-    const weight = (5 - i) / 5; // most recent = weight 1.0
+    const weight = (5 - i) / 5;
     momentumScore += last5[i].goals * weight;
     if (last5[i].assists) momentumScore += (last5[i].assists ?? 0) * 0.3 * weight;
   }
 
-  // Consecutive matches scored/without goal
   let consecutiveScored = 0;
   let consecutiveWithout = 0;
   let onStreak = true;
@@ -169,38 +176,37 @@ async function updatePlayerProfile(
     }
   }
 
-  // Goal probability based on momentum + position
   const goalsProbability = Math.min(0.95, Math.max(0.02,
     (momentumScore * 0.4) + (last10Goals / 10 * 0.6)
   ));
 
-  // Form score -1 to 1 based on recent results
   const resultScores = last5.map(m =>
     m.teamResult === "win" ? 1 : m.teamResult === "draw" ? 0 : -1
   );
-  const formScore = resultScores.length ?
-    resultScores.reduce((a, b) => a + b, 0) / resultScores.length : 0;
+  const formScore = resultScores.length
+    ? resultScores.reduce((a, b) => a + b, 0) / resultScores.length
+    : 0;
 
-  // Form trend
   const firstHalf = recentMatches.slice(5).map(m => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
   const secondHalf = last5.map(m => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
   const growthRate = secondHalf - firstHalf;
-  const formTrend = growthRate > 0.3 ? "improving" : growthRate < -0.3 ? "declining" :
-    Math.abs(growthRate) < 0.1 ? "stable" : "erratic";
+  const formTrend = growthRate > 0.3 ? "improving"
+    : growthRate < -0.3 ? "declining"
+    : Math.abs(growthRate) < 0.1 ? "stable"
+    : "erratic";
 
-  // Confidence: based on minutes, recent form, and substitution pattern
-  const avgMins = recentMatches.reduce((s, m) => s + (m.minutesPlayed ?? 0), 0) / Math.max(recentMatches.length, 1);
+  const avgMins = recentMatches.reduce((s, m) => s + (m.minutesPlayed ?? 0), 0)
+    / Math.max(recentMatches.length, 1);
   const confidenceScore = Math.min(1, Math.max(0,
     (avgMins / 90 * 0.4) + ((formScore + 1) / 2 * 0.4) + (momentumScore / 5 * 0.2)
   ));
 
-  // Attitude: penalise cards and early subs
   const totalCards = (existing?.totalYellowCards ?? 0) + match.yellowCards +
     ((existing?.totalRedCards ?? 0) + match.redCards) * 3;
-  const attitudeScore = Math.min(1, Math.max(0, 1 - (totalCards * 0.02) -
-    ((existing?.substitutedEarlyCount ?? 0) * 0.01)));
+  const attitudeScore = Math.min(1, Math.max(0,
+    1 - (totalCards * 0.02) - ((existing?.substitutedEarlyCount ?? 0) * 0.01)
+  ));
 
-  // Team win rate when starting
   const starterMatches = await db.select().from(playerMatchStats)
     .where(and(eq(playerMatchStats.playerId, playerId)))
     .limit(50);
@@ -248,11 +254,8 @@ async function updatePlayerProfile(
     last5MatchesAssists: last5Assists,
     last5MatchesRating: last5AvgRating,
     last10MatchesGoals: last10Goals,
-    formTrend,
-    formScore,
-    growthRate,
-    confidenceScore,
-    attitudeScore,
+    formTrend, formScore, growthRate,
+    confidenceScore, attitudeScore,
     substitutedEarlyCount: (base.substitutedEarlyCount ?? 0) +
       (match.substitutedOff && match.substitutedOff < 60 ? 1 : 0),
     substitutedLateCount: (base.substitutedLateCount ?? 0) +
@@ -267,8 +270,8 @@ async function updatePlayerProfile(
     internationalMatches: (base.internationalMatches ?? 0) + (match.isInternational ? 1 : 0),
     internationalGoals: (base.internationalGoals ?? 0) + (match.isInternational ? match.goals : 0),
     currentClubId: match.isInternational ? undefined : match.teamId,
-      nationalTeamId: match.isInternational ? match.teamId : undefined,
-      updatedAt: new Date(),
+    nationalTeamId: match.isInternational ? match.teamId : undefined,
+    updatedAt: new Date(),
   };
 
   if (existing) {
