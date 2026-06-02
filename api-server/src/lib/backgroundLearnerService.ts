@@ -15,26 +15,31 @@ import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
 type JobStatus = "idle" | "running" | "disabled";
 
 const ENABLED = process.env.BACKGROUND_LEARNER_ENABLED !== "false";
-const LIVE_INTERVAL_MS = Math.max(15000, Number(process.env.BACKGROUND_LIVE_STATS_MS ?? 60000));
-const SETTLE_INTERVAL_MS = Math.max(60000, Number(process.env.BACKGROUND_SETTLE_MS ?? 10 * 60 * 1000));
-const TRAIN_INTERVAL_MS = Math.max(10 * 60 * 1000, Number(process.env.BACKGROUND_TRAIN_MS ?? 6 * 60 * 60 * 1000));
-const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(24 * 60 * 60 * 1000, Number(process.env.BACKGROUND_BIWEEKLY_UPDATE_MS ?? 14 * 24 * 60 * 60 * 1000));
-const MAX_LIVE_MATCHES = Math.max(1, Number(process.env.BACKGROUND_MAX_LIVE_MATCHES ?? 12));
+
+// ── FIXED: Increased intervals to reduce API call volume ─────────────────────
+const LIVE_INTERVAL_MS    = Math.max(60_000,           Number(process.env.BACKGROUND_LIVE_STATS_MS     ?? 60_000));
+const SETTLE_INTERVAL_MS  = Math.max(10 * 60_000,      Number(process.env.BACKGROUND_SETTLE_MS         ?? 10 * 60_000));
+const TRAIN_INTERVAL_MS   = Math.max(6 * 60 * 60_000,  Number(process.env.BACKGROUND_TRAIN_MS          ?? 6 * 60 * 60_000));
+const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(14 * 24 * 60 * 60_000, Number(process.env.BACKGROUND_BIWEEKLY_UPDATE_MS ?? 14 * 24 * 60 * 60_000));
+const MAX_LIVE_MATCHES    = Math.max(1,  Number(process.env.BACKGROUND_MAX_LIVE_MATCHES  ?? 12));
 const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(25, Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? 60));
 
+// ── FIXED: Track which fixtures have already been processed ──────────────────
+const processedFinishedFixtures = new Set<number>();
+
 let started = false;
-let liveStatus: JobStatus = ENABLED ? "idle" : "disabled";
-let settleStatus: JobStatus = ENABLED ? "idle" : "disabled";
-let trainStatus: JobStatus = ENABLED ? "idle" : "disabled";
-let liveTimer: NodeJS.Timeout | null = null;
-let settleTimer: NodeJS.Timeout | null = null;
-let trainTimer: NodeJS.Timeout | null = null;
-let biweeklyTimer: NodeJS.Timeout | null = null;
-let lastLiveRun: Date | null = null;
-let lastSettleRun: Date | null = null;
-let lastTrainRun: Date | null = null;
-let lastBiweeklyUpdateRun: Date | null = null;
+let liveStatus:     JobStatus = ENABLED ? "idle" : "disabled";
+let settleStatus:   JobStatus = ENABLED ? "idle" : "disabled";
+let trainStatus:    JobStatus = ENABLED ? "idle" : "disabled";
 let biweeklyStatus: JobStatus = ENABLED ? "idle" : "disabled";
+let liveTimer:     NodeJS.Timeout | null = null;
+let settleTimer:   NodeJS.Timeout | null = null;
+let trainTimer:    NodeJS.Timeout | null = null;
+let biweeklyTimer: NodeJS.Timeout | null = null;
+let lastLiveRun:          Date | null = null;
+let lastSettleRun:        Date | null = null;
+let lastTrainRun:         Date | null = null;
+let lastBiweeklyUpdateRun: Date | null = null;
 
 function num(v: unknown): number | null {
   if (v == null) return null;
@@ -74,13 +79,16 @@ function buildValueEdges(match: Match, home: number, draw: number, away: number)
   };
 }
 
-async function recordJob(jobName: string, status: "success" | "error", checkedCount: number, changedCount: number, errorMessage?: string) {
+async function recordJob(
+  jobName: string,
+  status: "success" | "error",
+  checkedCount: number,
+  changedCount: number,
+  errorMessage?: string
+) {
   try {
     await db.insert(backgroundJobRuns).values({
-      jobName,
-      status,
-      checkedCount,
-      changedCount,
+      jobName, status, checkedCount, changedCount,
       errorMessage: errorMessage ?? null,
       finishedAt: new Date(),
     });
@@ -155,7 +163,9 @@ async function computeAndStoreMatch(match: Match) {
 
   const factors = await getCalibrationFactors();
   const normalized = normalizeThreeWayPercent(raw.home_win, raw.draw, raw.away_win);
-  const circumstances = await collectMatchCircumstances(match, stats.home.form, stats.away.form).catch((err) => {
+  const circumstances = await collectMatchCircumstances(
+    match, stats.home.form, stats.away.form
+  ).catch((err) => {
     logger.warn({ err, fixtureId: match.id }, "circumstance collection failed");
     return null;
   });
@@ -180,7 +190,12 @@ async function computeAndStoreMatch(match: Match) {
     nextGoalHome: liveMomentum?.next_goal_home ?? null,
     nextGoalAway: liveMomentum?.next_goal_away ?? null,
     confidence: raw.confidence_score ?? null,
-    reasons: [...(raw.reasons ?? []), ...(adjusted.adjustment ? [`Circumstance learning adjusted home probability by ${adjusted.adjustment.homeBoost.toFixed(1)} pts`] : [])],
+    reasons: [
+      ...(raw.reasons ?? []),
+      ...(adjusted.adjustment
+        ? [`Circumstance learning adjusted home probability by ${adjusted.adjustment.homeBoost.toFixed(1)} pts`]
+        : []),
+    ],
     valueEdges,
   });
 
@@ -211,21 +226,7 @@ async function computeAndStoreMatch(match: Match) {
   }
 
   void factors;
-  void circumstances; // keeps circumstance collection explicit without changing response shape
-
-  // Collect player stats for this fixture
-  const homeResult = match.score?.home > match.score?.away ? "win" : match.score?.home < match.score?.away ? "loss" : "draw";
-  collectPlayerStatsForFixture(
-    match.id,
-    match.league?.id ?? 0,
-    new Date(match.date ?? Date.now()),
-    match.home_team?.id ?? 0,
-    match.away_team?.id ?? 0,
-    homeResult as "win" | "draw" | "loss",
-    match.score?.home ?? 0,
-    match.score?.away ?? 0
-  ).catch((err) => logger.warn({ err, fixtureId: match.id }, "player stats collection failed"));
-
+  void circumstances;
   return true;
 }
 
@@ -238,6 +239,7 @@ export async function runLiveDeepStatCollection() {
   let stored = 0;
   try {
     const liveMatches = (await getAllMatches(null, "live")).slice(0, MAX_LIVE_MATCHES);
+
     for (const match of liveMatches) {
       checked++;
       try {
@@ -246,6 +248,7 @@ export async function runLiveDeepStatCollection() {
         logger.warn({ err, fixtureId: match.id }, "background learner: live match failed");
       }
     }
+
     lastLiveRun = new Date();
     await recordJob("live_deep_stats", "success", checked, stored);
     return { checked, stored, startedAt, finishedAt: new Date() };
@@ -265,17 +268,42 @@ export async function runFinishedSettlement() {
   let settled = 0;
   try {
     const matches = await getAllMatches(null, null);
+
     for (const match of matches) {
       if (match.status !== "finished") continue;
+
+      // ── FIXED: Skip fixtures already processed this session ───────────────
+      if (processedFinishedFixtures.has(match.id)) continue;
+
       checked++;
       const home = match.score?.home;
       const away = match.score?.away;
       if (home == null || away == null) continue;
-      await saveOutcome({ fixtureId: match.id, scoreHome: home, scoreAway: away });
-      try { await computeAndStoreMatch(match); } catch {}
-      settled++;
 
-      const openBets = await db.select().from(betTracker).where(sql`${betTracker.fixtureId} = ${match.id} AND ${betTracker.status} = 'open'`);
+      await saveOutcome({ fixtureId: match.id, scoreHome: home, scoreAway: away });
+
+      try { await computeAndStoreMatch(match); } catch {}
+
+      // ── FIXED: Collect player stats sequentially, not fire-and-forget ─────
+      try {
+        const homeResult = home > away ? "win" : home < away ? "loss" : "draw";
+        await collectPlayerStatsForFixture(
+          match.id,
+          match.league_id ?? 0,
+          new Date(match.kickoff ?? Date.now()),
+          match.home_team?.id ?? 0,
+          match.away_team?.id ?? 0,
+          homeResult as "win" | "draw" | "loss",
+          home,
+          away
+        );
+      } catch (err) {
+        logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
+      }
+
+      // Settle open bets
+      const openBets = await db.select().from(betTracker)
+        .where(sql`${betTracker.fixtureId} = ${match.id} AND ${betTracker.status} = 'open'`);
       for (const bet of openBets) {
         const outcome = home > away ? "home" : away > home ? "away" : "draw";
         const selection = String(bet.selection).toLowerCase();
@@ -289,7 +317,12 @@ export async function runFinishedSettlement() {
         }
         await settleTrackedBet(bet.id, won ? "won" : "lost");
       }
+
+      // ── FIXED: Mark as processed so we never re-fetch this fixture ────────
+      processedFinishedFixtures.add(match.id);
+      settled++;
     }
+
     lastSettleRun = new Date();
     await recordJob("settle_finished", "success", checked, settled);
     return { checked, settled, finishedAt: new Date() };
@@ -313,15 +346,22 @@ export async function runAutomaticRecalibration() {
     const report = await getCalibrationReport();
     const sampleSize = Number(factors.sampleSize ?? 0);
     lastTrainRun = new Date();
+
     if (sampleSize < MIN_AUTO_CALIBRATION_SAMPLE) {
-      await recordJob("auto_recalibration", "success", Number(training.trainingRows ?? 0), Number(influence.stored ?? 0));
+      await recordJob("auto_recalibration", "success",
+        Number(training.trainingRows ?? 0), Number(influence.stored ?? 0));
       return {
         skipped: true,
-        reason: `Only ${sampleSize} settled samples available; ${MIN_AUTO_CALIBRATION_SAMPLE} required before activating new calibration.`,
-        training, influence, aiAwareness, calibration: { sampleSize, report }, finishedAt: new Date(),
+        reason: `Only ${sampleSize} settled samples; ${MIN_AUTO_CALIBRATION_SAMPLE} required.`,
+        training, influence, aiAwareness,
+        calibration: { sampleSize, report },
+        finishedAt: new Date(),
       };
     }
-    await db.update(calibrationParameters).set({ active: false }).where(eq(calibrationParameters.active, true));
+
+    await db.update(calibrationParameters)
+      .set({ active: false })
+      .where(eq(calibrationParameters.active, true));
     await db.insert(calibrationParameters).values({
       modelVersion: "auto-calibrated-background-v1",
       sampleSize,
@@ -329,7 +369,9 @@ export async function runAutomaticRecalibration() {
       metricsJson: report as any,
       active: true,
     });
-    await recordJob("auto_recalibration", "success", Number(training.trainingRows ?? 0), 1 + Number(influence.stored ?? 0));
+
+    await recordJob("auto_recalibration", "success",
+      Number(training.trainingRows ?? 0), 1 + Number(influence.stored ?? 0));
     return { training, influence, aiAwareness, calibration: { sampleSize, report }, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("auto_recalibration", "error", 0, 0, String(err?.message ?? err));
@@ -346,7 +388,9 @@ export async function runBiweeklyAiUpdate(force = false) {
   try {
     const result = await generateBiweeklyAiUpdate({ force });
     lastBiweeklyUpdateRun = new Date();
-    await recordJob("biweekly_ai_update", "success", Number((result as any)?.payload?.aiCycle?.recalibration?.sampleSize ?? 0), (result as any)?.skipped ? 0 : 1);
+    await recordJob("biweekly_ai_update", "success",
+      Number((result as any)?.payload?.aiCycle?.recalibration?.sampleSize ?? 0),
+      (result as any)?.skipped ? 0 : 1);
     return { ...result, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("biweekly_ai_update", "error", 0, 0, String(err?.message ?? err));
@@ -359,41 +403,55 @@ export async function runBiweeklyAiUpdate(force = false) {
 export function startBackgroundLearner() {
   if (started || !ENABLED) return;
   started = true;
-  liveTimer = setInterval(() => { runLiveDeepStatCollection().catch((err) => logger.warn({ err }, "live background learner failed")); }, LIVE_INTERVAL_MS);
-  settleTimer = setInterval(() => { runFinishedSettlement().catch((err) => logger.warn({ err }, "settlement background learner failed")); }, SETTLE_INTERVAL_MS);
-  trainTimer = setInterval(() => { runAutomaticRecalibration().catch((err) => logger.warn({ err }, "recalibration background learner failed")); }, TRAIN_INTERVAL_MS);
-  biweeklyTimer = setInterval(() => { runBiweeklyAiUpdate(false).catch((err) => logger.warn({ err }, "biweekly AI update failed")); }, BIWEEKLY_UPDATE_INTERVAL_MS);
 
-  // Delayed first pass keeps boot fast and avoids crashing startup if APIs/db are warming up.
-  setTimeout(() => { runFinishedSettlement().catch(() => {}); }, 20_000);
-  setTimeout(() => { runLiveDeepStatCollection().catch(() => {}); }, 30_000);
-  setTimeout(() => { runAutomaticRecalibration().catch(() => {}); }, 90_000);
-  setTimeout(() => { runBiweeklyAiUpdate(false).catch(() => {}); }, 120_000);
-  logger.info({ LIVE_INTERVAL_MS, SETTLE_INTERVAL_MS, TRAIN_INTERVAL_MS, BIWEEKLY_UPDATE_INTERVAL_MS }, "background prediction learner started");
+  liveTimer     = setInterval(() => runLiveDeepStatCollection().catch(err => logger.warn({ err }, "live background learner failed")), LIVE_INTERVAL_MS);
+  settleTimer   = setInterval(() => runFinishedSettlement().catch(err => logger.warn({ err }, "settlement background learner failed")), SETTLE_INTERVAL_MS);
+  trainTimer    = setInterval(() => runAutomaticRecalibration().catch(err => logger.warn({ err }, "recalibration background learner failed")), TRAIN_INTERVAL_MS);
+  biweeklyTimer = setInterval(() => runBiweeklyAiUpdate(false).catch(err => logger.warn({ err }, "biweekly AI update failed")), BIWEEKLY_UPDATE_INTERVAL_MS);
+
+  // ── FIXED: Staggered startup delays — no more 4 jobs firing at once ───────
+  setTimeout(() => runFinishedSettlement().catch(() => {}),      60_000);   // 1 min
+  setTimeout(() => runLiveDeepStatCollection().catch(() => {}),  90_000);   // 1.5 min
+  setTimeout(() => runAutomaticRecalibration().catch(() => {}),  5 * 60_000); // 5 min
+  setTimeout(() => runBiweeklyAiUpdate(false).catch(() => {}),  10 * 60_000); // 10 min
+
+  logger.info(
+    { LIVE_INTERVAL_MS, SETTLE_INTERVAL_MS, TRAIN_INTERVAL_MS, BIWEEKLY_UPDATE_INTERVAL_MS },
+    "background prediction learner started"
+  );
 }
 
 export function stopBackgroundLearner() {
-  if (liveTimer) clearInterval(liveTimer);
-  if (settleTimer) clearInterval(settleTimer);
-  if (trainTimer) clearInterval(trainTimer);
+  if (liveTimer)     clearInterval(liveTimer);
+  if (settleTimer)   clearInterval(settleTimer);
+  if (trainTimer)    clearInterval(trainTimer);
   if (biweeklyTimer) clearInterval(biweeklyTimer);
   started = false;
 }
 
 export async function getBackgroundLearnerStatus() {
-  const recentRuns = await db.select().from(backgroundJobRuns).orderBy(desc(backgroundJobRuns.startedAt)).limit(20);
-  const circumstanceLearning = await getCircumstanceLearningReport().catch(() => ({ recentInsights: [], recentCircumstances: [] }));
-  const aiAwareness = await getAiAwarenessReport().catch(() => ({ activeModel: null, recentAudits: [], openImprovements: [] }));
-  const aiMemoryUpdates = await getAiMemoryUpdateReport().catch(() => ({ recentBiweeklyUpdates: [], recentLearningMemory: [] }));
+  const recentRuns = await db.select().from(backgroundJobRuns)
+    .orderBy(desc(backgroundJobRuns.startedAt)).limit(20);
+  const circumstanceLearning = await getCircumstanceLearningReport()
+    .catch(() => ({ recentInsights: [], recentCircumstances: [] }));
+  const aiAwareness = await getAiAwarenessReport()
+    .catch(() => ({ activeModel: null, recentAudits: [], openImprovements: [] }));
+  const aiMemoryUpdates = await getAiMemoryUpdateReport()
+    .catch(() => ({ recentBiweeklyUpdates: [], recentLearningMemory: [] }));
   return {
     enabled: ENABLED,
     started,
-    intervals: { liveMs: LIVE_INTERVAL_MS, settleMs: SETTLE_INTERVAL_MS, trainMs: TRAIN_INTERVAL_MS, biweeklyUpdateMs: BIWEEKLY_UPDATE_INTERVAL_MS },
+    intervals: {
+      liveMs: LIVE_INTERVAL_MS,
+      settleMs: SETTLE_INTERVAL_MS,
+      trainMs: TRAIN_INTERVAL_MS,
+      biweeklyUpdateMs: BIWEEKLY_UPDATE_INTERVAL_MS,
+    },
     jobs: {
-      liveDeepStats: { status: liveStatus, lastRun: lastLiveRun },
-      settlement: { status: settleStatus, lastRun: lastSettleRun },
-      recalibration: { status: trainStatus, lastRun: lastTrainRun },
-      biweeklyAiUpdate: { status: biweeklyStatus, lastRun: lastBiweeklyUpdateRun },
+      liveDeepStats:   { status: liveStatus,     lastRun: lastLiveRun },
+      settlement:      { status: settleStatus,   lastRun: lastSettleRun },
+      recalibration:   { status: trainStatus,    lastRun: lastTrainRun },
+      biweeklyAiUpdate:{ status: biweeklyStatus, lastRun: lastBiweeklyUpdateRun },
     },
     recentRuns,
     circumstanceLearning,
