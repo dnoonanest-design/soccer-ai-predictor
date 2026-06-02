@@ -1,3 +1,4 @@
+import { waitForRateLimit } from "./rateLimiter";
 import { logger } from "./logger";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
