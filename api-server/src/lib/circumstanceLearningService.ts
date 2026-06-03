@@ -146,12 +146,10 @@ async function savePlayerFactors(match: Match, lineups: ApiLineup[], injuries: A
 }
 
 export async function collectMatchCircumstances(match: Match, homeForm?: string | null, awayForm?: string | null) {
-  const [lineups, injuries, playerStats, events] = await Promise.all([
-    fetchFootball<ApiLineup[]>(`/fixtures/lineups?fixture=${match.id}`, []),
-    fetchFootball<ApiInjury[]>(`/injuries?fixture=${match.id}`, []),
-    fetchFootball<ApiPlayerStats[]>(`/fixtures/players?fixture=${match.id}`, []),
-    getMatchEvents(match.id, match.home_team.id).catch(() => [] as MatchEvent[]),
-  ]);
+  const lineups = await fetchFootball<ApiLineup[]>(`/fixtures/lineups?fixture=${match.id}`, []);
+  const injuries = await fetchFootball<ApiInjury[]>(`/injuries?fixture=${match.id}`, []);
+  const playerStats = await fetchFootball<ApiPlayerStats[]>(`/fixtures/players?fixture=${match.id}`, []);
+  const events = await getMatchEvents(match.id, match.home_team.id).catch(() => [] as MatchEvent[]);
 
   const homeLineup = teamLineup(lineups, match.home_team.id, match.home_team.name);
   const awayLineup = teamLineup(lineups, match.away_team.id, match.away_team.name);
