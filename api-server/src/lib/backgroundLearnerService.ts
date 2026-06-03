@@ -288,20 +288,21 @@ export async function runFinishedSettlement() {
       try { await computeAndStoreMatch(match); } catch {}
 
       try {
-        const homeResult = home > away ? "win" : home < away ? "loss" : "draw";
-        await collectPlayerStatsForFixture(
-          match.id,
-          match.league_id ?? 0,
-          new Date(match.kickoff ?? Date.now()),
-          match.home_team?.id ?? 0,
-          match.away_team?.id ?? 0,
-          homeResult as "win" | "draw" | "loss",
-          home,
-          away
-        );
-      } catch (err) {
-        logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
-      }
+              await collectPlayerStatsForFixture(
+        match.id,
+        match.league_id ?? 0,
+        new Date(match.kickoff ?? Date.now()),
+        match.home_team?.id ?? 0,
+        match.away_team?.id ?? 0,
+        homeResult as "win" | "draw" | "loss",
+        home,
+        away
+      );
+      // Throttle between fixtures to avoid rate limit bursts
+      await new Promise(r => setTimeout(r, 2000));
+    } catch (err) {
+      logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
+    }
 
       const openBets = await db.select().from(betTracker)
         .where(sql`${betTracker.fixtureId} = ${match.id} AND ${betTracker.status} = 'open'`);
