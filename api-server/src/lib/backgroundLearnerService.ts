@@ -11,12 +11,12 @@ import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningServ
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
 import { collectPlayerStatsForFixture } from "./playerService.js";
 import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
+import { isTrackedLeague } from "./leagueConfig";
 
 type JobStatus = "idle" | "running" | "disabled";
 
 const ENABLED = process.env.BACKGROUND_LEARNER_ENABLED !== "false";
 
-// ── FIXED: Increased intervals to reduce API call volume ─────────────────────
 const LIVE_INTERVAL_MS    = Math.max(60_000,           Number(process.env.BACKGROUND_LIVE_STATS_MS     ?? 60_000));
 const SETTLE_INTERVAL_MS  = Math.max(10 * 60_000,      Number(process.env.BACKGROUND_SETTLE_MS         ?? 10 * 60_000));
 const TRAIN_INTERVAL_MS   = Math.max(6 * 60 * 60_000,  Number(process.env.BACKGROUND_TRAIN_MS          ?? 6 * 60 * 60_000));
@@ -24,7 +24,6 @@ const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(14 * 24 * 60 * 60_000, Number(proce
 const MAX_LIVE_MATCHES    = Math.max(1,  Number(process.env.BACKGROUND_MAX_LIVE_MATCHES  ?? 12));
 const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(25, Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? 60));
 
-// ── FIXED: Track which fixtures have already been processed ──────────────────
 const processedFinishedFixtures = new Set<number>();
 
 let started = false;
@@ -238,7 +237,10 @@ export async function runLiveDeepStatCollection() {
   let checked = 0;
   let stored = 0;
   try {
-    const liveMatches = (await getAllMatches(null, "live")).slice(0, MAX_LIVE_MATCHES);
+    // ── FIXED: Only process tracked leagues ──────────────────────────────────
+    const liveMatches = (await getAllMatches(null, "live"))
+      .filter(m => isTrackedLeague(m.league_id))
+      .slice(0, MAX_LIVE_MATCHES);
 
     for (const match of liveMatches) {
       checked++;
@@ -271,9 +273,10 @@ export async function runFinishedSettlement() {
 
     for (const match of matches) {
       if (match.status !== "finished") continue;
-
-      // ── FIXED: Skip fixtures already processed this session ───────────────
       if (processedFinishedFixtures.has(match.id)) continue;
+
+      // ── FIXED: Only process tracked leagues ────────────────────────────────
+      if (!isTrackedLeague(match.league_id)) continue;
 
       checked++;
       const home = match.score?.home;
@@ -284,7 +287,6 @@ export async function runFinishedSettlement() {
 
       try { await computeAndStoreMatch(match); } catch {}
 
-      // ── FIXED: Collect player stats sequentially, not fire-and-forget ─────
       try {
         const homeResult = home > away ? "win" : home < away ? "loss" : "draw";
         await collectPlayerStatsForFixture(
@@ -301,7 +303,6 @@ export async function runFinishedSettlement() {
         logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
       }
 
-      // Settle open bets
       const openBets = await db.select().from(betTracker)
         .where(sql`${betTracker.fixtureId} = ${match.id} AND ${betTracker.status} = 'open'`);
       for (const bet of openBets) {
@@ -318,7 +319,6 @@ export async function runFinishedSettlement() {
         await settleTrackedBet(bet.id, won ? "won" : "lost");
       }
 
-      // ── FIXED: Mark as processed so we never re-fetch this fixture ────────
       processedFinishedFixtures.add(match.id);
       settled++;
     }
@@ -409,11 +409,10 @@ export function startBackgroundLearner() {
   trainTimer    = setInterval(() => runAutomaticRecalibration().catch(err => logger.warn({ err }, "recalibration background learner failed")), TRAIN_INTERVAL_MS);
   biweeklyTimer = setInterval(() => runBiweeklyAiUpdate(false).catch(err => logger.warn({ err }, "biweekly AI update failed")), BIWEEKLY_UPDATE_INTERVAL_MS);
 
-  // ── FIXED: Staggered startup delays — no more 4 jobs firing at once ───────
-  setTimeout(() => runFinishedSettlement().catch(() => {}),      60_000);   // 1 min
-  setTimeout(() => runLiveDeepStatCollection().catch(() => {}),  90_000);   // 1.5 min
-  setTimeout(() => runAutomaticRecalibration().catch(() => {}),  5 * 60_000); // 5 min
-  setTimeout(() => runBiweeklyAiUpdate(false).catch(() => {}),  10 * 60_000); // 10 min
+  setTimeout(() => runFinishedSettlement().catch(() => {}),        60_000);
+  setTimeout(() => runLiveDeepStatCollection().catch(() => {}),    90_000);
+  setTimeout(() => runAutomaticRecalibration().catch(() => {}),  5 * 60_000);
+  setTimeout(() => runBiweeklyAiUpdate(false).catch(() => {}),  10 * 60_000);
 
   logger.info(
     { LIVE_INTERVAL_MS, SETTLE_INTERVAL_MS, TRAIN_INTERVAL_MS, BIWEEKLY_UPDATE_INTERVAL_MS },
