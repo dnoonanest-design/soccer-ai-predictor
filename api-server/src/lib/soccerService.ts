@@ -1,6 +1,6 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
-
+import { isTrackedLeague } from "./leagueConfig";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -239,7 +239,8 @@ async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
   const data = (await fetchFootball(
     `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`
   )) as ApiFootballFixture[] | null;
-  const fixtures = data ?? [];
+  // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
+  const fixtures = (data ?? []).filter(f => isTrackedLeague(f.league.id));
   setCache("today_fixtures", fixtures);
   return fixtures;
 }
