@@ -25,6 +25,7 @@ async function fetchFootball<T>(path: string, fallback: T): Promise<T> {
   if (cached) return cached;
   if (!API_FOOTBALL_KEY) return fallback;
   try {
+    await waitForRateLimit();
     const res = await fetch(`${API_FOOTBALL_BASE}${path}`, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
     if (!res.ok) {
       logger.warn({ status: res.status, path }, "circumstance API-Football request failed");
