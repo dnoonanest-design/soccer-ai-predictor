@@ -19,7 +19,7 @@ const CACHE_TTL = {
   player_stats:   60_000,
 };
 
-}
+
 
 // ─── Cache store ──────────────────────────────────────────────────────────────
 type CacheEntry<T> = { data: T; fetchedAt: number };
@@ -249,7 +249,8 @@ async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
   const cached = getCached<ApiFootballFixture[]>("live_fixtures", CACHE_TTL.live_fixtures);
   if (cached) return cached;
   const data = (await fetchFootball("/fixtures?live=all")) as ApiFootballFixture[] | null;
-  const fixtures = data ?? [];
+  // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
+  const fixtures = (data ?? []).filter(f => isTrackedLeague(f.league.id));
   _liveMatchCount = fixtures.length;
   setCache("live_fixtures", fixtures);
   return fixtures;
