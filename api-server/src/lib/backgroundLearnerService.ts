@@ -242,10 +242,12 @@ export async function runLiveDeepStatCollection() {
       .filter(m => isTrackedLeague(m.league_id))
       .slice(0, MAX_LIVE_MATCHES);
 
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
     for (const match of liveMatches) {
       checked++;
       try {
         if (await computeAndStoreMatch(match)) stored++;
+      await sleep(600);
       } catch (err) {
         logger.warn({ err, fixtureId: match.id }, "background learner: live match failed");
       }
