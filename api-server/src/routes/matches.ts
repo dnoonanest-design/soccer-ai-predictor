@@ -11,10 +11,8 @@ const ALLOWED_LEAGUE_IDS = new Set([
   135,136,137,547,
   61,62,66,526,
   88,89,90,94,95,96,
-  144,145,147,
-  179,180,182,
-  203,204,205,
-  235,236,333,
+  144,145,147,179,180,182,
+  203,204,205,235,236,333,
   197,199,218,221,207,209,
   119,123,113,116,103,107,
   345,346,210,212,395,
@@ -26,6 +24,19 @@ const ALLOWED_LEAGUE_IDS = new Set([
   188,190,288,233,323,26,27,
 ]);
 
+const BLOCKED_NAME_KEYWORDS = [
+  "reserve","reserva"," res ","res.","u20","u19","u18","u17","u16","u15",
+  "u23","u21","youth","amateur","intermedia","regional","segunda b",
+  "tercera","sub-20","sub-19","sub-18","sub-17","sub-23","sub-21",
+  "division b","women","club friendly","4th","fifth","lower",
+];
+
+function isBlockedLeague(leagueName) {
+  if (!leagueName) return false;
+  const lower = leagueName.toLowerCase();
+  return BLOCKED_NAME_KEYWORDS.some(kw => lower.includes(kw));
+}
+
 const router: IRouter = Router();
 
 router.get("/matches", async (req, res) => {
@@ -33,7 +44,9 @@ router.get("/matches", async (req, res) => {
     const leagueId = req.query.league_id ? parseInt(req.query.league_id as string, 10) : null;
     const status = (req.query.status as string) || null;
     const matches = await getAllMatches(leagueId, status);
-    const filtered = matches.filter((m: any) => ALLOWED_LEAGUE_IDS.has(Number(m.league_id)));
+    const filtered = matches
+      .filter((m: any) => ALLOWED_LEAGUE_IDS.has(Number(m.league_id)))
+      .filter((m: any) => !isBlockedLeague(m.league_name));
     res.json(filtered);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch matches" });
@@ -43,7 +56,9 @@ router.get("/matches", async (req, res) => {
 router.get("/fixtures/upcoming", async (req, res) => {
   try {
     const matches = await getAllMatches(null, "upcoming");
-    const filtered = matches.filter((m: any) => ALLOWED_LEAGUE_IDS.has(Number(m.league_id)));
+    const filtered = matches
+      .filter((m: any) => ALLOWED_LEAGUE_IDS.has(Number(m.league_id)))
+      .filter((m: any) => !isBlockedLeague(m.league_name));
     res.json(filtered);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch upcoming fixtures" });
