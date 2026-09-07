@@ -1,5 +1,5 @@
 import { db, backgroundJobRuns, marketOddsSnapshots } from "@workspace/db";
-import { inArray, sql } from "drizzle-orm";
+import { inArray, sql, eq, and, gte } from "drizzle-orm";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
 import { logger } from "./logger";
 import {
@@ -93,6 +93,7 @@ let cachedFixtures: FutureFixture[] = [];
 let fixtureCacheFetchedAt = 0;
 let budgetDate = utcDateKey(new Date());
 let oddsCallsToday = 0;
+let budgetInitialized = false;
 
 export function startFutureMarketSampler() {
   if (started || !ENABLED) return;
@@ -171,10 +172,10 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   let sportKeysDue = 0;
   let oddsCalls = 0;
   let observations = 0;
-  const capturedFixtureIds = new Set<number>();
+  let capturedFixtureCount = 0;
 
   try {
-    refreshDailyBudget();
+    await refreshDailyBudget();
 
     const fixtures = await getFutureFixtures(startedAt);
     fixturesInWindow = fixtures.length;
@@ -253,11 +254,8 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       const matches = group.fixtures.map(toMatch);
       const result = await captureMarketSnapshots(matches, events);
       observations += Number(result.observations ?? 0);
-      for (const fixture of group.fixtures) {
-        if (Number(result.observations ?? 0) > 0) {
-          capturedFixtureIds.add(fixture.fixture.id);
-        }
-      }
+      // FIX #2: Use result.fixtures directly—only counts fixtures with actual persisted snapshots
+      capturedFixtureCount += Number(result.fixtures ?? 0);
     }
 
     return await finishRun({
@@ -267,7 +265,7 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       sportKeysDue,
       oddsCalls,
       observations,
-      fixturesCaptured: capturedFixtureIds.size,
+      fixturesCaptured: capturedFixtureCount,
       budgetExhausted:
         oddsCallsToday >= MAX_ODDS_CALLS_PER_DAY ||
         (groups.length > 0 && callsAllowed === 0),
@@ -279,6 +277,7 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       "error",
       fixturesInWindow,
       observations,
+      0,
       lastError,
     );
     throw err;
@@ -297,15 +296,21 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
 
   const end = new Date(now.getTime() + WINDOW_HOURS * 3_600_000);
   const path = `/fixtures?from=${dateOnly(now)}&to=${dateOnly(end)}&season=${encodeURIComponent(SEASON)}&timezone=UTC`;
-  const data = (await fetchFootball(path)) as FutureFixture[] | null;
+  
+  try {
+    const data = (await fetchFootball(path)) as FutureFixture[] | null;
 
-  cachedFixtures = Array.isArray(data)
-    ? data
-        .filter((fixture) => isTrackedLeague(Number(fixture.league?.id)))
-        .filter((fixture) => isFutureStatus(fixture.fixture?.status?.short))
-        .slice(0, MAX_FIXTURES)
-    : [];
-  fixtureCacheFetchedAt = Date.now();
+    cachedFixtures = Array.isArray(data)
+      ? data
+          .filter((fixture) => isTrackedLeague(Number(fixture.league?.id)))
+          .filter((fixture) => isFutureStatus(fixture.fixture?.status?.short))
+          .slice(0, MAX_FIXTURES)
+      : [];
+    fixtureCacheFetchedAt = Date.now();
+  } catch (err) {
+    logger.warn({ err }, "future market sampler: fixture fetch failed");
+    cachedFixtures = [];
+  }
 
   return filterFixtureWindow(cachedFixtures, now);
 }
@@ -329,22 +334,27 @@ async function getLatestObservationTimes(fixtureIds: number[]) {
   const result = new Map<number, Date>();
   if (!fixtureIds.length) return result;
 
-  const rows = await db
-    .select({
-      fixtureId: marketOddsSnapshots.fixtureId,
-      latestObservedAt: sql<Date | null>`max(${marketOddsSnapshots.observedAt})`.as(
-        "latest_observed_at",
-      ),
-    })
-    .from(marketOddsSnapshots)
-    .where(inArray(marketOddsSnapshots.fixtureId, fixtureIds))
-    .groupBy(marketOddsSnapshots.fixtureId);
+  try {
+    const rows = await db
+      .select({
+        fixtureId: marketOddsSnapshots.fixtureId,
+        latestObservedAt: sql<Date | null>`max(${marketOddsSnapshots.observedAt})`.as(
+          "latest_observed_at",
+        ),
+      })
+      .from(marketOddsSnapshots)
+      .where(inArray(marketOddsSnapshots.fixtureId, fixtureIds))
+      .groupBy(marketOddsSnapshots.fixtureId);
 
-  for (const row of rows) {
-    if (row.latestObservedAt) {
-      result.set(row.fixtureId, new Date(row.latestObservedAt));
+    for (const row of rows) {
+      if (row.latestObservedAt) {
+        result.set(row.fixtureId, new Date(row.latestObservedAt));
+      }
     }
+  } catch (err) {
+    logger.warn({ err }, "future market sampler: failed to fetch observation times");
   }
+  
   return result;
 }
 
@@ -363,18 +373,26 @@ async function fetchOddsForSport(sportKey: string): Promise<RawOddsEvent[]> {
   });
   const url = `${ODDS_API_BASE}/sports/${encodeURIComponent(sportKey)}/odds?${params}`;
 
-  await waitForRateLimit();
-  const response = await fetch(url);
-  if (!response.ok) {
+  try {
+    await waitForRateLimit();
+    const response = await fetch(url);
+    if (!response.ok) {
+      logger.warn(
+        { status: response.status, sportKey },
+        "future market sampler: Odds API request failed",
+      );
+      return [];
+    }
+
+    const data = (await response.json()) as unknown;
+    return Array.isArray(data) ? (data as RawOddsEvent[]) : [];
+  } catch (err) {
     logger.warn(
-      { status: response.status, sportKey },
-      "future market sampler: Odds API request failed",
+      { err, sportKey },
+      "future market sampler: Odds API fetch exception",
     );
     return [];
   }
-
-  const data = (await response.json()) as unknown;
-  return Array.isArray(data) ? (data as RawOddsEvent[]) : [];
 }
 
 function toMatch(fixture: FutureFixture): Match {
@@ -440,10 +458,12 @@ async function finishRun(input: {
   lastResult = result;
   lastError = null;
 
+  // Record the main run stats and odds usage separately
   await recordSamplerJob(
     "success",
     input.fixturesInWindow,
     input.observations,
+    input.oddsCalls,
   );
 
   logger.info(result, "future market sampler completed");
@@ -454,9 +474,11 @@ async function recordSamplerJob(
   status: "success" | "error",
   checkedCount: number,
   changedCount: number,
+  oddsCalls: number = 0,
   errorMessage?: string,
 ) {
   try {
+    // Record the main run with fixturesInWindow (checkedCount) and observations (changedCount)
     await db.insert(backgroundJobRuns).values({
       jobName: "future_market_sampler",
       status,
@@ -465,8 +487,59 @@ async function recordSamplerJob(
       errorMessage: errorMessage ?? null,
       finishedAt: new Date(),
     });
+
+    // FIX #1: Record odds calls in a separate dedicated row for budget tracking
+    // This allows daily budget to survive process restarts by querying only these rows
+    // Do not sum fixturesInWindow; use dedicated jobName and checkedCount=oddsCalls
+    if (oddsCalls > 0) {
+      await db.insert(backgroundJobRuns).values({
+        jobName: "future_market_sampler_odds_usage",
+        status: "success",
+        checkedCount: oddsCalls,
+        changedCount: 0,
+        errorMessage: null,
+        finishedAt: new Date(),
+      });
+    }
   } catch (err) {
     logger.warn({ err }, "future market sampler: failed to record job run");
+  }
+}
+
+async function reconstructDailyBudgetFromDb() {
+  try {
+    const today = utcDateKey(new Date());
+    const todayStart = new Date(`${today}T00:00:00Z`);
+
+    // FIX #1: Sum odds calls from today's dedicated future_market_sampler_odds_usage rows only
+    // Each row has checkedCount = oddsCalls for that run (never use fixturesInWindow)
+    const rows = await db
+      .select({
+        checkedCount: backgroundJobRuns.checkedCount,
+      })
+      .from(backgroundJobRuns)
+      .where(
+        and(
+          eq(backgroundJobRuns.jobName, "future_market_sampler_odds_usage"),
+          gte(backgroundJobRuns.finishedAt, todayStart),
+        ),
+      );
+
+    let total = 0;
+    for (const row of rows) {
+      total += Number(row.checkedCount ?? 0);
+    }
+    oddsCallsToday = total;
+    logger.info(
+      { oddsCallsToday: total, dateUtc: today },
+      "future market sampler: reconstructed daily odds budget from DB",
+    );
+  } catch (err) {
+    logger.warn(
+      { err },
+      "future market sampler: failed to reconstruct daily budget from DB",
+    );
+    oddsCallsToday = 0;
   }
 }
 
@@ -493,11 +566,16 @@ function isFutureStatus(status: string | undefined) {
   ].includes(status ?? "");
 }
 
-function refreshDailyBudget() {
+async function refreshDailyBudget() {
   const today = utcDateKey(new Date());
   if (today !== budgetDate) {
+    // Date rollover: reconstruct budget from DB for the new day
     budgetDate = today;
-    oddsCallsToday = 0;
+    await reconstructDailyBudgetFromDb();
+  } else if (!budgetInitialized) {
+    // FIX #1: First call after startup: reconstruct from DB to survive process restart
+    budgetInitialized = true;
+    await reconstructDailyBudgetFromDb();
   }
 }
 
