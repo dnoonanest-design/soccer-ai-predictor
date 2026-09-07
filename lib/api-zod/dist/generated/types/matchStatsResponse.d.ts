@@ -6,10 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { TeamStats } from './teamStats';
+import type { EnhancedPrediction } from './xGPrediction';
 export interface MatchStatsResponse {
     home: TeamStats;
     away: TeamStats;
     season: number;
     has_live_stats: boolean;
+    enhanced?: EnhancedPrediction | null;
 }
 //# sourceMappingURL=matchStatsResponse.d.ts.map
