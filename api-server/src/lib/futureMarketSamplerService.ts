@@ -1,6 +1,10 @@
 import { db, backgroundJobRuns, marketOddsSnapshots } from "@workspace/db";
 import { inArray, sql } from "drizzle-orm";
-import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
+import {
+  TRACKED_COMPETITIONS,
+  getOddsSportKeyForLeague,
+  isTrackedLeague,
+} from "./leagueConfig";
 import { logger } from "./logger";
 import {
   captureMarketSnapshots,
@@ -296,18 +300,61 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   }
 
   const end = new Date(now.getTime() + WINDOW_HOURS * 3_600_000);
-  const path = `/fixtures?from=${dateOnly(now)}&to=${dateOnly(end)}&season=${encodeURIComponent(SEASON)}&timezone=UTC`;
-  const data = (await fetchFootball(path)) as FutureFixture[] | null;
+  const fromDate = dateOnly(now);
+  const toDate = dateOnly(end);
+  const deduped = new Map<number, FutureFixture>();
+  let competitionsWithFixtures = 0;
+  let rawFixturesLoaded = 0;
 
-  cachedFixtures = Array.isArray(data)
-    ? data
-        .filter((fixture) => isTrackedLeague(Number(fixture.league?.id)))
-        .filter((fixture) => isFutureStatus(fixture.fixture?.status?.short))
-        .slice(0, MAX_FIXTURES)
-    : [];
+  for (const competition of TRACKED_COMPETITIONS) {
+    const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(SEASON)}&from=${fromDate}&to=${toDate}&timezone=UTC`;
+
+    try {
+      const data = (await fetchFootball(path)) as FutureFixture[] | null;
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      competitionsWithFixtures++;
+      rawFixturesLoaded += data.length;
+
+      for (const fixture of data) {
+        const fixtureId = Number(fixture?.fixture?.id);
+        if (!Number.isInteger(fixtureId) || fixtureId <= 0) continue;
+        if (!isTrackedLeague(Number(fixture?.league?.id))) continue;
+        deduped.set(fixtureId, fixture);
+      }
+    } catch (err) {
+      logger.warn(
+        { err, leagueId: competition.id, competition: competition.name },
+        "future market sampler: tracked competition fixture fetch failed",
+      );
+    }
+  }
+
+  cachedFixtures = Array.from(deduped.values())
+    .filter((fixture) => isFutureStatus(fixture.fixture?.status?.short))
+    .sort(
+      (a, b) =>
+        new Date(a.fixture.date).getTime() - new Date(b.fixture.date).getTime(),
+    )
+    .slice(0, MAX_FIXTURES);
   fixtureCacheFetchedAt = Date.now();
 
-  return filterFixtureWindow(cachedFixtures, now);
+  const fixturesInWindow = filterFixtureWindow(cachedFixtures, now);
+  logger.info(
+    {
+      competitionsQueried: TRACKED_COMPETITIONS.length,
+      competitionsWithFixtures,
+      rawFixturesLoaded,
+      uniqueTrackedFixtures: cachedFixtures.length,
+      fixturesInWindow: fixturesInWindow.length,
+      fromDate,
+      toDate,
+      season: SEASON,
+    },
+    "future market sampler: tracked fixture refresh completed",
+  );
+
+  return fixturesInWindow;
 }
 
 function filterFixtureWindow(fixtures: FutureFixture[], now: Date) {
