@@ -12,6 +12,7 @@ import platformRouter from "./platform";
 import backgroundRouter from "./background";
 import pushRouter from "./push";
 import aiRouter from "./ai";
+import marketIntelligenceRouter from "./marketIntelligence";
 
 const router: IRouter = Router();
 
@@ -28,5 +29,6 @@ router.use(platformRouter);
 router.use(backgroundRouter);
 router.use(pushRouter);
 router.use(aiRouter);
+router.use(marketIntelligenceRouter);
 
 export default router;
