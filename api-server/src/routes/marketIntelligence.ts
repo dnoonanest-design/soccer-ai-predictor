@@ -5,11 +5,16 @@ import {
   getMarketIntelligenceReport,
   MARKET_INTELLIGENCE_POLICY,
 } from "../lib/marketIntelligenceService";
+import { getFutureMarketSamplerStatus } from "../lib/futureMarketSamplerService";
 
 const router = Router();
 
 router.get("/market-intelligence/policy", (_req, res) => {
   return res.json(MARKET_INTELLIGENCE_POLICY);
+});
+
+router.get("/market-intelligence/sampler-status", (_req, res) => {
+  return res.json(getFutureMarketSamplerStatus());
 });
 
 router.get("/market-intelligence/report", async (req, res) => {

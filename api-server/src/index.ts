@@ -2,6 +2,10 @@ import "dotenv/config";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startBackgroundLearner, stopBackgroundLearner } from "./lib/backgroundLearnerService";
+import {
+  startFutureMarketSampler,
+  stopFutureMarketSampler,
+} from "./lib/futureMarketSamplerService";
 
 // Replit normally provides PORT, but default to 3000 so local/iPad/browser
 // testing does not crash before the app starts.
@@ -15,6 +19,7 @@ if (!Number.isFinite(port) || port <= 0) {
 const server = app.listen(port, () => {
   logger.info({ port }, "Server listening");
   startBackgroundLearner();
+  startFutureMarketSampler();
 });
 
 server.on("error", (err) => {
@@ -22,5 +27,11 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-process.on("SIGTERM", () => { stopBackgroundLearner(); server.close(() => process.exit(0)); });
-process.on("SIGINT", () => { stopBackgroundLearner(); server.close(() => process.exit(0)); });
+function shutdown() {
+  stopFutureMarketSampler();
+  stopBackgroundLearner();
+  server.close(() => process.exit(0));
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
