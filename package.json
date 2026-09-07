@@ -10,7 +10,8 @@
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "railway:build": "pnpm --filter soccer-ai-predictor-api-bundled run build",
     "railway:start": "node --enable-source-maps api-server/dist/index.mjs",
-    "migrate": "psql \"$DATABASE_URL\" -f db/001_prediction_platform.sql",
+    "migrate": "psql \"$DATABASE_URL\" -f lib/db/001_prediction_platform.sql && psql \"$DATABASE_URL\" -f lib/db/002_market_intelligence.sql",
+    "migrate:market-intelligence": "psql \"$DATABASE_URL\" -f lib/db/002_market_intelligence.sql",
     "healthcheck": "node ./scripts/railway-healthcheck.mjs"
   },
   "private": true,
