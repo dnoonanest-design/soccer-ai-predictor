@@ -11,7 +11,7 @@ import {
   type RawOddsEvent,
 } from "./marketIntelligenceService";
 import { waitForRateLimit } from "./rateLimiter";
-import { fetchFootball, type Match } from "./soccerService";
+import { fetchFootball, resolveSeasonForCompetition, getLastApiFootballDiagnostics, type Match } from "./soccerService";
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
@@ -102,6 +102,9 @@ export function startFutureMarketSampler() {
   if (started || !ENABLED) return;
   started = true;
 
+  // Initialize budget from database on startup
+  refreshDailyBudget();
+
   timer = setInterval(() => {
     runFutureMarketSampler().catch((err) =>
       logger.warn({ err }, "future market sampler failed"),
@@ -161,6 +164,7 @@ export function getFutureMarketSamplerStatus() {
       oddsCallsToday,
       remaining: Math.max(0, MAX_ODDS_CALLS_PER_DAY - oddsCallsToday),
     },
+    apiFootballDiagnostics: getLastApiFootballDiagnostics(),
   };
 }
 
@@ -175,7 +179,7 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   let sportKeysDue = 0;
   let oddsCalls = 0;
   let observations = 0;
-  const capturedFixtureIds = new Set<number>();
+  let capturedFixtureCount = 0;
 
   try {
     refreshDailyBudget();
@@ -257,11 +261,8 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       const matches = group.fixtures.map(toMatch);
       const result = await captureMarketSnapshots(matches, events);
       observations += Number(result.observations ?? 0);
-      for (const fixture of group.fixtures) {
-        if (Number(result.observations ?? 0) > 0) {
-          capturedFixtureIds.add(fixture.fixture.id);
-        }
-      }
+      // Count only fixtures that actually had market snapshots stored (result.fixtures)
+      capturedFixtureCount += Number(result.fixtures ?? 0);
     }
 
     return await finishRun({
@@ -271,7 +272,7 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       sportKeysDue,
       oddsCalls,
       observations,
-      fixturesCaptured: capturedFixtureIds.size,
+      fixturesCaptured: capturedFixtureCount,
       budgetExhausted:
         oddsCallsToday >= MAX_ODDS_CALLS_PER_DAY ||
         (groups.length > 0 && callsAllowed === 0),
@@ -356,8 +357,12 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
       fallbackCompetitionsQueried++;
       let competitionFound = false;
 
-      for (const season of fallbackSeasons) {
-        const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(season)}&from=${dateOnly(now)}&to=${dateOnly(end)}&timezone=UTC`;
+      // Resolve season per-competition to handle API-Football current season correctly
+      const season = String(await resolveSeasonForCompetition(competition.id));
+      const fallbackSeasonsResolved = [season, String(Number(season) - 1)];
+
+      for (const seasonLabel of fallbackSeasonsResolved) {
+        const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(seasonLabel)}&from=${dateOnly(now)}&to=${dateOnly(end)}&timezone=UTC`;
         try {
           const data = (await fetchFootball(path)) as FutureFixture[] | null;
           if (!Array.isArray(data) || data.length === 0) continue;
@@ -564,16 +569,34 @@ async function recordSamplerJob(
   checkedCount: number,
   changedCount: number,
   errorMessage?: string,
+  oddsCalls?: number,
 ) {
   try {
+    const now = new Date();
+    
+    // Record main sampler job
     await db.insert(backgroundJobRuns).values({
       jobName: "future_market_sampler",
       status,
       checkedCount,
       changedCount,
       errorMessage: errorMessage ?? null,
-      finishedAt: new Date(),
+      startedAt: now,
+      finishedAt: now,
     });
+
+    // If odds calls were made, record usage for budget tracking across restarts
+    if (oddsCalls && oddsCalls > 0) {
+      await db.insert(backgroundJobRuns).values({
+        jobName: "future_market_sampler_odds_usage",
+        status: "success",
+        checkedCount: oddsCalls,
+        changedCount: 0,
+        errorMessage: null,
+        startedAt: now,
+        finishedAt: now,
+      });
+    }
   } catch (err) {
     logger.warn({ err }, "future market sampler: failed to record job run");
   }
@@ -622,11 +645,49 @@ function dateKeysBetween(start: Date, end: Date) {
   return keys;
 }
 
+
+/**
+ * Reconstruct daily odds API call budget from database job records.
+ * Queries future_market_sampler_odds_usage rows since midnight UTC.
+ * Ensures budget survives process restarts.
+ */
+async function reconstructDailyBudgetFromDb(): Promise<number> {
+  try {
+    const midnightUtc = new Date();
+    midnightUtc.setUTCHours(0, 0, 0, 0);
+
+    const rows = await db
+      .select({ checkedCount: backgroundJobRuns.checkedCount })
+      .from(backgroundJobRuns)
+      .where(
+        sql`${backgroundJobRuns.jobName} = 'future_market_sampler_odds_usage' AND ${backgroundJobRuns.finishedAt} >= ${midnightUtc}`,
+      );
+
+    const total = rows.reduce((sum, row) => sum + (Number(row.checkedCount) || 0), 0);
+    logger.debug({ total, recordCount: rows.length }, "Reconstructed daily odds budget from database");
+    return total;
+  } catch (err) {
+    logger.warn({ err }, "Failed to reconstruct daily odds budget from database");
+    return 0;
+  }
+}
+
 function refreshDailyBudget() {
   const today = utcDateKey(new Date());
   if (today !== budgetDate) {
     budgetDate = today;
-    oddsCallsToday = 0;
+    // On date rollover, reconstruct budget from DB to survive restarts
+    reconstructDailyBudgetFromDb()
+      .then((dbTotal) => {
+        oddsCallsToday = dbTotal;
+        if (dbTotal > 0) {
+          logger.info({ oddsCallsToday: dbTotal }, "Daily budget rolled over, reconstructed from database");
+        }
+      })
+      .catch((err) => {
+        logger.warn({ err }, "Failed to reconstruct budget on date rollover");
+        oddsCallsToday = 0;
+      });
   }
 }
 

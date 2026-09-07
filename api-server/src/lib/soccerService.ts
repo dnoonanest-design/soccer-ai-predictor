@@ -37,10 +37,80 @@ function getCached<T>(key: string, ttl: number): T | null {
 function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
+/**
+ * Resolve the active season for a given league/competition.
+ * Queries API-Football's current season first (most accurate, cached 24h).
+ * Falls back to configured FOOTBALL_SEASON env var if set.
+ * Finally falls back to computing from calendar year (seasons run Sep-Aug).
+ * Results cached for 24 hours per competition ID.
+ */
+export async function resolveSeasonForCompetition(leagueId: number): Promise<number> {
+  const cacheKey = `league_current_season:${leagueId}`;
+  const cached = getCached<number>(cacheKey, 24 * 3600_000);
+  if (cached !== null) return cached;
+
+  // First: Try to fetch current season from API-Football (most authoritative)
+  try {
+    const leagueData = (await fetchFootball(`/leagues?id=${leagueId}&current=true`)) as Array<{
+      season: number;
+    }> | null;
+
+    if (Array.isArray(leagueData) && leagueData[0]?.season) {
+      const season = leagueData[0].season;
+      setCache(cacheKey, season);
+      logger.debug({ leagueId, season }, "Resolved season from API-Football current");
+      return season;
+    }
+  } catch (err) {
+    logger.debug({ err, leagueId }, "Failed to resolve current season from API-Football, trying fallback");
+  }
+
+  // Second: Use configured FOOTBALL_SEASON if explicitly set
+  const configuredSeason = Number(SEASON);
+  if (Number.isInteger(configuredSeason) && configuredSeason > 2000 && configuredSeason.toString() === SEASON) {
+    setCache(cacheKey, configuredSeason);
+    logger.debug({ leagueId, season: configuredSeason }, "Using configured FOOTBALL_SEASON");
+    return configuredSeason;
+  }
+
+  // Third: Compute from calendar year (seasons run Sep-Aug)
+  const now = new Date();
+  const month = now.getUTCMonth(); // 0=Jan, 11=Dec
+  const year = now.getUTCFullYear();
+  const fallbackSeason = month < 8 ? year - 1 : year;
+  setCache(cacheKey, fallbackSeason);
+  logger.debug({ leagueId, season: fallbackSeason }, "Computed season from calendar year");
+  return fallbackSeason;
+}
+
 
 let _liveMatchCount = 0;
 export function hasLiveMatches(): boolean {
   return _liveMatchCount > 0;
+}
+
+interface ApiFootballEnvelope {
+  get: string;
+  parameters: Record<string, string | number>;
+  errors?: string[] | Record<string, string>;
+  results: number;
+  paging?: { current: number; total: number };
+  response: unknown;
+}
+
+interface ApiFootballDiagnostics {
+  path: string;
+  results: number;
+  errors: string[];
+  rateLimitDaily?: { remaining: number; limit: number };
+  rateLimitMinute?: { remaining: number; limit: number };
+  responseSeconds?: number;
+}
+
+let lastApiFootballDiagnostics: ApiFootballDiagnostics | null = null;
+
+export function getLastApiFootballDiagnostics(): ApiFootballDiagnostics | null {
+  return lastApiFootballDiagnostics;
 }
 
 export async function fetchFootball(path: string): Promise<unknown> {
@@ -50,17 +120,79 @@ export async function fetchFootball(path: string): Promise<unknown> {
   }
 
   const url = `${API_FOOTBALL_BASE}${path}`;
+  const startMs = Date.now();
+
   await waitForRateLimit();
   const res = await fetch(url, {
     headers: { "x-apisports-key": API_FOOTBALL_KEY },
   });
+
+  const responseMs = Date.now() - startMs;
 
   if (!res.ok) {
     logger.error({ status: res.status, path }, "API-Football request failed");
     return null;
   }
 
-  const json = (await res.json()) as { response: unknown };
+  const json = (await res.json()) as ApiFootballEnvelope;
+
+  // Extract diagnostics from response headers and envelope
+  const diagnostics: ApiFootballDiagnostics = {
+    path,
+    results: json.results ?? 0,
+    errors: [],
+    responseSeconds: Math.round(responseMs / 1000),
+  };
+
+  // Parse rate limit headers (API-Football v3 official headers, case-insensitive)
+  // Daily: x-ratelimit-requests-limit / x-ratelimit-requests-remaining
+  const rateLimitDaily = res.headers.get("x-ratelimit-requests-limit");
+  const rateLimitDailyRemaining = res.headers.get("x-ratelimit-requests-remaining");
+  if (rateLimitDaily && rateLimitDailyRemaining) {
+    diagnostics.rateLimitDaily = {
+      limit: Number(rateLimitDaily),
+      remaining: Number(rateLimitDailyRemaining),
+    };
+  }
+
+  // Per-minute: x-ratelimit-limit / x-ratelimit-remaining
+  const rateLimitMinute = res.headers.get("x-ratelimit-limit");
+  const rateLimitMinuteRemaining = res.headers.get("x-ratelimit-remaining");
+  if (rateLimitMinute && rateLimitMinuteRemaining) {
+    diagnostics.rateLimitMinute = {
+      limit: Number(rateLimitMinute),
+      remaining: Number(rateLimitMinuteRemaining),
+    };
+  }
+
+  lastApiFootballDiagnostics = diagnostics;
+
+  // Log warnings if API returned errors at the envelope level (can be array or object)
+  let apiErrors: string[] = [];
+  if (Array.isArray(json.errors)) {
+    apiErrors = json.errors;
+  } else if (json.errors && typeof json.errors === "object") {
+    // Normalize error object values
+    apiErrors = Object.values(json.errors)
+      .map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
+      .filter(Boolean);
+  } else if (json.errors) {
+    apiErrors = [String(json.errors)];
+  }
+
+  if (apiErrors.length > 0) {
+    diagnostics.errors = apiErrors;
+    logger.warn(
+      { path, errors: apiErrors, results: json.results },
+      "API-Football returned errors in response envelope",
+    );
+  }
+
+  // Log if results is explicitly 0 (no data) vs. missing
+  if (json.results === 0) {
+    logger.debug({ path }, "API-Football returned zero results");
+  }
+
   return json.response;
 }
 
