@@ -20,13 +20,10 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
 
-
-}
-
 async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) { logger.warn("API_FOOTBALL_KEY not set"); return null; }
   const url = `${API_FOOTBALL_BASE}${path}`;
-  await waitForRateLimit(); // FIXED: was missing entirely
+  await waitForRateLimit();
   const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
   if (!res.ok) { logger.error({ status: res.status, url }, "API-Football failed"); return null; }
   return res.json();
@@ -319,7 +316,6 @@ export async function getAllXGPredictions(
   return predictions;
 }
 
-// ── FIXED: Sequential fetching instead of Promise.all ────────────────────────
 export async function getMatchStats(
   fixtureId: number,
   homeTeamId: number,
@@ -329,7 +325,6 @@ export async function getMatchStats(
   leagueId: number,
   isLiveOrFinished: boolean
 ): Promise<MatchStatsResult> {
-
   const homeStats = await fetchTeamStats(homeTeamId, leagueId);
   const awayStats = await fetchTeamStats(awayTeamId, leagueId);
   const liveStats = isLiveOrFinished

@@ -164,7 +164,7 @@ export async function runTrainingPipeline() {
 
   const weights = {
     model: "calibrated-statistical-v4",
-    note: "Lightweight training pipeline: learns outcome priors and records holdout-style metrics. Replace with XGBoost/LightGBM when historic feature rows exceed 2,000.",
+    note: "Bookmaker odds are intentionally excluded from the core predictor. The statistical model is trained and calibrated from football data only; bookmaker movement is evaluated separately by the market-intelligence layer.",
     priors: {
       home: n ? outcomeCounts.home / n : 0.45,
       draw: n ? outcomeCounts.draw / n : 0.27,
@@ -176,12 +176,16 @@ export async function runTrainingPipeline() {
       buckets: calibrationReport.buckets,
     },
     recommendedFeatureWeights: {
-      marketOdds: 0.22,
-      xg: 0.27,
-      elo: 0.16,
-      form: 0.12,
-      injuriesLineups: 0.11,
-      liveMomentum: 0.12,
+      marketOdds: 0,
+      xg: 0.35,
+      elo: 0.20,
+      form: 0.15,
+      injuriesLineups: 0.15,
+      liveMomentum: 0.15,
+    },
+    marketIntelligence: {
+      mode: "evaluation_only",
+      feedsCorePrediction: false,
     },
   };
 
