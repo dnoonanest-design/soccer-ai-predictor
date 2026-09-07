@@ -4,7 +4,7 @@ import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
-const SEASON = process.env.FOOTBALL_SEASON ?? "2025";
+const SEASON = process.env.FOOTBALL_SEASON ?? String(new Date().getUTCFullYear());
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
@@ -272,9 +272,18 @@ async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
   if (cached) return cached;
 
   const today = new Date().toISOString().split("T")[0];
-  const data = (await fetchFootball(
-    `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`,
+  let data = (await fetchFootball(
+    `/fixtures?date=${today}&timezone=UTC`,
   )) as ApiFootballFixture[] | null;
+
+  // Some provider datasets may require a season-qualified request. Use it only
+  // as a fallback so a stale or differently-labelled season cannot hide real
+  // fixtures that exist on today's calendar date.
+  if (!Array.isArray(data) || data.length === 0) {
+    data = (await fetchFootball(
+      `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`,
+    )) as ApiFootballFixture[] | null;
+  }
 
   const fixtures = (data ?? []).filter((fixture) =>
     isTrackedLeague(fixture.league.id),
