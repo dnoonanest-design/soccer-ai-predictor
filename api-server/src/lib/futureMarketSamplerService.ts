@@ -300,33 +300,92 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   }
 
   const end = new Date(now.getTime() + WINDOW_HOURS * 3_600_000);
-  const fromDate = dateOnly(now);
-  const toDate = dateOnly(end);
+  const dates = dateKeysBetween(now, end);
   const deduped = new Map<number, FutureFixture>();
-  let competitionsWithFixtures = 0;
   let rawFixturesLoaded = 0;
+  let dateQueriesSucceeded = 0;
+  let trackedFixturesFromDates = 0;
+  let fallbackCompetitionsQueried = 0;
+  let fallbackCompetitionsWithFixtures = 0;
 
-  for (const competition of TRACKED_COMPETITIONS) {
-    const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(SEASON)}&from=${fromDate}&to=${toDate}&timezone=UTC`;
-
+  // Primary path: ask API-Football for each calendar date without a season
+  // filter. This is the most reliable way to discover all matches that are
+  // actually scheduled on those dates, regardless of how a competition's
+  // season is labelled by the provider.
+  for (const date of dates) {
     try {
-      const data = (await fetchFootball(path)) as FutureFixture[] | null;
-      if (!Array.isArray(data) || data.length === 0) continue;
-
-      competitionsWithFixtures++;
+      const data = (await fetchFootball(
+        `/fixtures?date=${date}&timezone=UTC`,
+      )) as FutureFixture[] | null;
+      if (!Array.isArray(data)) continue;
+      dateQueriesSucceeded++;
       rawFixturesLoaded += data.length;
 
       for (const fixture of data) {
         const fixtureId = Number(fixture?.fixture?.id);
+        const leagueId = Number(fixture?.league?.id);
         if (!Number.isInteger(fixtureId) || fixtureId <= 0) continue;
-        if (!isTrackedLeague(Number(fixture?.league?.id))) continue;
+        if (!isTrackedLeague(leagueId)) continue;
         deduped.set(fixtureId, fixture);
       }
     } catch (err) {
       logger.warn(
-        { err, leagueId: competition.id, competition: competition.name },
-        "future market sampler: tracked competition fixture fetch failed",
+        { err, date },
+        "future market sampler: date fixture fetch failed",
       );
+    }
+  }
+
+  trackedFixturesFromDates = deduped.size;
+
+  // Fallback path: if date discovery produces no tracked fixtures at all,
+  // query every tracked competition explicitly. Try the configured season
+  // first, then the previous season label to survive provider season-label
+  // inconsistencies around a new campaign.
+  if (deduped.size === 0) {
+    const configuredSeason = Number(SEASON);
+    const fallbackSeasons = Array.from(
+      new Set(
+        [configuredSeason, configuredSeason - 1]
+          .filter((value) => Number.isInteger(value) && value > 2000)
+          .map(String),
+      ),
+    );
+
+    for (const competition of TRACKED_COMPETITIONS) {
+      fallbackCompetitionsQueried++;
+      let competitionFound = false;
+
+      for (const season of fallbackSeasons) {
+        const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(season)}&from=${dateOnly(now)}&to=${dateOnly(end)}&timezone=UTC`;
+        try {
+          const data = (await fetchFootball(path)) as FutureFixture[] | null;
+          if (!Array.isArray(data) || data.length === 0) continue;
+          rawFixturesLoaded += data.length;
+          competitionFound = true;
+
+          for (const fixture of data) {
+            const fixtureId = Number(fixture?.fixture?.id);
+            if (!Number.isInteger(fixtureId) || fixtureId <= 0) continue;
+            if (!isTrackedLeague(Number(fixture?.league?.id))) continue;
+            deduped.set(fixtureId, fixture);
+          }
+
+          if (competitionFound) break;
+        } catch (err) {
+          logger.warn(
+            {
+              err,
+              leagueId: competition.id,
+              competition: competition.name,
+              season,
+            },
+            "future market sampler: tracked competition fixture fallback failed",
+          );
+        }
+      }
+
+      if (competitionFound) fallbackCompetitionsWithFixtures++;
     }
   }
 
@@ -342,16 +401,19 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   const fixturesInWindow = filterFixtureWindow(cachedFixtures, now);
   logger.info(
     {
-      competitionsQueried: TRACKED_COMPETITIONS.length,
-      competitionsWithFixtures,
+      dateQueries: dates.length,
+      dateQueriesSucceeded,
+      trackedFixturesFromDates,
+      fallbackCompetitionsQueried,
+      fallbackCompetitionsWithFixtures,
       rawFixturesLoaded,
       uniqueTrackedFixtures: cachedFixtures.length,
       fixturesInWindow: fixturesInWindow.length,
-      fromDate,
-      toDate,
+      fromDate: dateOnly(now),
+      toDate: dateOnly(end),
       season: SEASON,
     },
-    "future market sampler: tracked fixture refresh completed",
+    "future market sampler: fixture refresh completed",
   );
 
   return fixturesInWindow;
@@ -538,6 +600,26 @@ function isFutureStatus(status: string | undefined) {
     "AWD",
     "WO",
   ].includes(status ?? "");
+}
+
+function dateKeysBetween(start: Date, end: Date) {
+  const keys: string[] = [];
+  const cursor = new Date(Date.UTC(
+    start.getUTCFullYear(),
+    start.getUTCMonth(),
+    start.getUTCDate(),
+  ));
+  const final = new Date(Date.UTC(
+    end.getUTCFullYear(),
+    end.getUTCMonth(),
+    end.getUTCDate(),
+  ));
+
+  while (cursor.getTime() <= final.getTime()) {
+    keys.push(dateOnly(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return keys;
 }
 
 function refreshDailyBudget() {
