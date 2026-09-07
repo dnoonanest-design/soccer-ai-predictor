@@ -234,7 +234,12 @@ export async function getMarketIntelligenceReport(maxSnapshots = 10_000) {
 
   const settled = evaluated.filter((r) => r.actualOutcome !== null);
   const withModel = settled.filter((r) => r.modelCorrect !== null);
-  const movementRows = settled.filter((r) => r.snapshotCount >= 2);
+  // Multiple bookmakers captured at the same instant are not movement history.
+  // Only evaluate movement after the market has actually been observed at
+  // different times.
+  const movementRows = settled.filter(
+    (r) => r.closingObservedAt.getTime() > r.openingObservedAt.getTime(),
+  );
   const disagreements = withModel.filter(
     (r) => r.modelPick !== null && r.modelPick !== r.closingMarketPick,
   );
@@ -492,12 +497,21 @@ function findOddsEvent(homeTeam: string, awayTeam: string, oddsEvents: RawOddsEv
 
 function namesMatch(a: string, b: string) {
   if (!a || !b) return false;
-  if (a === b) return true;
-  const prefixLength = Math.min(6, a.length, b.length);
-  if (prefixLength < 4) return false;
-  const aPrefix = a.slice(0, prefixLength);
-  const bPrefix = b.slice(0, prefixLength);
-  return a.includes(bPrefix) || b.includes(aPrefix);
+  const left = stripClubSuffix(a);
+  const right = stripClubSuffix(b);
+  if (left === right) return true;
+
+  // Prefer missing a fixture over attaching another club's odds to it. This
+  // deliberately avoids broad prefix matching such as Manchester City vs
+  // Manchester United.
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length > right.length ? left : right;
+  if (shorter.length < 7) return false;
+  return longer.includes(shorter) && shorter.length / longer.length >= 0.65;
+}
+
+function stripClubSuffix(value: string) {
+  return value.replace(/(?:footballclub|clubdefutbol|calcio|afc|fc|cf)$/g, "");
 }
 
 function selectBookmakers(bookmakers: RawOddsEvent["bookmakers"]) {
