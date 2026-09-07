@@ -28,3 +28,6 @@ jobs:
 
       - name: Build Railway bundle
         run: pnpm railway:build
+
+      - name: Build production Docker image
+        run: docker build -t soccer-ai-predictor:ci .
