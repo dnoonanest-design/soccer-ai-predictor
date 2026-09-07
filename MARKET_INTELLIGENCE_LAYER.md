@@ -13,11 +13,26 @@ The market data is used to measure how bookmaker movements relate to outcomes an
 - Existing value/edge calculations may compare the finished model probability with bookmaker odds, but that comparison does not feed back into the probability itself.
 - Market-learning results are reported separately and must not silently change core model weights.
 
+## Competition scope
+
+The shared competition configuration covers only the product's European club scope:
+
+- England: Premier League, Championship, FA Cup, EFL Cup
+- France: Ligue 1, Ligue 2, Coupe de France
+- Spain: La Liga, Segunda Division, Copa del Rey
+- Portugal: Primeira Liga, Liga Portugal 2, Taca de Portugal
+- Germany: Bundesliga, 2. Bundesliga, DFB-Pokal
+- Italy: Serie A, Serie B, Coppa Italia
+- Netherlands: Eredivisie, Eerste Divisie, KNVB Beker
+- UEFA Champions League, Europa League, and Conference League
+
+The core predictor covers every competition above. Market intelligence is optional per competition: if The Odds API does not expose a dedicated v4 sport key for a competition, that competition continues to receive independent statistical predictions but no bookmaker snapshot is attached.
+
 ## Data captured
 
-Whenever the normal match feed already fetches Odds API data, the API server passively stores pre-match H2H prices for a small configurable set of bookmakers.
+The Odds API requires a competition-specific sport key. `soccerService.ts` derives the required sport keys from the active tracked fixtures, fetches only supported competitions, and caches each competition response before the dashboard/background learner can request it again.
 
-This adds **zero additional Odds API requests**. It reuses the odds response that `soccerService.ts` already fetched.
+Market capture itself adds **zero extra Odds API requests**. It passively reuses the competition odds responses already fetched for the match feed. Unsupported competitions simply return `null` bookmaker odds rather than affecting the core prediction.
 
 For each fixture/bookmaker/time bucket the database stores:
 
@@ -30,6 +45,7 @@ For each fixture/bookmaker/time bucket the database stores:
 
 Default capture bucket: 30 minutes.
 Default maximum bookmakers per fixture: 4.
+Default Odds API cache: 5 minutes per active supported competition.
 
 Environment settings:
 
@@ -38,6 +54,7 @@ MARKET_INTELLIGENCE_ENABLED=true
 MARKET_INTELLIGENCE_BUCKET_MINUTES=30
 MARKET_INTELLIGENCE_MAX_BOOKMAKERS=4
 MARKET_INTELLIGENCE_BOOKMAKERS=pinnacle,betfair_ex_eu,betfair,bet365,unibet_eu,williamhill
+ODDS_CACHE_TTL_MS=300000
 ```
 
 ## Market-learning report
@@ -76,7 +93,7 @@ or the full migration command:
 pnpm migrate
 ```
 
-The new migration is `lib/db/002_market_intelligence.sql`.
+The migration is `lib/db/002_market_intelligence.sql`.
 
 ## Future learning rule
 
