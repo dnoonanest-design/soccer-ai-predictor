@@ -19,8 +19,6 @@ const CACHE_TTL = {
   player_stats:   60_000,
 };
 
-
-
 // ─── Cache store ──────────────────────────────────────────────────────────────
 type CacheEntry<T> = { data: T; fetchedAt: number };
 const cache = new Map<string, CacheEntry<unknown>>();
@@ -307,6 +305,18 @@ export async function getAllMatches(
     const order: Record<string, number> = { live: 0, upcoming: 1, finished: 2 };
     return (order[a.status] ?? 3) - (order[b.status] ?? 3);
   });
+
+  // Passive market capture: reuse the already-fetched odds response, so the
+  // intelligence layer adds no Odds API calls and cannot influence the model.
+  if (
+    process.env.MARKET_INTELLIGENCE_ENABLED !== "false" &&
+    oddsEvents.length > 0 &&
+    matches.some((match) => match.status === "upcoming")
+  ) {
+    void import("./marketIntelligenceService")
+      .then(({ captureMarketSnapshots }) => captureMarketSnapshots(matches, oddsEvents))
+      .catch((err) => logger.warn({ err }, "market intelligence capture failed"));
+  }
 
   return matches;
 }
