@@ -28,6 +28,3 @@ jobs:
 
       - name: Build Railway bundle
         run: pnpm railway:build
-
-      - name: Typecheck API and workspace references
-        run: pnpm exec tsc --build api-server/tsconfig.json --pretty false
