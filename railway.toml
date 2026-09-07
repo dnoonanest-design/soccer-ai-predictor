@@ -3,6 +3,7 @@
 buildCommand = "corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile && pnpm run railway:build"
 
 [deploy]
+preDeployCommand = ["pnpm run migrate"]
 startCommand = "pnpm run railway:start"
 healthcheckPath = "/api/healthz"
 healthcheckTimeout = 300
