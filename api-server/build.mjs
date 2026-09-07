@@ -8,6 +8,7 @@ import { rm } from "node:fs/promises";
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+const workspaceRoot = path.resolve(artifactDir, "..");
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
@@ -21,6 +22,11 @@ async function buildAll() {
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
     logLevel: "info",
+    alias: {
+      "@workspace/db": path.resolve(workspaceRoot, "lib/db/src/index.ts"),
+      "@workspace/db/schema": path.resolve(workspaceRoot, "lib/db/src/schema/index.ts"),
+      "@workspace/api-zod": path.resolve(workspaceRoot, "lib/api-zod/src/index.ts"),
+    },
     // Native/dynamic packages and the pino logging stack are resolved at runtime.
     // Keeping pino external avoids esbuild-plugin-pino trying to resolve
     // transitive worker packages such as thread-stream during a clean CI build.
