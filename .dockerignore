@@ -1,0 +1,28 @@
+# Build dependencies must be installed inside the Linux container.
+# Never copy host/committed node_modules into the Docker image because native
+# binaries such as esbuild are platform/version specific.
+node_modules
+**/node_modules
+.pnpm-store
+**/.pnpm-store
+
+# Generated outputs are rebuilt inside the image.
+dist
+**/dist
+coverage
+**/coverage
+
+# Local/editor/cache files.
+.git
+.git/**
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+
+# Package-manager caches / temporary files.
+.npm
+**/.npm
+.cache
+**/.cache
