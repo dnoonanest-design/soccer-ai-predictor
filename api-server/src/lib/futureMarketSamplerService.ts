@@ -1,6 +1,6 @@
 import { db, backgroundJobRuns, marketOddsSnapshots } from "@workspace/db";
 import { inArray, sql } from "drizzle-orm";
-import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
+import { getOddsSportKeyForLeague, isTrackedLeague, TRACKED_COMPETITIONS } from "./leagueConfig";
 import { logger } from "./logger";
 import {
   captureMarketSnapshots,
@@ -80,6 +80,12 @@ type SamplerResult = {
   dailyOddsCallsUsed: number;
   dailyOddsCallLimit: number;
   budgetExhausted: boolean;
+  apiQuotaInfo?: {
+    strategy: string;
+    apiFetchCount: number;
+    competitionsCovered: number;
+    competitionsWithZeroResults: number;
+  };
 };
 
 let started = false;
@@ -117,6 +123,8 @@ export function startFutureMarketSampler() {
       FIXTURE_REFRESH_MS,
       MAX_ODDS_CALLS_PER_RUN,
       MAX_ODDS_CALLS_PER_DAY,
+      trackedCompetitionCount: TRACKED_COMPETITIONS.length,
+      strategy: "country-grouped with fallback to direct league queries",
     },
     "future market sampler started",
   );
@@ -172,11 +180,17 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   let oddsCalls = 0;
   let observations = 0;
   const capturedFixtureIds = new Set<number>();
+  let apiFetchCount = 0;
+  let competitionsCovered = 0;
+  let competitionsWithZeroResults = 0;
 
   try {
     refreshDailyBudget();
 
-    const fixtures = await getFutureFixtures(startedAt);
+    const { fixtures, fetchCount, covered, empty } = await getFutureFixtures(startedAt);
+    apiFetchCount = fetchCount;
+    competitionsCovered = covered;
+    competitionsWithZeroResults = empty;
     fixturesInWindow = fixtures.length;
 
     if (!fixtures.length) {
@@ -189,6 +203,9 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
         observations: 0,
         fixturesCaptured: 0,
         budgetExhausted: oddsCallsToday >= MAX_ODDS_CALLS_PER_DAY,
+        apiFetchCount,
+        competitionsCovered,
+        competitionsWithZeroResults,
       });
     }
 
@@ -271,6 +288,9 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       budgetExhausted:
         oddsCallsToday >= MAX_ODDS_CALLS_PER_DAY ||
         (groups.length > 0 && callsAllowed === 0),
+      apiFetchCount,
+      competitionsCovered,
+      competitionsWithZeroResults,
     });
   } catch (err: any) {
     lastRunAt = new Date();
@@ -287,27 +307,131 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   }
 }
 
-async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
+async function getFutureFixtures(
+  now: Date,
+): Promise<{
+  fixtures: FutureFixture[];
+  fetchCount: number;
+  covered: number;
+  empty: number;
+}> {
   if (
     fixtureCacheFetchedAt > 0 &&
     Date.now() - fixtureCacheFetchedAt < FIXTURE_REFRESH_MS
   ) {
-    return filterFixtureWindow(cachedFixtures, now);
+    return {
+      fixtures: filterFixtureWindow(cachedFixtures, now),
+      fetchCount: 0,
+      covered: 0,
+      empty: 0,
+    };
   }
 
   const end = new Date(now.getTime() + WINDOW_HOURS * 3_600_000);
-  const path = `/fixtures?from=${dateOnly(now)}&to=${dateOnly(end)}&season=${encodeURIComponent(SEASON)}&timezone=UTC`;
-  const data = (await fetchFootball(path)) as FutureFixture[] | null;
+  const fromDate = dateOnly(now);
+  const toDate = dateOnly(end);
 
-  cachedFixtures = Array.isArray(data)
-    ? data
-        .filter((fixture) => isTrackedLeague(Number(fixture.league?.id)))
-        .filter((fixture) => isFutureStatus(fixture.fixture?.status?.short))
-        .slice(0, MAX_FIXTURES)
-    : [];
+  const allFixtures = new Map<number, FutureFixture>();
+  let apiFetchCount = 0;
+  let competitionsCovered = 0;
+  let competitionsEmpty = 0;
+
+  // Strategy 1: Try broad date range first (single call, most efficient)
+  // This works if API-Football returns all fixtures for all tracked leagues in the date range
+  const broadPath = `/fixtures?from=${fromDate}&to=${toDate}&season=${encodeURIComponent(SEASON)}&timezone=UTC`;
+  const broadData = (await fetchFootball(broadPath)) as FutureFixture[] | null;
+  apiFetchCount++;
+
+  const trackedByLeagueId = new Map(
+    TRACKED_COMPETITIONS.map((comp) => [comp.id, comp]),
+  );
+
+  if (Array.isArray(broadData) && broadData.length > 0) {
+    // Broad query returned results. Filter to tracked leagues and future status.
+    for (const fixture of broadData) {
+      const leagueId = Number(fixture.league?.id);
+      if (trackedByLeagueId.has(leagueId) && isFutureStatus(fixture.fixture?.status?.short)) {
+        allFixtures.set(fixture.fixture.id, fixture);
+      }
+    }
+
+    // Track which competitions got results
+    for (const comp of TRACKED_COMPETITIONS) {
+      const hasFixture = Array.from(allFixtures.values()).some(
+        (f) => f.league.id === comp.id,
+      );
+      if (hasFixture) {
+        competitionsCovered++;
+      } else {
+        competitionsEmpty++;
+      }
+    }
+
+    logger.info(
+      {
+        strategy: "broad date range",
+        apiFetchCount,
+        fixturesFound: allFixtures.size,
+        competitionsCovered,
+        competitionsEmpty,
+      },
+      "fixture fetcher: broad query succeeded",
+    );
+  } else {
+    // Broad query failed or returned empty. Fall back to per-league queries.
+    // This ensures we catch fixtures even if the API doesn't return all in one broad query.
+    logger.warn(
+      { broadQueryResult: broadData ? "empty" : "error", apiFetchCount },
+      "fixture fetcher: broad query did not return results, falling back to per-league queries",
+    );
+
+    for (const competition of TRACKED_COMPETITIONS) {
+      const path = `/fixtures?from=${fromDate}&to=${toDate}&league=${competition.id}&season=${encodeURIComponent(SEASON)}&timezone=UTC`;
+      const data = (await fetchFootball(path)) as FutureFixture[] | null;
+      apiFetchCount++;
+
+      if (!Array.isArray(data) || data.length === 0) {
+        competitionsEmpty++;
+        continue;
+      }
+
+      const filtered = data.filter((fixture) =>
+        isFutureStatus(fixture.fixture?.status?.short),
+      );
+
+      if (filtered.length === 0) {
+        competitionsEmpty++;
+        continue;
+      }
+
+      competitionsCovered++;
+
+      for (const fixture of filtered) {
+        allFixtures.set(fixture.fixture.id, fixture);
+      }
+    }
+
+    logger.info(
+      {
+        strategy: "per-league fallback",
+        apiFetchCount,
+        fixturesFound: allFixtures.size,
+        competitionsCovered,
+        competitionsEmpty,
+      },
+      "fixture fetcher: per-league fallback completed",
+    );
+  }
+
+  cachedFixtures = Array.from(allFixtures.values()).slice(0, MAX_FIXTURES);
   fixtureCacheFetchedAt = Date.now();
 
-  return filterFixtureWindow(cachedFixtures, now);
+  return {
+    fixtures: filterFixtureWindow(cachedFixtures, now),
+    fetchCount: apiFetchCount,
+    covered: competitionsCovered,
+    empty: competitionsEmpty,
+  };
 }
 
 function filterFixtureWindow(fixtures: FutureFixture[], now: Date) {
@@ -420,6 +544,9 @@ async function finishRun(input: {
   observations: number;
   fixturesCaptured: number;
   budgetExhausted: boolean;
+  apiFetchCount: number;
+  competitionsCovered: number;
+  competitionsWithZeroResults: number;
 }): Promise<SamplerResult> {
   const finishedAt = new Date();
   const result: SamplerResult = {
@@ -434,6 +561,15 @@ async function finishRun(input: {
     dailyOddsCallsUsed: oddsCallsToday,
     dailyOddsCallLimit: MAX_ODDS_CALLS_PER_DAY,
     budgetExhausted: input.budgetExhausted,
+    apiQuotaInfo: {
+      strategy:
+        input.apiFetchCount === 1
+          ? "broad date range (optimal)"
+          : `per-league fallback (${input.apiFetchCount} calls)`,
+      apiFetchCount: input.apiFetchCount,
+      competitionsCovered: input.competitionsCovered,
+      competitionsWithZeroResults: input.competitionsWithZeroResults,
+    },
   };
 
   lastRunAt = finishedAt;
@@ -513,3 +649,4 @@ function clampNumber(value: number, min: number, max: number) {
   const safe = Number.isFinite(value) ? Math.floor(value) : min;
   return Math.max(min, Math.min(max, safe));
 }
+
