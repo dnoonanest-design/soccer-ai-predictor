@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/market-intelligence-layer]
+    branches: [feature/market-intelligence-layer, fix/railway-runtime-validation]
 
 jobs:
   build:
@@ -28,6 +28,36 @@ jobs:
 
       - name: Build Railway bundle
         run: pnpm railway:build
+
+      - name: Smoke test production bundle
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          BACKGROUND_LEARNER_ENABLED: "false"
+          NODE_ENV: production
+          PORT: "3100"
+        run: |
+          set -euo pipefail
+          pnpm railway:start > /tmp/soccer-api.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3100/api/healthz >/dev/null; then
+              echo "Production bundle health check passed"
+              exit 0
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "Production bundle exited before becoming healthy"
+              cat /tmp/soccer-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "Production bundle did not become healthy in time"
+          cat /tmp/soccer-api.log
+          exit 1
 
       - name: Build production Docker image
         run: docker build -t soccer-ai-predictor:ci .
