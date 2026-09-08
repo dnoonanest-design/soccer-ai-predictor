@@ -11,7 +11,16 @@ import {
   type RawOddsEvent,
 } from "./marketIntelligenceService";
 import { waitForRateLimit } from "./rateLimiter";
-import { fetchFootball, resolveSeasonForCompetition, getLastApiFootballDiagnostics, type Match } from "./soccerService";
+import {
+  fetchFootball,
+  resolveSeasonForCompetition,
+  getLastApiFootballDiagnostics,
+  type Match,
+} from "./soccerService";
+import {
+  isApiFootballProviderError,
+  markApiFootballFailure,
+} from "./apiFootballReliability";
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
@@ -314,15 +323,21 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   // actually scheduled on those dates, regardless of how a competition's
   // season is labelled by the provider.
   for (const date of dates) {
+    const path = `/fixtures?date=${date}&timezone=UTC`;
     try {
-      const data = (await fetchFootball(
-        `/fixtures?date=${date}&timezone=UTC`,
-      )) as FutureFixture[] | null;
-      if (!Array.isArray(data)) continue;
+      const data = await fetchFootball(path);
+      if (!Array.isArray(data)) {
+        throw markApiFootballFailure({
+          path,
+          message: "API-Football returned an unexpected future-fixture payload",
+          kind: "malformed_response",
+          state: "degraded",
+        });
+      }
       dateQueriesSucceeded++;
       rawFixturesLoaded += data.length;
 
-      for (const fixture of data) {
+      for (const fixture of data as FutureFixture[]) {
         const fixtureId = Number(fixture?.fixture?.id);
         const leagueId = Number(fixture?.league?.id);
         if (!Number.isInteger(fixtureId) || fixtureId <= 0) continue;
@@ -330,6 +345,13 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
         deduped.set(fixtureId, fixture);
       }
     } catch (err) {
+      if (isApiFootballProviderError(err)) {
+        logger.warn(
+          { err, date },
+          "future market sampler: aborting fixture refresh because API-Football is unavailable",
+        );
+        throw err;
+      }
       logger.warn(
         { err, date },
         "future market sampler: date fixture fetch failed",
@@ -340,36 +362,33 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   trackedFixturesFromDates = deduped.size;
 
   // Fallback path: if date discovery produces no tracked fixtures at all,
-  // query every tracked competition explicitly. Try the configured season
-  // first, then the previous season label to survive provider season-label
-  // inconsistencies around a new campaign.
+  // query every tracked competition explicitly. Resolve each competition's
+  // current season so season-label changes cannot hide legitimate fixtures.
   if (deduped.size === 0) {
-    const configuredSeason = Number(SEASON);
-    const fallbackSeasons = Array.from(
-      new Set(
-        [configuredSeason, configuredSeason - 1]
-          .filter((value) => Number.isInteger(value) && value > 2000)
-          .map(String),
-      ),
-    );
-
     for (const competition of TRACKED_COMPETITIONS) {
       fallbackCompetitionsQueried++;
       let competitionFound = false;
 
-      // Resolve season per-competition to handle API-Football current season correctly
       const season = String(await resolveSeasonForCompetition(competition.id));
       const fallbackSeasonsResolved = [season, String(Number(season) - 1)];
 
       for (const seasonLabel of fallbackSeasonsResolved) {
         const path = `/fixtures?league=${competition.id}&season=${encodeURIComponent(seasonLabel)}&from=${dateOnly(now)}&to=${dateOnly(end)}&timezone=UTC`;
         try {
-          const data = (await fetchFootball(path)) as FutureFixture[] | null;
-          if (!Array.isArray(data) || data.length === 0) continue;
+          const data = await fetchFootball(path);
+          if (!Array.isArray(data)) {
+            throw markApiFootballFailure({
+              path,
+              message: "API-Football returned an unexpected competition-fixture payload",
+              kind: "malformed_response",
+              state: "degraded",
+            });
+          }
+          if (data.length === 0) continue;
           rawFixturesLoaded += data.length;
           competitionFound = true;
 
-          for (const fixture of data) {
+          for (const fixture of data as FutureFixture[]) {
             const fixtureId = Number(fixture?.fixture?.id);
             if (!Number.isInteger(fixtureId) || fixtureId <= 0) continue;
             if (!isTrackedLeague(Number(fixture?.league?.id))) continue;
@@ -378,6 +397,18 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
 
           if (competitionFound) break;
         } catch (err) {
+          if (isApiFootballProviderError(err)) {
+            logger.warn(
+              {
+                err,
+                leagueId: competition.id,
+                competition: competition.name,
+                season,
+              },
+              "future market sampler: aborting competition fallback because API-Football is unavailable",
+            );
+            throw err;
+          }
           logger.warn(
             {
               err,
@@ -573,7 +604,7 @@ async function recordSamplerJob(
 ) {
   try {
     const now = new Date();
-    
+
     // Record main sampler job
     await db.insert(backgroundJobRuns).values({
       jobName: "future_market_sampler",
@@ -644,7 +675,6 @@ function dateKeysBetween(start: Date, end: Date) {
   }
   return keys;
 }
-
 
 /**
  * Reconstruct daily odds API call budget from database job records.
