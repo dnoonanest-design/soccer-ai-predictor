@@ -1,5 +1,11 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
+import {
+  assessPredictionReliability,
+  capHomeAdvantage,
+  guardThreeWayProbabilities,
+  type PredictionReliabilityContext,
+} from "./predictionReliabilityService";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -172,6 +178,12 @@ export interface EnhancedPrediction {
   home_form_factor: number;
   away_form_factor: number;
   home_advantage: number;
+  reliability_score: number;
+  reliability_label: "very-low" | "low" | "medium" | "high";
+  prediction_mode: "standard" | "cup" | "cross-league";
+  probability_shrink: number;
+  home_strength_factor: number;
+  away_strength_factor: number;
   live_score_home?: number;
   live_score_away?: number;
   live_adjusted_home_win?: number;
@@ -565,13 +577,20 @@ export async function getEnhancedPrediction(
   homeGpg: number, homeCpg: number, awayGpg: number, awayCpg: number,
   homeTeamName = "", awayTeamName = "", matchMinute: number | null = null, isLive = false,
   liveScoreHome: number | null = null, liveScoreAway: number | null = null,
-  homeForm = "", awayForm = "", liveStats?: LiveMatchStatsInput
+  homeForm = "", awayForm = "", liveStats?: LiveMatchStatsInput,
+  reliabilityContext?: Omit<PredictionReliabilityContext, "leagueId" | "lineupConfirmed" | "isLive">
 ): Promise<EnhancedPrediction> {
-  const homeAdv = getHomeAdvantage(leagueId);
+  const homeAdv = capHomeAdvantage(getHomeAdvantage(leagueId), leagueId);
+  const earlyReliability = assessPredictionReliability({
+    leagueId,
+    ...reliabilityContext,
+    lineupConfirmed: false,
+    isLive,
+  });
   const homeFormFactor = formFactor(homeForm);
   const awayFormFactor = formFactor(awayForm);
-  const baseHomeXG = ((homeGpg + awayCpg) / 2) * homeAdv;
-  const baseAwayXG = (awayGpg + homeCpg) / 2;
+  const baseHomeXG = ((homeGpg + awayCpg) / 2) * homeAdv * earlyReliability.homeStrengthFactor;
+  const baseAwayXG = ((awayGpg + homeCpg) / 2) * earlyReliability.awayStrengthFactor;
   const base = poissonProbs(baseHomeXG, baseAwayXG);
 
   // Shared rate limiter serializes these API calls even when the promises are scheduled together.
@@ -606,9 +625,25 @@ export async function getEnhancedPrediction(
     const blended = blendH2H(finalHome, finalDraw, finalAway, h2hResult);
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
+  const reliability = assessPredictionReliability({
+    leagueId,
+    ...reliabilityContext,
+    lineupConfirmed: Boolean(lineupResult?.confirmed),
+    isLive,
+  });
+  const guarded = guardThreeWayProbabilities(finalHome, finalDraw, finalAway, reliability);
+  finalHome = guarded.home; finalDraw = guarded.draw; finalAway = guarded.away;
   const markets = extendedPoissonMarkets(adjHomeXG, adjAwayXG);
-  const confidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
-  const reasons = buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName });
+  const modelConfidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
+  const adjustedConfidenceScore = round2(modelConfidence.score * (0.55 + 0.45 * reliability.score / 100));
+  const confidence = {
+    label: (adjustedConfidenceScore >= 72 ? "High" : adjustedConfidenceScore >= 55 ? "Medium" : "Low") as "Low" | "Medium" | "High",
+    score: adjustedConfidenceScore,
+  };
+  const reasons = [
+    ...buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName }),
+    ...reliability.reasons,
+  ].slice(0, 7);
   const liveMomentum = isLive ? liveMomentumFromEvents(eventsList, homeTeamId, awayTeamId, matchMinute, adjHomeXG, adjAwayXG, liveStats) : undefined;
 
   let liveAdjHomeWin: number | undefined, liveAdjDraw: number | undefined, liveAdjAwayWin: number | undefined;
@@ -645,6 +680,8 @@ export async function getEnhancedPrediction(
     home_lineup_factor: round2(homeLineupFactor), away_lineup_factor: round2(awayLineupFactor),
     home_injury_factor: round2(homeInjuryFactor), away_injury_factor: round2(awayInjuryFactor),
     home_form_factor: round2(homeFormFactor), away_form_factor: round2(awayFormFactor), home_advantage: round2(homeAdv),
+    reliability_score: reliability.score, reliability_label: reliability.label, prediction_mode: reliability.mode,
+    probability_shrink: reliability.probabilityShrink, home_strength_factor: reliability.homeStrengthFactor, away_strength_factor: reliability.awayStrengthFactor,
     live_score_home: liveScoreHome ?? undefined, live_score_away: liveScoreAway ?? undefined,
     live_adjusted_home_win: liveAdjHomeWin, live_adjusted_draw: liveAdjDraw, live_adjusted_away_win: liveAdjAwayWin,
     substitution_impacts: substitutionImpacts, home_sub_xg_delta: homeSubXgDelta, away_sub_xg_delta: awaySubXgDelta,
