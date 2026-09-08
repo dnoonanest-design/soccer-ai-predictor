@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { runAiAwarenessCycle } from "./aiAwareLearningService";
 import { analyzeCircumstanceInfluence } from "./circumstanceLearningService";
 import { getCalibrationReport, getCalibrationFactors } from "./predictionStore";
+import { assertCoreAiLearningPayload, getCoreAiDataPolicyReport } from "./aiDataProvenancePolicy";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -37,6 +38,14 @@ export async function rememberAiLearning(input: {
   learnedWeights?: JsonRecord | null;
   confidence?: number | null;
 }) {
+  assertCoreAiLearningPayload({
+    source: input.source,
+    learningType: input.learningType,
+    subject: input.subject,
+    summary: input.summary,
+    evidence: input.evidence,
+    learnedWeights: input.learnedWeights,
+  });
   const confidence = input.confidence == null ? null : Math.max(0, Math.min(1, safeNumber(input.confidence, 0)));
   await db.insert(aiLearningMemory).values({
     learningType: input.learningType,
@@ -82,18 +91,26 @@ export async function consolidatePersistentLearningMemory(limit = 200) {
   }
 
   const openQueue = await db.select().from(selfImprovementQueue).where(eq(selfImprovementQueue.status, "open")).orderBy(desc(selfImprovementQueue.createdAt)).limit(50);
+  let rememberedQueueSignals = 0;
+  let blockedQueueSignals = 0;
   for (const item of openQueue as any[]) {
-    await rememberAiLearning({
-      learningType: "open_improvement_signal",
-      source: "self_improvement_queue",
-      subject: item.issueType,
-      summary: item.description,
-      evidence: { queueId: item.id, priority: item.priority, evidence: item.evidenceJson },
-      confidence: Math.min(0.9, Math.max(0.2, safeNumber(item.priority, 5) / 10)),
-    }).catch(() => undefined);
+    try {
+      await rememberAiLearning({
+        learningType: "open_improvement_signal",
+        source: "self_improvement_queue",
+        subject: item.issueType,
+        summary: item.description,
+        evidence: { queueId: item.id, priority: item.priority, evidence: item.evidenceJson },
+        confidence: Math.min(0.9, Math.max(0.2, safeNumber(item.priority, 5) / 10)),
+      });
+      rememberedQueueSignals++;
+    } catch (err) {
+      blockedQueueSignals++;
+      logger.warn({ err, queueId: item.id, issueType: item.issueType }, "AI provenance firewall blocked improvement signal");
+    }
   }
 
-  return { rememberedAudits: remembered, rememberedQueueSignals: openQueue.length };
+  return { rememberedAudits: remembered, rememberedQueueSignals, blockedQueueSignals };
 }
 
 async function latestActiveModel() {
@@ -160,11 +177,15 @@ export async function generateBiweeklyAiUpdate(options: { force?: boolean } = {}
     calibrationReport: calibration,
     calibrationFactors: factors,
     memoryConsolidation: memory,
+    dataProvenancePolicy: getCoreAiDataPolicyReport(),
     safetyRules: {
       minimumSettledMatchesForPromotion: 60,
       maximumBrierForPromotion: 0.24,
       noSourceCodeSelfModification: true,
       databaseCalibrationOnly: true,
+      internalDataOnly: true,
+      externalForecastInputsForbidden: true,
+      marketIntelligenceInputsForbidden: true,
     },
   };
 
@@ -178,7 +199,7 @@ export async function generateBiweeklyAiUpdate(options: { force?: boolean } = {}
     improvementsJson: payload as any,
     appliedModelVersion: modelAfter?.modelVersion ?? modelBefore?.modelVersion ?? null,
     applied: accepted,
-    notes: accepted ? "Fortnightly update applied through guarded database calibration." : "Fortnightly update saved for review; more data or better metrics required before full promotion.",
+    notes: accepted ? "Fortnightly update applied through guarded internal-data calibration." : "Fortnightly update saved for review; more internal evidence or better metrics required before full promotion.",
   }).returning();
 
   return { update: inserted[0], accepted, summary, payload };
@@ -194,6 +215,7 @@ export async function getAiMemoryUpdateReport() {
     activeModel,
     recentBiweeklyUpdates: updates,
     recentLearningMemory: memories,
-    explanation: "All gathered match data and AI learnings are retained in Postgres tables. Every two weeks the app consolidates evidence, writes a permanent AI update record, and safely promotes calibration/model parameters only when sample-size and accuracy checks pass.",
+    dataProvenancePolicy: getCoreAiDataPolicyReport(),
+    explanation: "Core AI learning is retained in Postgres and is restricted to evidence produced by the app's own football-data, prediction, outcome and audit pipeline. External forecasts and market-intelligence signals are rejected from this learning memory.",
   };
 }
