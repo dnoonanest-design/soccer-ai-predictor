@@ -12,6 +12,16 @@ const SCHEDULE_REFRESH_MS = clamp(
   60 * 60_000,
   12 * 60 * 60_000,
 );
+const SCHEDULE_FAILURE_BACKOFF_MS = clamp(
+  Number(process.env.API_FOOTBALL_SCHEDULE_FAILURE_BACKOFF_MS ?? 30 * 60_000),
+  5 * 60_000,
+  2 * 60 * 60_000,
+);
+const PROVIDER_FAILURE_CACHE_MS = clamp(
+  Number(process.env.API_FOOTBALL_PROVIDER_FAILURE_CACHE_MS ?? 15 * 60_000),
+  5 * 60_000,
+  60 * 60_000,
+);
 const DAILY_BUDGET = clamp(
   Number(process.env.API_FOOTBALL_DAILY_BUDGET ?? 7000),
   100,
@@ -81,6 +91,7 @@ const FINISHED_STATUSES = new Set(["FT", "AET", "PEN", "AWD", "WO"]);
 let installed = false;
 let scheduleFetchedAt = 0;
 let scheduleRefreshes = 0;
+let lastScheduleAttemptAt = 0;
 let providerCallsToday = 0;
 let providerLimit: number | null = null;
 let providerRemaining: number | null = null;
@@ -97,6 +108,7 @@ let lastProviderCallAt: string | null = null;
 let lastBlockedPath: string | null = null;
 let lastScheduleRefreshAt: string | null = null;
 let lastScheduleError: string | null = null;
+let cachedProviderFailure: StoredResponse | null = null;
 
 export function installQuotaOptimizationLayer(): void {
   if (installed || !ENABLED) return;
@@ -106,6 +118,7 @@ export function installQuotaOptimizationLayer(): void {
     {
       scheduleDays: SCHEDULE_DAYS,
       scheduleRefreshMs: SCHEDULE_REFRESH_MS,
+      scheduleFailureBackoffMs: SCHEDULE_FAILURE_BACKOFF_MS,
       dailyBudget: DAILY_BUDGET,
       livePollMs: LIVE_POLL_MS,
       prematchLeadMs: PREMATCH_LEAD_MS,
@@ -141,6 +154,7 @@ export function getQuotaOptimizationStatus() {
       days: SCHEDULE_DAYS,
       trackedFixturesStored: schedule.size,
       refreshMs: SCHEDULE_REFRESH_MS,
+      failureBackoffMs: SCHEDULE_FAILURE_BACKOFF_MS,
       refreshes: scheduleRefreshes,
       lastRefreshAt: lastScheduleRefreshAt,
       lastError: lastScheduleError,
@@ -234,15 +248,21 @@ async function replaceLiveDiscovery(init?: RequestInit): Promise<Response> {
 
   await ensureSchedule(init);
 
-  // If the schedule could not be established at all, fall back to the real
-  // endpoint once so the existing reliability layer can see the provider error.
   if (schedule.size === 0 && lastScheduleError) {
+    if (cachedProviderFailure && Date.now() - cachedProviderFailure.fetchedAt < PROVIDER_FAILURE_CACHE_MS) {
+      cacheHits++;
+      estimatedCallsSaved++;
+      return restore(cachedProviderFailure);
+    }
+
     const parsed = new URL(`${API_BASE}/fixtures?live=all`);
     const response = await originalFetch(parsed, providerInit(init));
     observeQuota(response.headers);
     providerCallsToday++;
     lastProviderCallAt = new Date().toISOString();
-    return response;
+    const stored = await store(response);
+    if (responseHasProviderFailure(stored)) cachedProviderFailure = stored;
+    return restore(stored);
   }
 
   const now = Date.now();
@@ -277,8 +297,10 @@ async function replaceLiveDiscovery(init?: RequestInit): Promise<Response> {
 
 async function ensureSchedule(init?: RequestInit): Promise<void> {
   if (scheduleFetchedAt > 0 && Date.now() - scheduleFetchedAt < SCHEDULE_REFRESH_MS) return;
+  if (lastScheduleError && schedule.size === 0 && Date.now() - lastScheduleAttemptAt < SCHEDULE_FAILURE_BACKOFF_MS) return;
   if (!requestAllowed("normal") && schedule.size > 0) return;
 
+  lastScheduleAttemptAt = Date.now();
   const start = new Date();
   const fetched = new Map<number, FixtureRecord>();
   let successfulDays = 0;
@@ -304,6 +326,7 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
       const errors = normalizeErrors(json.errors);
       if (stored.status < 200 || stored.status >= 300 || errors.length > 0 || !Array.isArray(json.response)) {
         firstError ??= errors.join("; ") || `HTTP ${stored.status}`;
+        if (errors.length > 0 || stored.status === 401 || stored.status === 403 || stored.status === 429) break;
         continue;
       }
 
@@ -315,6 +338,7 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
       }
     } catch (error) {
       firstError ??= error instanceof Error ? error.message : String(error);
+      break;
     }
 
     if (offset < SCHEDULE_DAYS - 1) await sleep(180);
@@ -327,13 +351,14 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
     scheduleRefreshes++;
     lastScheduleRefreshAt = new Date().toISOString();
     lastScheduleError = null;
+    cachedProviderFailure = null;
     logger.info(
       { successfulDays, trackedFixturesStored: schedule.size, scheduleDays: SCHEDULE_DAYS },
       "API-Football tracked weekly fixture schedule refreshed",
     );
   } else {
     lastScheduleError = firstError ?? "Schedule refresh returned no valid provider responses";
-    logger.warn({ err: lastScheduleError }, "API-Football fixture schedule refresh failed");
+    logger.warn({ err: lastScheduleError }, "API-Football fixture schedule refresh failed; backoff active");
   }
 }
 
@@ -488,6 +513,16 @@ function observeQuota(headers: Headers): void {
   if (Number.isFinite(remaining) && remaining >= 0) providerRemaining = remaining;
   if ((Number.isFinite(limit) && limit > 0) || (Number.isFinite(remaining) && remaining >= 0)) {
     providerQuotaObservedAt = new Date().toISOString();
+  }
+}
+
+function responseHasProviderFailure(stored: StoredResponse): boolean {
+  if (stored.status < 200 || stored.status >= 300) return true;
+  try {
+    const json = JSON.parse(stored.body) as ApiEnvelope;
+    return normalizeErrors(json.errors).length > 0;
+  } catch {
+    return true;
   }
 }
 
