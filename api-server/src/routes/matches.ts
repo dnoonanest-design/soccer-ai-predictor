@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Response } from "express";
 import { getAllMatches, getMatchById } from "../lib/soccerService";
 import { saveOutcome } from "../lib/predictionStore";
 import { isTrackedLeague } from "../lib/leagueConfig";
@@ -24,7 +24,7 @@ function inProductScope(match: { league_id: number; league_name?: string | null 
   return isTrackedLeague(Number(match.league_id)) && !isBlockedLeague(match.league_name);
 }
 
-function handleMatchRouteError(err: unknown, res: Parameters<Parameters<IRouter["get"]>[1]>[1]) {
+function handleMatchRouteError(err: unknown, res: Response) {
   if (isApiFootballProviderError(err)) {
     const provider = getApiFootballProviderHealth();
     return res.status(503).json({
