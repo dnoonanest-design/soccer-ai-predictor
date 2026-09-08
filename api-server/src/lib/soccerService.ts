@@ -1,6 +1,11 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
+import {
+  isApiFootballProviderError,
+  markApiFootballFailure,
+  markApiFootballSuccess,
+} from "./apiFootballReliability";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -62,6 +67,8 @@ export async function resolveSeasonForCompetition(leagueId: number): Promise<num
       return season;
     }
   } catch (err) {
+    // Provider outages/auth failures must not be hidden by a guessed season.
+    if (isApiFootballProviderError(err)) throw err;
     logger.debug({ err, leagueId }, "Failed to resolve current season from API-Football, trying fallback");
   }
 
@@ -82,7 +89,6 @@ export async function resolveSeasonForCompetition(leagueId: number): Promise<num
   logger.debug({ leagueId, season: fallbackSeason }, "Computed season from calendar year");
   return fallbackSeason;
 }
-
 
 let _liveMatchCount = 0;
 export function hasLiveMatches(): boolean {
@@ -113,34 +119,84 @@ export function getLastApiFootballDiagnostics(): ApiFootballDiagnostics | null {
   return lastApiFootballDiagnostics;
 }
 
+function normalizeApiErrors(errors: ApiFootballEnvelope["errors"]): string[] {
+  if (Array.isArray(errors)) return errors.map(String).filter(Boolean);
+  if (errors && typeof errors === "object") {
+    return Object.values(errors)
+      .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+      .filter(Boolean);
+  }
+  if (errors) return [String(errors)];
+  return [];
+}
+
 export async function fetchFootball(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) {
-    logger.warn("API_FOOTBALL_KEY not set");
-    return null;
+    throw markApiFootballFailure({
+      path,
+      message: "API_FOOTBALL_KEY not set",
+      kind: "configuration",
+      state: "offline",
+    });
   }
 
   const url = `${API_FOOTBALL_BASE}${path}`;
   const startMs = Date.now();
+  let res: Response;
 
-  await waitForRateLimit();
-  const res = await fetch(url, {
-    headers: { "x-apisports-key": API_FOOTBALL_KEY },
-  });
+  try {
+    await waitForRateLimit();
+    res = await fetch(url, {
+      headers: { "x-apisports-key": API_FOOTBALL_KEY },
+    });
+  } catch (err) {
+    if (isApiFootballProviderError(err)) throw err;
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football transport failure: ${err instanceof Error ? err.message : String(err)}`,
+      kind: "transport",
+      state: "degraded",
+    });
+  }
 
   const responseMs = Date.now() - startMs;
 
   if (!res.ok) {
-    logger.error({ status: res.status, path }, "API-Football request failed");
-    return null;
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football HTTP ${res.status}`,
+      httpStatus: res.status,
+    });
   }
 
-  const json = (await res.json()) as ApiFootballEnvelope;
+  let json: ApiFootballEnvelope;
+  try {
+    json = (await res.json()) as ApiFootballEnvelope;
+  } catch (err) {
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      kind: "malformed_response",
+      state: "degraded",
+    });
+  }
+
+  if (!json || typeof json !== "object" || !("response" in json)) {
+    throw markApiFootballFailure({
+      path,
+      message: "API-Football response envelope is missing the response field",
+      kind: "malformed_response",
+      state: "degraded",
+    });
+  }
+
+  const apiErrors = normalizeApiErrors(json.errors);
 
   // Extract diagnostics from response headers and envelope
   const diagnostics: ApiFootballDiagnostics = {
     path,
     results: json.results ?? 0,
-    errors: [],
+    errors: apiErrors,
     responseSeconds: Math.round(responseMs / 1000),
   };
 
@@ -167,30 +223,20 @@ export async function fetchFootball(path: string): Promise<unknown> {
 
   lastApiFootballDiagnostics = diagnostics;
 
-  // Log warnings if API returned errors at the envelope level (can be array or object)
-  let apiErrors: string[] = [];
-  if (Array.isArray(json.errors)) {
-    apiErrors = json.errors;
-  } else if (json.errors && typeof json.errors === "object") {
-    // Normalize error object values
-    apiErrors = Object.values(json.errors)
-      .map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
-      .filter(Boolean);
-  } else if (json.errors) {
-    apiErrors = [String(json.errors)];
-  }
-
+  // API-Football commonly reports subscription/auth failures inside a HTTP 200
+  // envelope. Treat any envelope error as a provider failure, never as zero data.
   if (apiErrors.length > 0) {
-    diagnostics.errors = apiErrors;
-    logger.warn(
-      { path, errors: apiErrors, results: json.results },
-      "API-Football returned errors in response envelope",
-    );
+    const message = apiErrors.join("; ");
+    throw markApiFootballFailure({
+      path,
+      message,
+    });
   }
 
-  // Log if results is explicitly 0 (no data) vs. missing
+  markApiFootballSuccess(path);
+
   if (json.results === 0) {
-    logger.debug({ path }, "API-Football returned zero results");
+    logger.debug({ path }, "API-Football returned a valid zero-result response");
   }
 
   return json.response;
@@ -396,6 +442,16 @@ function extractOdds(
   };
 }
 
+function requireFixtureArray(data: unknown, path: string): ApiFootballFixture[] {
+  if (Array.isArray(data)) return data as ApiFootballFixture[];
+  throw markApiFootballFailure({
+    path,
+    message: "API-Football returned an unexpected fixture payload",
+    kind: "malformed_response",
+    state: "degraded",
+  });
+}
+
 async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
   const cached = getCached<ApiFootballFixture[]>(
     "today_fixtures",
@@ -404,20 +460,23 @@ async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
   if (cached) return cached;
 
   const today = new Date().toISOString().split("T")[0];
-  let data = (await fetchFootball(
-    `/fixtures?date=${today}&timezone=UTC`,
-  )) as ApiFootballFixture[] | null;
+  const primaryPath = `/fixtures?date=${today}&timezone=UTC`;
+  let data = requireFixtureArray(await fetchFootball(primaryPath), primaryPath);
 
   // Some provider datasets may require a season-qualified request. Use it only
   // as a fallback so a stale or differently-labelled season cannot hide real
-  // fixtures that exist on today's calendar date.
-  if (!Array.isArray(data) || data.length === 0) {
-    data = (await fetchFootball(
-      `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`,
-    )) as ApiFootballFixture[] | null;
+  // fixtures that exist on today's calendar date. Provider errors are allowed
+  // to propagate; they must never be converted into a legitimate empty list.
+  if (data.length === 0) {
+    const fallbackPath = `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`;
+    const fallbackData = requireFixtureArray(
+      await fetchFootball(fallbackPath),
+      fallbackPath,
+    );
+    if (fallbackData.length > 0) data = fallbackData;
   }
 
-  const fixtures = (data ?? []).filter((fixture) =>
+  const fixtures = data.filter((fixture) =>
     isTrackedLeague(fixture.league.id),
   );
   setCache("today_fixtures", fixtures);
@@ -431,10 +490,9 @@ async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
   );
   if (cached) return cached;
 
-  const data = (await fetchFootball("/fixtures?live=all")) as
-    | ApiFootballFixture[]
-    | null;
-  const fixtures = (data ?? []).filter((fixture) =>
+  const path = "/fixtures?live=all";
+  const data = requireFixtureArray(await fetchFootball(path), path);
+  const fixtures = data.filter((fixture) =>
     isTrackedLeague(fixture.league.id),
   );
   _liveMatchCount = fixtures.length;
