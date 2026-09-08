@@ -1,0 +1,55 @@
+name: Apply Day 1 Reliability Fixes
+
+on:
+  push:
+    branches:
+      - fix/day1-reliability-learning
+    paths:
+      - scripts/apply-day1-fixes.mjs
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Apply deterministic source patch
+        run: node scripts/apply-day1-fixes.mjs
+
+      - name: Validate patch formatting
+        run: git diff --check
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run API tests
+        run: pnpm --filter soccer-ai-predictor-api-bundled test
+
+      - name: Build API bundle
+        run: pnpm --filter soccer-ai-predictor-api-bundled build
+
+      - name: Commit validated fixes
+        run: |
+          if git diff --quiet; then
+            echo "No source changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api-server/src/lib
+          git commit -m "Apply Day 1 reliability fixes [skip ci]"
+          git push origin HEAD:fix/day1-reliability-learning
