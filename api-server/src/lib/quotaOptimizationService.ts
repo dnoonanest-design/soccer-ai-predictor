@@ -1,8 +1,9 @@
+import { isTrackedLeague } from "./leagueConfig";
 import { logger } from "./logger";
 
-const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
-const API_FOOTBALL_HOST = "v3.football.api-sports.io";
-const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
+const API_BASE = "https://v3.football.api-sports.io";
+const API_HOST = "v3.football.api-sports.io";
+const API_KEY = process.env.API_FOOTBALL_KEY ?? "";
 
 const ENABLED = process.env.API_FOOTBALL_QUOTA_OPTIMIZATION_ENABLED !== "false";
 const SCHEDULE_DAYS = clamp(Number(process.env.API_FOOTBALL_SCHEDULE_DAYS ?? 8), 7, 14);
@@ -35,7 +36,7 @@ const ACTIVE_TAIL_MS = clamp(
 const originalFetch = globalThis.fetch.bind(globalThis);
 
 export type ApiFootballQuotaMode = "full" | "conserve" | "protect" | "critical";
-export type ApiFootballRequestPriority = "critical" | "live" | "normal" | "background";
+type Priority = "critical" | "live" | "normal" | "background";
 
 type StoredResponse = {
   status: number;
@@ -65,23 +66,21 @@ type FixtureRecord = {
 };
 
 type ApiEnvelope = {
-  get?: string;
-  parameters?: Record<string, unknown>;
   errors?: unknown;
-  results?: number;
-  paging?: { current?: number; total?: number };
   response?: unknown;
 };
 
 const responseCache = new Map<string, StoredResponse>();
 const inFlight = new Map<string, Promise<StoredResponse>>();
 const schedule = new Map<number, FixtureRecord>();
-const fixtureBundles = new Map<number, { fixture: FixtureRecord; fetchedAt: number }>();
+const bundles = new Map<number, { fixture: FixtureRecord; fetchedAt: number }>();
+
+const LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P", "LIVE"]);
+const FINISHED_STATUSES = new Set(["FT", "AET", "PEN", "AWD", "WO"]);
 
 let installed = false;
 let scheduleFetchedAt = 0;
 let scheduleRefreshes = 0;
-let liveDiscoveryRequestsAvoided = 0;
 let providerCallsToday = 0;
 let providerLimit: number | null = null;
 let providerRemaining: number | null = null;
@@ -92,13 +91,12 @@ let bundleCacheHits = 0;
 let bundledProviderCalls = 0;
 let blockedCalls = 0;
 let estimatedCallsSaved = 0;
+let liveDiscoveryRequestsAvoided = 0;
+let scheduleFallbacksAvoided = 0;
 let lastProviderCallAt: string | null = null;
 let lastBlockedPath: string | null = null;
 let lastScheduleRefreshAt: string | null = null;
 let lastScheduleError: string | null = null;
-
-const LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P", "LIVE"]);
-const FINISHED_STATUSES = new Set(["FT", "AET", "PEN", "AWD", "WO"]);
 
 export function installQuotaOptimizationLayer(): void {
   if (installed || !ENABLED) return;
@@ -118,12 +116,8 @@ export function installQuotaOptimizationLayer(): void {
 
 export function getQuotaOptimizationStatus() {
   rollBudgetDate();
-  const effectiveBudget = getEffectiveBudget();
-  const used = getEffectiveUsed();
-  const utilisationPct = effectiveBudget > 0
-    ? Math.round((used / effectiveBudget) * 10_000) / 100
-    : 0;
-
+  const effectiveBudget = effectiveDailyBudget();
+  const used = effectiveUsedToday();
   return {
     enabled: ENABLED,
     installed,
@@ -134,7 +128,7 @@ export function getQuotaOptimizationStatus() {
     providerRemaining,
     providerQuotaObservedAt,
     effectiveUsedToday: used,
-    utilisationPct,
+    utilisationPct: effectiveBudget > 0 ? round2((used / effectiveBudget) * 100) : 0,
     providerCallsToday,
     cacheHits,
     bundleCacheHits,
@@ -142,9 +136,10 @@ export function getQuotaOptimizationStatus() {
     blockedCalls,
     estimatedCallsSaved,
     liveDiscoveryRequestsAvoided,
+    scheduleFallbacksAvoided,
     schedule: {
       days: SCHEDULE_DAYS,
-      fixturesStored: schedule.size,
+      trackedFixturesStored: schedule.size,
       refreshMs: SCHEDULE_REFRESH_MS,
       refreshes: scheduleRefreshes,
       lastRefreshAt: lastScheduleRefreshAt,
@@ -155,66 +150,66 @@ export function getQuotaOptimizationStatus() {
   };
 }
 
-async function quotaOptimizedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
+async function quotaOptimizedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = requestUrl(input);
-  if (!ENABLED || !isApiFootballUrl(url)) {
-    return originalFetch(input, init);
-  }
+  if (!ENABLED || !isApiFootballUrl(url)) return originalFetch(input, init);
 
   rollBudgetDate();
   const parsed = new URL(url);
 
-  if (parsed.pathname === "/fixtures" && parsed.searchParams.get("live") === "all") {
-    return handleLiveDiscoveryReplacement(init);
+  if (isLiveDiscovery(parsed)) {
+    return replaceLiveDiscovery(init);
   }
 
-  const bundled = bundledEndpointResponse(parsed);
+  const scheduleFallback = responseFromStoredSchedule(parsed);
+  if (scheduleFallback) {
+    scheduleFallbacksAvoided++;
+    estimatedCallsSaved++;
+    return scheduleFallback;
+  }
+
+  const bundled = responseFromBundle(parsed);
   if (bundled) {
     bundleCacheHits++;
     estimatedCallsSaved++;
     return bundled;
   }
 
-  const ttl = cacheTtlFor(parsed);
   const cached = responseCache.get(url);
-  if (cached && Date.now() - cached.fetchedAt < ttl) {
+  if (cached && Date.now() - cached.fetchedAt < cacheTtl(parsed)) {
     cacheHits++;
     estimatedCallsSaved++;
-    return restoreResponse(cached);
+    return restore(cached);
   }
 
-  const priority = priorityFor(parsed);
-  if (!requestAllowed(priority)) {
+  if (!requestAllowed(priorityFor(parsed))) {
     blockedCalls++;
     lastBlockedPath = `${parsed.pathname}${parsed.search}`;
     if (cached) {
       cacheHits++;
       estimatedCallsSaved++;
-      return restoreResponse(cached);
+      return restore(cached);
     }
-    return syntheticEnvelopeResponse(parsed, []);
+    return synthetic(parsed, []);
   }
 
   const existing = inFlight.get(url);
   if (existing) {
     cacheHits++;
     estimatedCallsSaved++;
-    return restoreResponse(await existing);
+    return restore(await existing);
   }
 
-  const work = performProviderRequest(input, init, url, parsed);
+  const work = realRequest(input, init, url, parsed);
   inFlight.set(url, work);
   try {
-    return restoreResponse(await work);
+    return restore(await work);
   } finally {
     inFlight.delete(url);
   }
 }
 
-async function performProviderRequest(
+async function realRequest(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   url: string,
@@ -225,54 +220,59 @@ async function performProviderRequest(
   providerCallsToday++;
   lastProviderCallAt = new Date().toISOString();
 
-  const stored = await storeResponse(response);
+  const stored = await store(response);
   if (stored.status >= 200 && stored.status < 300) {
     responseCache.set(url, stored);
-    updateFixtureCachesFromStored(parsed, stored);
+    updateFixtureCaches(parsed, stored);
   }
   return stored;
 }
 
-async function handleLiveDiscoveryReplacement(init?: RequestInit): Promise<Response> {
+async function replaceLiveDiscovery(init?: RequestInit): Promise<Response> {
   liveDiscoveryRequestsAvoided++;
   estimatedCallsSaved++;
 
   await ensureSchedule(init);
+
+  // If the schedule could not be established at all, fall back to the real
+  // endpoint once so the existing reliability layer can see the provider error.
+  if (schedule.size === 0 && lastScheduleError) {
+    const parsed = new URL(`${API_BASE}/fixtures?live=all`);
+    const response = await originalFetch(parsed, providerInit(init));
+    observeQuota(response.headers);
+    providerCallsToday++;
+    lastProviderCallAt = new Date().toISOString();
+    return response;
+  }
+
   const now = Date.now();
   const candidates = Array.from(schedule.values())
     .filter((fixture) => {
-      const id = fixture.fixture?.id;
+      const leagueId = Number(fixture.league?.id);
+      const id = Number(fixture.fixture?.id);
       const kickoff = fixture.fixture?.date ? Date.parse(fixture.fixture.date) : NaN;
       const status = fixture.fixture?.status?.short ?? "";
-      if (!id || !Number.isFinite(kickoff) || FINISHED_STATUSES.has(status)) return false;
+      if (!isTrackedLeague(leagueId) || !Number.isInteger(id) || id <= 0) return false;
+      if (!Number.isFinite(kickoff) || FINISHED_STATUSES.has(status)) return false;
       return kickoff >= now - ACTIVE_TAIL_MS && kickoff <= now + PREMATCH_LEAD_MS;
     })
     .sort((a, b) => Date.parse(a.fixture?.date ?? "") - Date.parse(b.fixture?.date ?? ""));
 
-  if (candidates.length === 0) {
-    return syntheticEnvelopeResponse(new URL(`${API_FOOTBALL_BASE}/fixtures?live=all`), []);
-  }
+  if (candidates.length === 0) return synthetic(new URL(`${API_BASE}/fixtures?live=all`), []);
 
-  const ids = candidates
-    .map((fixture) => Number(fixture.fixture?.id))
-    .filter((id) => Number.isInteger(id) && id > 0);
-
-  const freshest = ids.every((id) => {
-    const cached = fixtureBundles.get(id);
-    if (!cached) return false;
-    return Date.now() - cached.fetchedAt < bundleTtl(cached.fixture);
+  const ids = candidates.map((fixture) => Number(fixture.fixture?.id));
+  const allFresh = ids.every((id) => {
+    const cached = bundles.get(id);
+    return Boolean(cached && Date.now() - cached.fetchedAt < bundleTtl(cached.fixture));
   });
 
-  if (!freshest && requestAllowed("live")) {
-    await refreshFixtureBundles(ids, init);
-  }
+  if (!allFresh && requestAllowed("live")) await refreshBundles(ids, init);
 
   const current = ids
-    .map((id) => fixtureBundles.get(id)?.fixture ?? schedule.get(id))
+    .map((id) => bundles.get(id)?.fixture ?? schedule.get(id))
     .filter((fixture): fixture is FixtureRecord => Boolean(fixture));
   const live = current.filter((fixture) => LIVE_STATUSES.has(fixture.fixture?.status?.short ?? ""));
-
-  return syntheticEnvelopeResponse(new URL(`${API_FOOTBALL_BASE}/fixtures?live=all`), live);
+  return synthetic(new URL(`${API_BASE}/fixtures?live=all`), live);
 }
 
 async function ensureSchedule(init?: RequestInit): Promise<void> {
@@ -291,14 +291,14 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
       start.getUTCMonth(),
       start.getUTCDate() + offset,
     )).toISOString().slice(0, 10);
-    const url = `${API_FOOTBALL_BASE}/fixtures?date=${date}&timezone=UTC`;
+    const url = `${API_BASE}/fixtures?date=${date}&timezone=UTC`;
 
     try {
       const response = await originalFetch(url, providerInit(init));
       observeQuota(response.headers);
       providerCallsToday++;
       lastProviderCallAt = new Date().toISOString();
-      const stored = await storeResponse(response);
+      const stored = await store(response);
       responseCache.set(url, stored);
       const json = JSON.parse(stored.body) as ApiEnvelope;
       const errors = normalizeErrors(json.errors);
@@ -306,10 +306,12 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
         firstError ??= errors.join("; ") || `HTTP ${stored.status}`;
         continue;
       }
+
       successfulDays++;
-      for (const raw of json.response as FixtureRecord[]) {
-        const id = Number(raw.fixture?.id);
-        if (Number.isInteger(id) && id > 0) fetched.set(id, raw);
+      for (const fixture of json.response as FixtureRecord[]) {
+        const id = Number(fixture.fixture?.id);
+        const leagueId = Number(fixture.league?.id);
+        if (Number.isInteger(id) && id > 0 && isTrackedLeague(leagueId)) fetched.set(id, fixture);
       }
     } catch (error) {
       firstError ??= error instanceof Error ? error.message : String(error);
@@ -319,14 +321,15 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
   }
 
   if (successfulDays > 0) {
+    schedule.clear();
     for (const [id, fixture] of fetched) schedule.set(id, fixture);
     scheduleFetchedAt = Date.now();
     scheduleRefreshes++;
     lastScheduleRefreshAt = new Date().toISOString();
     lastScheduleError = null;
     logger.info(
-      { successfulDays, fixturesStored: schedule.size, scheduleDays: SCHEDULE_DAYS },
-      "API-Football weekly fixture schedule refreshed",
+      { successfulDays, trackedFixturesStored: schedule.size, scheduleDays: SCHEDULE_DAYS },
+      "API-Football tracked weekly fixture schedule refreshed",
     );
   } else {
     lastScheduleError = firstError ?? "Schedule refresh returned no valid provider responses";
@@ -334,16 +337,15 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
   }
 }
 
-async function refreshFixtureBundles(ids: number[], init?: RequestInit): Promise<void> {
+async function refreshBundles(ids: number[], init?: RequestInit): Promise<void> {
   for (let index = 0; index < ids.length; index += 20) {
     if (!requestAllowed("live")) break;
     const group = ids.slice(index, index + 20);
     if (!group.length) continue;
-    const url = `${API_FOOTBALL_BASE}/fixtures?ids=${group.join("-")}`;
-
+    const url = `${API_BASE}/fixtures?ids=${group.join("-")}`;
     const existing = responseCache.get(url);
     if (existing && Date.now() - existing.fetchedAt < LIVE_POLL_MS) {
-      updateFixtureCachesFromStored(new URL(url), existing);
+      updateFixtureCaches(new URL(url), existing);
       continue;
     }
 
@@ -353,36 +355,52 @@ async function refreshFixtureBundles(ids: number[], init?: RequestInit): Promise
       providerCallsToday++;
       bundledProviderCalls++;
       lastProviderCallAt = new Date().toISOString();
-      const stored = await storeResponse(response);
+      const stored = await store(response);
       responseCache.set(url, stored);
-      updateFixtureCachesFromStored(new URL(url), stored);
+      updateFixtureCaches(new URL(url), stored);
     } catch (error) {
       logger.warn({ err: error, fixtureIds: group }, "API-Football bundled fixture refresh failed");
     }
   }
 }
 
-function bundledEndpointResponse(parsed: URL): Response | null {
-  const fixtureIdRaw = parsed.searchParams.get("fixture") ?? parsed.searchParams.get("id");
-  const fixtureId = Number(fixtureIdRaw);
-  if (!Number.isInteger(fixtureId) || fixtureId <= 0) return null;
+function responseFromStoredSchedule(parsed: URL): Response | null {
+  if (parsed.pathname !== "/fixtures") return null;
+  const leagueId = Number(parsed.searchParams.get("league"));
+  const from = parsed.searchParams.get("from");
+  const to = parsed.searchParams.get("to");
+  if (!Number.isInteger(leagueId) || !isTrackedLeague(leagueId) || !from || !to) return null;
 
-  const bundle = fixtureBundles.get(fixtureId);
-  if (!bundle || Date.now() - bundle.fetchedAt > bundleTtl(bundle.fixture)) return null;
-  const fixture = bundle.fixture;
+  const start = Date.parse(`${from}T00:00:00Z`);
+  const end = Date.parse(`${to}T23:59:59Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
 
-  let response: unknown | undefined;
-  if (parsed.pathname === "/fixtures/events") response = fixture.events;
-  else if (parsed.pathname === "/fixtures/lineups") response = fixture.lineups;
-  else if (parsed.pathname === "/fixtures/statistics") response = fixture.statistics;
-  else if (parsed.pathname === "/fixtures/players") response = fixture.players;
-  else if (parsed.pathname === "/fixtures" && parsed.searchParams.has("id")) response = [fixture];
-
-  if (response === undefined) return null;
-  return syntheticEnvelopeResponse(parsed, Array.isArray(response) ? response : []);
+  const fixtures = Array.from(schedule.values()).filter((fixture) => {
+    if (Number(fixture.league?.id) !== leagueId) return false;
+    const kickoff = fixture.fixture?.date ? Date.parse(fixture.fixture.date) : NaN;
+    return Number.isFinite(kickoff) && kickoff >= start && kickoff <= end;
+  });
+  return synthetic(parsed, fixtures);
 }
 
-function updateFixtureCachesFromStored(parsed: URL, stored: StoredResponse): void {
+function responseFromBundle(parsed: URL): Response | null {
+  const fixtureId = Number(parsed.searchParams.get("fixture") ?? parsed.searchParams.get("id"));
+  if (!Number.isInteger(fixtureId) || fixtureId <= 0) return null;
+  const cached = bundles.get(fixtureId);
+  if (!cached || Date.now() - cached.fetchedAt > bundleTtl(cached.fixture)) return null;
+
+  const fixture = cached.fixture;
+  let data: unknown | undefined;
+  if (parsed.pathname === "/fixtures/events") data = fixture.events;
+  else if (parsed.pathname === "/fixtures/lineups") data = fixture.lineups;
+  else if (parsed.pathname === "/fixtures/statistics") data = fixture.statistics;
+  else if (parsed.pathname === "/fixtures/players") data = fixture.players;
+  else if (parsed.pathname === "/fixtures" && parsed.searchParams.has("id")) data = [fixture];
+  if (data === undefined) return null;
+  return synthetic(parsed, Array.isArray(data) ? data : []);
+}
+
+function updateFixtureCaches(parsed: URL, stored: StoredResponse): void {
   if (parsed.pathname !== "/fixtures") return;
   let json: ApiEnvelope;
   try {
@@ -394,7 +412,8 @@ function updateFixtureCachesFromStored(parsed: URL, stored: StoredResponse): voi
 
   for (const fixture of json.response as FixtureRecord[]) {
     const id = Number(fixture.fixture?.id);
-    if (!Number.isInteger(id) || id <= 0) continue;
+    const leagueId = Number(fixture.league?.id);
+    if (!Number.isInteger(id) || id <= 0 || !isTrackedLeague(leagueId)) continue;
     schedule.set(id, fixture);
     if (
       parsed.searchParams.has("ids") ||
@@ -404,12 +423,12 @@ function updateFixtureCachesFromStored(parsed: URL, stored: StoredResponse): voi
       fixture.lineups !== undefined ||
       fixture.players !== undefined
     ) {
-      fixtureBundles.set(id, { fixture, fetchedAt: stored.fetchedAt });
+      bundles.set(id, { fixture, fetchedAt: stored.fetchedAt });
     }
   }
 }
 
-function cacheTtlFor(parsed: URL): number {
+function cacheTtl(parsed: URL): number {
   if (parsed.pathname === "/fixtures") {
     if (parsed.searchParams.has("date")) return SCHEDULE_REFRESH_MS;
     if (parsed.searchParams.has("ids") || parsed.searchParams.has("id")) return LIVE_POLL_MS;
@@ -421,14 +440,12 @@ function cacheTtlFor(parsed: URL): number {
   if (parsed.pathname === "/players" && parsed.searchParams.has("team")) return 6 * 60 * 60_000;
   if (parsed.pathname === "/injuries") return 60 * 60_000;
   if (parsed.pathname === "/leagues") return 24 * 60 * 60_000;
-  if (parsed.pathname === "/fixtures/events") return LIVE_POLL_MS;
-  if (parsed.pathname === "/fixtures/statistics") return LIVE_POLL_MS;
-  if (parsed.pathname === "/fixtures/players") return LIVE_POLL_MS;
+  if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return LIVE_POLL_MS;
   if (parsed.pathname === "/fixtures/lineups") return 30 * 60_000;
   return 5 * 60_000;
 }
 
-function priorityFor(parsed: URL): ApiFootballRequestPriority {
+function priorityFor(parsed: URL): Priority {
   if (parsed.pathname === "/fixtures" && (parsed.searchParams.has("ids") || parsed.searchParams.has("id"))) return "live";
   if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return "live";
   if (parsed.pathname === "/fixtures" && parsed.searchParams.has("date")) return "normal";
@@ -437,7 +454,7 @@ function priorityFor(parsed: URL): ApiFootballRequestPriority {
   return "normal";
 }
 
-function requestAllowed(priority: ApiFootballRequestPriority): boolean {
+function requestAllowed(priority: Priority): boolean {
   const mode = quotaMode();
   if (mode === "full") return true;
   if (mode === "conserve") return priority !== "background";
@@ -446,25 +463,21 @@ function requestAllowed(priority: ApiFootballRequestPriority): boolean {
 }
 
 function quotaMode(): ApiFootballQuotaMode {
-  const budget = getEffectiveBudget();
-  const used = getEffectiveUsed();
-  if (budget <= 0) return "critical";
-  const ratio = used / budget;
+  const budget = effectiveDailyBudget();
+  const used = effectiveUsedToday();
+  const ratio = budget > 0 ? used / budget : 1;
   if (ratio >= 0.95) return "critical";
   if (ratio >= 0.85) return "protect";
   if (ratio >= 0.70) return "conserve";
   return "full";
 }
 
-function getEffectiveBudget(): number {
-  if (providerLimit && providerLimit > 0) return Math.min(DAILY_BUDGET, providerLimit);
-  return DAILY_BUDGET;
+function effectiveDailyBudget(): number {
+  return providerLimit && providerLimit > 0 ? Math.min(DAILY_BUDGET, providerLimit) : DAILY_BUDGET;
 }
 
-function getEffectiveUsed(): number {
-  if (providerLimit != null && providerRemaining != null) {
-    return Math.max(0, providerLimit - providerRemaining);
-  }
+function effectiveUsedToday(): number {
+  if (providerLimit != null && providerRemaining != null) return Math.max(0, providerLimit - providerRemaining);
   return providerCallsToday;
 }
 
@@ -478,12 +491,6 @@ function observeQuota(headers: Headers): void {
   }
 }
 
-function providerInit(init?: RequestInit): RequestInit {
-  const headers = new Headers(init?.headers ?? {});
-  if (API_FOOTBALL_KEY && !headers.has("x-apisports-key")) headers.set("x-apisports-key", API_FOOTBALL_KEY);
-  return { ...init, headers };
-}
-
 function bundleTtl(fixture: FixtureRecord): number {
   const status = fixture.fixture?.status?.short ?? "";
   if (LIVE_STATUSES.has(status)) return LIVE_POLL_MS;
@@ -494,22 +501,30 @@ function bundleTtl(fixture: FixtureRecord): number {
   return LIVE_POLL_MS;
 }
 
-function syntheticEnvelopeResponse(parsed: URL, response: unknown[]): Response {
-  const body = JSON.stringify({
+function providerInit(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers ?? {});
+  if (API_KEY && !headers.has("x-apisports-key")) headers.set("x-apisports-key", API_KEY);
+  return { ...init, headers };
+}
+
+function synthetic(parsed: URL, response: unknown[]): Response {
+  return new Response(JSON.stringify({
     get: parsed.pathname.replace(/^\//, ""),
     parameters: Object.fromEntries(parsed.searchParams.entries()),
     errors: [],
     results: response.length,
     paging: { current: 1, total: 1 },
     response,
-  });
-  return new Response(body, {
+  }), {
     status: 200,
-    headers: { "content-type": "application/json; charset=utf-8", "x-quota-optimised": "true" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "x-quota-optimised": "true",
+    },
   });
 }
 
-async function storeResponse(response: Response): Promise<StoredResponse> {
+async function store(response: Response): Promise<StoredResponse> {
   const headers: Record<string, string> = {};
   response.headers.forEach((value, key) => { headers[key] = value; });
   return {
@@ -521,12 +536,16 @@ async function storeResponse(response: Response): Promise<StoredResponse> {
   };
 }
 
-function restoreResponse(stored: StoredResponse): Response {
+function restore(stored: StoredResponse): Response {
   return new Response(stored.body, {
     status: stored.status,
     statusText: stored.statusText,
     headers: stored.headers,
   });
+}
+
+function isLiveDiscovery(parsed: URL): boolean {
+  return parsed.pathname === "/fixtures" && parsed.searchParams.get("live") === "all";
 }
 
 function requestUrl(input: RequestInfo | URL): string {
@@ -537,7 +556,7 @@ function requestUrl(input: RequestInfo | URL): string {
 
 function isApiFootballUrl(url: string): boolean {
   try {
-    return new URL(url).hostname === API_FOOTBALL_HOST;
+    return new URL(url).hostname === API_HOST;
   } catch {
     return false;
   }
@@ -568,6 +587,10 @@ function utcDay(): string {
 function clamp(value: number, min: number, max: number): number {
   const safe = Number.isFinite(value) ? Math.floor(value) : min;
   return Math.max(min, Math.min(max, safe));
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function sleep(ms: number): Promise<void> {
