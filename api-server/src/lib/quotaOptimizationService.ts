@@ -249,20 +249,7 @@ async function replaceLiveDiscovery(init?: RequestInit): Promise<Response> {
   await ensureSchedule(init);
 
   if (schedule.size === 0 && lastScheduleError) {
-    if (cachedProviderFailure && Date.now() - cachedProviderFailure.fetchedAt < PROVIDER_FAILURE_CACHE_MS) {
-      cacheHits++;
-      estimatedCallsSaved++;
-      return restore(cachedProviderFailure);
-    }
-
-    const parsed = new URL(`${API_BASE}/fixtures?live=all`);
-    const response = await originalFetch(parsed, providerInit(init));
-    observeQuota(response.headers);
-    providerCallsToday++;
-    lastProviderCallAt = new Date().toISOString();
-    const stored = await store(response);
-    if (responseHasProviderFailure(stored)) cachedProviderFailure = stored;
-    return restore(stored);
+    return providerFailureOrFallback(init);
   }
 
   const now = Date.now();
@@ -280,19 +267,45 @@ async function replaceLiveDiscovery(init?: RequestInit): Promise<Response> {
 
   if (candidates.length === 0) return synthetic(new URL(`${API_BASE}/fixtures?live=all`), []);
 
+  if (cachedProviderFailure && Date.now() - cachedProviderFailure.fetchedAt < PROVIDER_FAILURE_CACHE_MS) {
+    cacheHits++;
+    estimatedCallsSaved++;
+    return restore(cachedProviderFailure);
+  }
+
   const ids = candidates.map((fixture) => Number(fixture.fixture?.id));
   const allFresh = ids.every((id) => {
     const cached = bundles.get(id);
     return Boolean(cached && Date.now() - cached.fetchedAt < bundleTtl(cached.fixture));
   });
 
-  if (!allFresh && requestAllowed("live")) await refreshBundles(ids, init);
+  if (!allFresh && requestAllowed("live")) {
+    const failure = await refreshBundles(ids, init);
+    if (failure) return restore(failure);
+  }
 
   const current = ids
     .map((id) => bundles.get(id)?.fixture ?? schedule.get(id))
     .filter((fixture): fixture is FixtureRecord => Boolean(fixture));
   const live = current.filter((fixture) => LIVE_STATUSES.has(fixture.fixture?.status?.short ?? ""));
   return synthetic(new URL(`${API_BASE}/fixtures?live=all`), live);
+}
+
+async function providerFailureOrFallback(init?: RequestInit): Promise<Response> {
+  if (cachedProviderFailure && Date.now() - cachedProviderFailure.fetchedAt < PROVIDER_FAILURE_CACHE_MS) {
+    cacheHits++;
+    estimatedCallsSaved++;
+    return restore(cachedProviderFailure);
+  }
+
+  const parsed = new URL(`${API_BASE}/fixtures?live=all`);
+  const response = await originalFetch(parsed, providerInit(init));
+  observeQuota(response.headers);
+  providerCallsToday++;
+  lastProviderCallAt = new Date().toISOString();
+  const stored = await store(response);
+  if (responseHasProviderFailure(stored)) cachedProviderFailure = stored;
+  return restore(stored);
 }
 
 async function ensureSchedule(init?: RequestInit): Promise<void> {
@@ -326,6 +339,7 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
       const errors = normalizeErrors(json.errors);
       if (stored.status < 200 || stored.status >= 300 || errors.length > 0 || !Array.isArray(json.response)) {
         firstError ??= errors.join("; ") || `HTTP ${stored.status}`;
+        if (responseHasProviderFailure(stored)) cachedProviderFailure = stored;
         if (errors.length > 0 || stored.status === 401 || stored.status === 403 || stored.status === 429) break;
         continue;
       }
@@ -362,7 +376,7 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
   }
 }
 
-async function refreshBundles(ids: number[], init?: RequestInit): Promise<void> {
+async function refreshBundles(ids: number[], init?: RequestInit): Promise<StoredResponse | null> {
   for (let index = 0; index < ids.length; index += 20) {
     if (!requestAllowed("live")) break;
     const group = ids.slice(index, index + 20);
@@ -382,11 +396,18 @@ async function refreshBundles(ids: number[], init?: RequestInit): Promise<void> 
       lastProviderCallAt = new Date().toISOString();
       const stored = await store(response);
       responseCache.set(url, stored);
+      if (responseHasProviderFailure(stored)) {
+        cachedProviderFailure = stored;
+        return stored;
+      }
+      cachedProviderFailure = null;
       updateFixtureCaches(new URL(url), stored);
     } catch (error) {
       logger.warn({ err: error, fixtureIds: group }, "API-Football bundled fixture refresh failed");
+      throw error;
     }
   }
+  return null;
 }
 
 function responseFromStoredSchedule(parsed: URL): Response | null {
