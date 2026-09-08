@@ -16,6 +16,10 @@ import {
   startFuturePredictionBaseline,
   stopFuturePredictionBaseline,
 } from "./lib/futurePredictionBaselineService";
+import {
+  startFullMatchLifecycleReliabilityTest,
+  stopFullMatchLifecycleReliabilityTest,
+} from "./lib/fullMatchLifecycleReliabilityService";
 
 // Install provider optimisers before any background worker starts. The football
 // layer owns schedule-aware fixture batching; the odds layer then wraps the
@@ -39,6 +43,7 @@ const server = app.listen(port, () => {
   startFutureMarketSampler();
   startFuturePredictionBaseline();
   startPredictionAccuracyAudit();
+  startFullMatchLifecycleReliabilityTest();
 });
 
 server.on("error", (err) => {
@@ -47,6 +52,7 @@ server.on("error", (err) => {
 });
 
 function shutdown() {
+  stopFullMatchLifecycleReliabilityTest();
   stopPredictionAccuracyAudit();
   stopFuturePredictionBaseline();
   stopFutureMarketSampler();
