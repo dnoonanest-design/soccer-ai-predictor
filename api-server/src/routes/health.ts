@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { getApiFootballProviderHealth } from "../lib/apiFootballReliability";
 import { getQuotaOptimizationStatus } from "../lib/quotaOptimizationService";
 import { getOddsOptimizationStatus } from "../lib/oddsOptimizationService";
+import { getLiveDiscoveryConcurrencyGuardStatus } from "../lib/liveDiscoveryConcurrencyGuard";
 
 const router: IRouter = Router();
 
@@ -11,6 +12,7 @@ router.get("/healthz", (_req, res) => {
   const apiFootball = getApiFootballProviderHealth();
   const footballQuota = getQuotaOptimizationStatus();
   const oddsQuota = getOddsOptimizationStatus();
+  const liveDiscoveryGuard = getLiveDiscoveryConcurrencyGuardStatus();
   res.json({
     status: "ok",
     live_data_status: apiFootball.state,
@@ -20,6 +22,7 @@ router.get("/healthz", (_req, res) => {
     quota_optimisation: {
       api_football: footballQuota,
       odds_api: oddsQuota,
+      live_discovery_guard: liveDiscoveryGuard,
     },
   });
 });
@@ -31,6 +34,7 @@ router.get("/health/readiness", (_req, res) => {
   const apiFootball = getApiFootballProviderHealth();
   const footballQuota = getQuotaOptimizationStatus();
   const oddsQuota = getOddsOptimizationStatus();
+  const liveDiscoveryGuard = getLiveDiscoveryConcurrencyGuardStatus();
   const ready = apiFootball.state === "healthy" || apiFootball.state === "unknown";
 
   return res.status(ready ? 200 : 503).json({
@@ -42,6 +46,7 @@ router.get("/health/readiness", (_req, res) => {
     quota_optimisation: {
       api_football: footballQuota,
       odds_api: oddsQuota,
+      live_discovery_guard: liveDiscoveryGuard,
     },
   });
 });

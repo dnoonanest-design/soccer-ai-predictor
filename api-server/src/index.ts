@@ -3,6 +3,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { installQuotaOptimizationLayer } from "./lib/quotaOptimizationService";
 import { installOddsOptimizationLayer } from "./lib/oddsOptimizationService";
+import { installLiveDiscoveryConcurrencyGuard } from "./lib/liveDiscoveryConcurrencyGuard";
 import { startBackgroundLearner, stopBackgroundLearner } from "./lib/backgroundLearnerService";
 import {
   startFutureMarketSampler,
@@ -24,9 +25,11 @@ import {
 // Install provider optimisers before any background worker starts. The football
 // layer owns schedule-aware fixture batching; the odds layer then wraps the
 // resulting fetch pipeline so bookmaker calls are cached/deduplicated without
-// bypassing the football protections.
+// bypassing the football protections. The outer live-discovery guard makes the
+// full /fixtures?live=all bootstrap transaction single-flight across workers.
 installQuotaOptimizationLayer();
 installOddsOptimizationLayer();
+installLiveDiscoveryConcurrencyGuard();
 
 // Replit normally provides PORT, but default to 3000 so local/iPad/browser
 // testing does not crash before the app starts.
