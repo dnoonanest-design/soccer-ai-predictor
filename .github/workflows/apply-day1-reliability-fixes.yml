@@ -50,7 +50,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run API tests
-        run: pnpm --filter soccer-ai-predictor-api-bundled test
+        working-directory: api-server
+        run: pnpm dlx vitest@2.1.9 run --config vitest.config.ts
 
       - name: Build API bundle
         run: pnpm --filter soccer-ai-predictor-api-bundled build
