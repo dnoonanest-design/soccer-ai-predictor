@@ -6,7 +6,10 @@ const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const SEASON = parseInt(process.env.FOOTBALL_SEASON ?? "2025", 10);
 
 const TEAM_CACHE_TTL = 10 * 60 * 1000;
+const RECENT_FIXTURE_CACHE_TTL = 60 * 60 * 1000;
 const LIVE_CACHE_TTL = 12 * 1000;
+const RECENT_FORM_SAMPLE = 12;
+const MIN_COMPETITION_SAMPLE = 5;
 
 interface CacheEntry<T> { data: T; fetchedAt: number; }
 const cache = new Map<string, CacheEntry<unknown>>();
@@ -58,6 +61,10 @@ export interface TeamStats {
   pass_accuracy: string | null;
   expected_goals_live: number | null;
   dangerous_attacks: number | null;
+  data_source?: "competition" | "recent_all_comp" | "blended";
+  competition_matches_played?: number;
+  recent_matches_used?: number;
+  venue_matches_used?: number;
 }
 
 export interface MatchStatsResult {
@@ -91,6 +98,51 @@ type ApiFixtureStatResp = {
   }>;
 };
 type TeamStatEntry = NonNullable<ApiFixtureStatResp["response"]>[number];
+
+type ApiRecentFixture = {
+  fixture?: {
+    id?: number;
+    date?: string;
+    status?: { short?: string };
+  };
+  league?: {
+    id?: number;
+    name?: string;
+    country?: string;
+  };
+  teams?: {
+    home?: { id?: number; name?: string };
+    away?: { id?: number; name?: string };
+  };
+  goals?: {
+    home?: number | null;
+    away?: number | null;
+  };
+};
+
+type ApiRecentFixturesResp = { response?: ApiRecentFixture[] };
+
+type PreferredVenue = "home" | "away";
+
+function emptyTeamStats(id: number, name: string): TeamStats {
+  return {
+    team_id: id, team: name, form: "",
+    goals_per_game: 0, conceded_per_game: 0,
+    clean_sheets: 0, matches_played: 0,
+    wins: 0, draws: 0, losses: 0,
+    possession: null, shots_total: null, shots_on_target: null,
+    corners: null, fouls: null, offsides: null,
+    yellow_cards: null, red_cards: null, goalkeeper_saves: null,
+    shots_off_target: null, blocked_shots: null,
+    shots_inside_box: null, shots_outside_box: null,
+    total_passes: null, accurate_passes: null, pass_accuracy: null,
+    expected_goals_live: null, dangerous_attacks: null,
+    data_source: "competition",
+    competition_matches_played: 0,
+    recent_matches_used: 0,
+    venue_matches_used: 0,
+  };
+}
 
 async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamStats | null> {
   const key = `teamstats:${teamId}:${leagueId}`;
@@ -143,9 +195,169 @@ async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamSta
     pass_accuracy: null,
     expected_goals_live: null,
     dangerous_attacks: null,
+    data_source: "competition",
+    competition_matches_played: played,
+    recent_matches_used: 0,
+    venue_matches_used: 0,
   };
   setCache(key, stats);
   return stats;
+}
+
+function isUsableHistoryFixture(fixture: ApiRecentFixture, teamId: number): boolean {
+  const status = fixture.fixture?.status?.short ?? "";
+  if (!new Set(["FT", "AET", "PEN"]).has(status)) return false;
+
+  const leagueName = (fixture.league?.name ?? "").toLowerCase();
+  if (
+    leagueName.includes("friendly") ||
+    leagueName.includes("u21") || leagueName.includes("u20") ||
+    leagueName.includes("u19") || leagueName.includes("u18") ||
+    leagueName.includes("youth") || leagueName.includes("reserve") ||
+    leagueName.includes("women")
+  ) return false;
+
+  const homeId = Number(fixture.teams?.home?.id ?? 0);
+  const awayId = Number(fixture.teams?.away?.id ?? 0);
+  if (homeId !== teamId && awayId !== teamId) return false;
+
+  return Number.isFinite(Number(fixture.goals?.home)) && Number.isFinite(Number(fixture.goals?.away));
+}
+
+async function fetchRecentFixtures(teamId: number): Promise<ApiRecentFixture[]> {
+  const key = `recentfixtures:${teamId}`;
+  const cached = getCached<ApiRecentFixture[]>(key, RECENT_FIXTURE_CACHE_TTL);
+  if (cached) return cached;
+
+  const data = (await fetchFootball(
+    `/fixtures?team=${teamId}&last=${RECENT_FORM_SAMPLE}`
+  )) as ApiRecentFixturesResp | null;
+
+  const fixtures = Array.isArray(data?.response)
+    ? data.response
+        .filter((fixture) => isUsableHistoryFixture(fixture, teamId))
+        .sort((a, b) => Date.parse(a.fixture?.date ?? "") - Date.parse(b.fixture?.date ?? ""))
+        .slice(-RECENT_FORM_SAMPLE)
+    : [];
+
+  setCache(key, fixtures);
+  return fixtures;
+}
+
+async function fetchRecentTeamStats(
+  teamId: number,
+  teamName: string,
+  preferredVenue: PreferredVenue,
+): Promise<TeamStats | null> {
+  const fixtures = await fetchRecentFixtures(teamId);
+  if (fixtures.length === 0) return null;
+
+  let wins = 0, draws = 0, losses = 0, cleanSheets = 0;
+  let venueMatches = 0;
+  let weightedGoalsFor = 0, weightedGoalsAgainst = 0, totalWeight = 0;
+  const outcomes: string[] = [];
+
+  fixtures.forEach((fixture, index) => {
+    const homeId = Number(fixture.teams?.home?.id ?? 0);
+    const awayId = Number(fixture.teams?.away?.id ?? 0);
+    const homeGoals = Number(fixture.goals?.home ?? 0);
+    const awayGoals = Number(fixture.goals?.away ?? 0);
+    const teamWasHome = homeId === teamId;
+    const goalsFor = teamWasHome ? homeGoals : awayGoals;
+    const goalsAgainst = teamWasHome ? awayGoals : homeGoals;
+
+    const outcome = goalsFor > goalsAgainst ? "W" : goalsFor < goalsAgainst ? "L" : "D";
+    outcomes.push(outcome);
+    if (outcome === "W") wins++;
+    else if (outcome === "D") draws++;
+    else losses++;
+    if (goalsAgainst === 0) cleanSheets++;
+
+    const preferred = preferredVenue === "home" ? teamWasHome : awayId === teamId;
+    if (preferred) venueMatches++;
+
+    const ageRank = fixtures.length - 1 - index;
+    const recencyWeight = Math.pow(0.88, ageRank);
+    const venueWeight = preferred ? 1.25 : 0.90;
+    const weight = recencyWeight * venueWeight;
+    weightedGoalsFor += goalsFor * weight;
+    weightedGoalsAgainst += goalsAgainst * weight;
+    totalWeight += weight;
+  });
+
+  if (totalWeight <= 0) return null;
+
+  return {
+    ...emptyTeamStats(teamId, teamName),
+    form: outcomes.slice(-5).join(""),
+    goals_per_game: Math.round((weightedGoalsFor / totalWeight) * 100) / 100,
+    conceded_per_game: Math.round((weightedGoalsAgainst / totalWeight) * 100) / 100,
+    clean_sheets: cleanSheets,
+    matches_played: fixtures.length,
+    wins,
+    draws,
+    losses,
+    data_source: "recent_all_comp",
+    competition_matches_played: 0,
+    recent_matches_used: fixtures.length,
+    venue_matches_used: venueMatches,
+  };
+}
+
+function blendSparseCompetitionStats(
+  competition: TeamStats | null,
+  recent: TeamStats | null,
+  teamId: number,
+  teamName: string,
+): TeamStats {
+  if ((!competition || competition.matches_played === 0) && recent) {
+    return {
+      ...recent,
+      team_id: teamId,
+      team: teamName,
+      data_source: "recent_all_comp",
+      competition_matches_played: competition?.matches_played ?? 0,
+    };
+  }
+
+  if (!competition) return recent ?? emptyTeamStats(teamId, teamName);
+
+  if (competition.matches_played >= MIN_COMPETITION_SAMPLE || !recent) {
+    return {
+      ...competition,
+      team_id: teamId,
+      team: teamName,
+      data_source: "competition",
+      competition_matches_played: competition.matches_played,
+      recent_matches_used: recent?.matches_played ?? 0,
+      venue_matches_used: recent?.venue_matches_used ?? 0,
+    };
+  }
+
+  const competitionWeight = Math.min(0.80, competition.matches_played / MIN_COMPETITION_SAMPLE);
+  const recentWeight = 1 - competitionWeight;
+
+  return {
+    ...recent,
+    team_id: teamId,
+    team: teamName,
+    form: recent.form || competition.form,
+    goals_per_game: Math.round((
+      competition.goals_per_game * competitionWeight +
+      recent.goals_per_game * recentWeight
+    ) * 100) / 100,
+    conceded_per_game: Math.round((
+      competition.conceded_per_game * competitionWeight +
+      recent.conceded_per_game * recentWeight
+    ) * 100) / 100,
+    clean_sheets: Math.round(
+      competition.clean_sheets * competitionWeight + recent.clean_sheets * recentWeight
+    ),
+    data_source: "blended",
+    competition_matches_played: competition.matches_played,
+    recent_matches_used: recent.matches_played,
+    venue_matches_used: recent.venue_matches_used ?? 0,
+  };
 }
 
 function normaliseStatName(name: string): string {
@@ -325,36 +537,60 @@ export async function getMatchStats(
   leagueId: number,
   isLiveOrFinished: boolean
 ): Promise<MatchStatsResult> {
-  const homeStats = await fetchTeamStats(homeTeamId, leagueId);
-  const awayStats = await fetchTeamStats(awayTeamId, leagueId);
+  const [homeCompetition, awayCompetition] = await Promise.all([
+    fetchTeamStats(homeTeamId, leagueId),
+    fetchTeamStats(awayTeamId, leagueId),
+  ]);
+
+  const [homeRecent, awayRecent] = await Promise.all([
+    !homeCompetition || homeCompetition.matches_played < MIN_COMPETITION_SAMPLE
+      ? fetchRecentTeamStats(homeTeamId, homeTeamName, "home")
+      : Promise.resolve(null),
+    !awayCompetition || awayCompetition.matches_played < MIN_COMPETITION_SAMPLE
+      ? fetchRecentTeamStats(awayTeamId, awayTeamName, "away")
+      : Promise.resolve(null),
+  ]);
+
   const liveStats = isLiveOrFinished
     ? await fetchLiveFixtureStats(fixtureId, homeTeamId, awayTeamId)
     : null;
 
-  const empty = (id: number, name: string): TeamStats => ({
-    team_id: id, team: name, form: "",
-    goals_per_game: 0, conceded_per_game: 0,
-    clean_sheets: 0, matches_played: 0,
-    wins: 0, draws: 0, losses: 0,
-    possession: null, shots_total: null, shots_on_target: null,
-    corners: null, fouls: null, offsides: null,
-    yellow_cards: null, red_cards: null, goalkeeper_saves: null,
-    shots_off_target: null, blocked_shots: null,
-    shots_inside_box: null, shots_outside_box: null,
-    total_passes: null, accurate_passes: null, pass_accuracy: null,
-    expected_goals_live: null, dangerous_attacks: null,
-  });
+  const homeBase = blendSparseCompetitionStats(
+    homeCompetition, homeRecent, homeTeamId, homeTeamName
+  );
+  const awayBase = blendSparseCompetitionStats(
+    awayCompetition, awayRecent, awayTeamId, awayTeamName
+  );
 
   const home: TeamStats = {
-    ...(homeStats ?? empty(homeTeamId, homeTeamName)),
+    ...homeBase,
     team: homeTeamName,
     ...(liveStats?.home ?? {}),
   };
   const away: TeamStats = {
-    ...(awayStats ?? empty(awayTeamId, awayTeamName)),
+    ...awayBase,
     team: awayTeamName,
     ...(liveStats?.away ?? {}),
   };
+
+  if (
+    home.data_source !== "competition" || away.data_source !== "competition"
+  ) {
+    logger.info({
+      fixtureId,
+      leagueId,
+      homeTeamId,
+      awayTeamId,
+      homeSource: home.data_source,
+      awaySource: away.data_source,
+      homeCompetitionMatches: home.competition_matches_played,
+      awayCompetitionMatches: away.competition_matches_played,
+      homeRecentMatches: home.recent_matches_used,
+      awayRecentMatches: away.recent_matches_used,
+      homeVenueMatches: home.venue_matches_used,
+      awayVenueMatches: away.venue_matches_used,
+    }, "stats: sparse competition history fallback applied");
+  }
 
   return {
     home,
