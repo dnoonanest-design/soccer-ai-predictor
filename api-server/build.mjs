@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
-import { rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 
 // Some bundled dependencies may use `require`; keep it available in ESM output.
 globalThis.require = createRequire(import.meta.url);
@@ -10,9 +10,45 @@ globalThis.require = createRequire(import.meta.url);
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(artifactDir, "..");
 
+async function assertCoreAiSourceIsolation() {
+  const libDir = path.resolve(artifactDir, "src/lib");
+  const names = await readdir(libDir);
+  const coreAiFiles = names.filter((name) =>
+    ((name.startsWith("ai") && name.endsWith(".ts")) || name === "adaptiveLearningEngine.ts") &&
+    name !== "aiDataProvenancePolicy.ts"
+  );
+
+  const forbidden = [
+    { label: "direct network fetch", regex: /\bfetch\s*\(/ },
+    { label: "HTTP client", regex: /\b(?:axios|undici|got)\b/i },
+    { label: "Node HTTP client", regex: /(?:node:)?https?\b/ },
+    { label: "external URL", regex: /https?:\/\//i },
+    { label: "market probability feature", regex: /\b(?:home_market_prob|away_market_prob|market_probability|marketOdds|bookmakerOdds|oddsMovement)\b/ },
+    { label: "third-party prediction feature", regex: /\b(?:externalPrediction|onlinePrediction|consensusPrediction|thirdPartyPrediction)\b/ },
+    { label: "public prediction provider", regex: /\b(?:forebet|predictz|bettingexpert)\b/i },
+  ];
+
+  const violations = [];
+  for (const file of coreAiFiles) {
+    const source = await readFile(path.join(libDir, file), "utf8");
+    for (const rule of forbidden) {
+      if (rule.regex.test(source)) violations.push(`${file}: ${rule.label}`);
+    }
+  }
+
+  if (violations.length) {
+    throw new Error(
+      `Core AI data-isolation build check failed. AI learning must use internal app data only. Violations: ${violations.join(", ")}`,
+    );
+  }
+
+  console.log(`Core AI data-isolation check passed (${coreAiFiles.length} learning files scanned)`);
+}
+
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
+  await assertCoreAiSourceIsolation();
 
   await esbuild({
     entryPoints: [path.resolve(artifactDir, "src/index.ts")],
