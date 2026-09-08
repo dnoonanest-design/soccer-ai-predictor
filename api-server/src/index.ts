@@ -1,11 +1,17 @@
 import "dotenv/config";
 import app from "./app";
 import { logger } from "./lib/logger";
+import { installQuotaOptimizationLayer } from "./lib/quotaOptimizationService";
 import { startBackgroundLearner, stopBackgroundLearner } from "./lib/backgroundLearnerService";
 import {
   startFutureMarketSampler,
   stopFutureMarketSampler,
 } from "./lib/futureMarketSamplerService";
+
+// Install the API-Football optimisation layer before background workers begin.
+// It replaces continuous live discovery with schedule-aware fixture batching,
+// centralises duplicate responses, and enforces quota conservation thresholds.
+installQuotaOptimizationLayer();
 
 // Replit normally provides PORT, but default to 3000 so local/iPad/browser
 // testing does not crash before the app starts.
