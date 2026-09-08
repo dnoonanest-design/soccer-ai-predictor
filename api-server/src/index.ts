@@ -2,16 +2,19 @@ import "dotenv/config";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { installQuotaOptimizationLayer } from "./lib/quotaOptimizationService";
+import { installOddsOptimizationLayer } from "./lib/oddsOptimizationService";
 import { startBackgroundLearner, stopBackgroundLearner } from "./lib/backgroundLearnerService";
 import {
   startFutureMarketSampler,
   stopFutureMarketSampler,
 } from "./lib/futureMarketSamplerService";
 
-// Install the API-Football optimisation layer before background workers begin.
-// It replaces continuous live discovery with schedule-aware fixture batching,
-// centralises duplicate responses, and enforces quota conservation thresholds.
+// Install provider optimisers before any background worker starts. The football
+// layer owns schedule-aware fixture batching; the odds layer then wraps the
+// resulting fetch pipeline so bookmaker calls are cached/deduplicated without
+// bypassing the football protections.
 installQuotaOptimizationLayer();
+installOddsOptimizationLayer();
 
 // Replit normally provides PORT, but default to 3000 so local/iPad/browser
 // testing does not crash before the app starts.
