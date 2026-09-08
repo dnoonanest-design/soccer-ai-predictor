@@ -13,6 +13,7 @@ import backgroundRouter from "./background";
 import pushRouter from "./push";
 import aiRouter from "./ai";
 import marketIntelligenceRouter from "./marketIntelligence";
+import predictionsRouter from "./predictions";
 
 const router: IRouter = Router();
 
@@ -30,5 +31,6 @@ router.use(backgroundRouter);
 router.use(pushRouter);
 router.use(aiRouter);
 router.use(marketIntelligenceRouter);
+router.use(predictionsRouter);
 
 export default router;
