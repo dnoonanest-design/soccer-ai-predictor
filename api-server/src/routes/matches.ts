@@ -2,6 +2,10 @@ import { Router, type IRouter } from "express";
 import { getAllMatches, getMatchById } from "../lib/soccerService";
 import { saveOutcome } from "../lib/predictionStore";
 import { isTrackedLeague } from "../lib/leagueConfig";
+import {
+  getApiFootballProviderHealth,
+  isApiFootballProviderError,
+} from "../lib/apiFootballReliability";
 
 const BLOCKED_NAME_KEYWORDS = [
   "reserve", "reserva", " res ", "res.", "u20", "u19", "u18", "u17", "u16", "u15",
@@ -20,6 +24,22 @@ function inProductScope(match: { league_id: number; league_name?: string | null 
   return isTrackedLeague(Number(match.league_id)) && !isBlockedLeague(match.league_name);
 }
 
+function handleMatchRouteError(err: unknown, res: Parameters<Parameters<IRouter["get"]>[1]>[1]) {
+  if (isApiFootballProviderError(err)) {
+    const provider = getApiFootballProviderHealth();
+    return res.status(503).json({
+      error: "Live football data is temporarily unavailable",
+      code: "LIVE_DATA_UNAVAILABLE",
+      provider: "api-football",
+      provider_status: provider.state,
+      failure_kind: err.kind,
+      last_checked_at: provider.lastCheckedAt,
+    });
+  }
+
+  return res.status(500).json({ error: "Failed to fetch matches" });
+}
+
 const router: IRouter = Router();
 
 router.get("/matches", async (req, res) => {
@@ -36,7 +56,7 @@ router.get("/matches", async (req, res) => {
     const matches = await getAllMatches(leagueId, status);
     return res.json(matches.filter(inProductScope));
   } catch (err) {
-    return res.status(500).json({ error: "Failed to fetch matches" });
+    return handleMatchRouteError(err, res);
   }
 });
 
@@ -45,7 +65,7 @@ router.get("/fixtures/upcoming", async (_req, res) => {
     const matches = await getAllMatches(null, "upcoming");
     return res.json(matches.filter(inProductScope));
   } catch (err) {
-    return res.status(500).json({ error: "Failed to fetch upcoming fixtures" });
+    return handleMatchRouteError(err, res);
   }
 });
 
@@ -75,7 +95,7 @@ router.get("/matches/:match_id", async (req, res) => {
 
     return res.json(match);
   } catch (err) {
-    return res.status(500).json({ error: "Failed to fetch match" });
+    return handleMatchRouteError(err, res);
   }
 });
 
