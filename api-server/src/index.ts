@@ -8,6 +8,10 @@ import {
   startFutureMarketSampler,
   stopFutureMarketSampler,
 } from "./lib/futureMarketSamplerService";
+import {
+  startPredictionAccuracyAudit,
+  stopPredictionAccuracyAudit,
+} from "./lib/predictionAccuracyAuditService";
 
 // Install provider optimisers before any background worker starts. The football
 // layer owns schedule-aware fixture batching; the odds layer then wraps the
@@ -29,6 +33,7 @@ const server = app.listen(port, () => {
   logger.info({ port }, "Server listening");
   startBackgroundLearner();
   startFutureMarketSampler();
+  startPredictionAccuracyAudit();
 });
 
 server.on("error", (err) => {
@@ -37,6 +42,7 @@ server.on("error", (err) => {
 });
 
 function shutdown() {
+  stopPredictionAccuracyAudit();
   stopFutureMarketSampler();
   stopBackgroundLearner();
   server.close(() => process.exit(0));
