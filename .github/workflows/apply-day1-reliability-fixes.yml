@@ -49,9 +49,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install API test runner for validation only
+        working-directory: api-server
+        run: pnpm add -D vitest@2.1.9 --ignore-workspace-root-check
+
       - name: Run API tests
         working-directory: api-server
-        run: pnpm dlx vitest@2.1.9 run --config vitest.config.ts
+        run: pnpm exec vitest run --config vitest.config.ts
 
       - name: Build API bundle
         run: pnpm --filter soccer-ai-predictor-api-bundled build
