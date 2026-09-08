@@ -3,6 +3,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import type { Match } from "./soccerService";
 import { getMatchEvents, type MatchEvent } from "./eventsService";
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -218,99 +219,60 @@ export async function collectMatchCircumstances(match: Match, homeForm?: string 
 function normalise(home: number, draw: number, away: number) {
   const raw = [home, draw, away].map((v) => Number.isFinite(v) && v > 0 ? v : 0.001);
   const total = raw.reduce((sum, value) => sum + value, 0);
-  let h = Math.round((raw[0] / total) * 10000) / 100;
-  let d = Math.round((raw[1] / total) * 10000) / 100;
-  let a = Math.round((100 - h - d) * 100) / 100;
-  if (!Number.isFinite(a) || a < 0) {
-    const renorm = [h, d, Math.max(0.01, a)].map((v) => Math.max(0.01, v));
-    const rt = renorm.reduce((sum, value) => sum + value, 0);
-    h = Math.round((renorm[0] / rt) * 10000) / 100;
-    d = Math.round((renorm[1] / rt) * 10000) / 100;
-    a = Math.round((100 - h - d) * 100) / 100;
-  }
-  return { home: h, draw: d, away: a };
+  return { home: raw[0] / total * 100, draw: raw[1] / total * 100, away: raw[2] / total * 100 };
 }
 
-export async function applyCircumstanceCalibration(match: Match, probs: { home: number; draw: number; away: number }) {
-  try {
-    const rows = await db.select().from(matchCircumstances).where(eq(matchCircumstances.fixtureId, match.id)).limit(1);
-    const c = rows[0];
-    if (!c) return { ...probs, adjustment: null };
-    const learnedRows = await db.select().from(factorLearningInsights).where(and(eq(factorLearningInsights.active, true), sql`${factorLearningInsights.factorName} IN ('circumstance_score_delta','red_card_delta','injury_delta','star_rating_delta','form_score_delta')`)).orderBy(desc(factorLearningInsights.createdAt)).limit(10);
-    const weights = new Map(learnedRows.map((r) => [r.factorName, Number(r.learnedWeight ?? 0)]));
-    const scoreDelta = Number(c.circumstanceScoreHome ?? 0) - Number(c.circumstanceScoreAway ?? 0);
-    const redDelta = Number(c.awayRedCards ?? 0) - Number(c.homeRedCards ?? 0);
-    const injuryDelta = (Number(c.awayMissingPlayers ?? 0) + Number(c.awayInMatchInjuries ?? 0) * 2) - (Number(c.homeMissingPlayers ?? 0) + Number(c.homeInMatchInjuries ?? 0) * 2);
-    const starDelta = Number(c.homeStarPlayerRating ?? 0) - Number(c.awayStarPlayerRating ?? 0);
-    const formDelta = Number(c.homeFormScore ?? 50) - Number(c.awayFormScore ?? 50);
-    const homeBoost = Math.max(-8, Math.min(8,
-      scoreDelta * (weights.get('circumstance_score_delta') || 0.035) +
-      redDelta * (weights.get('red_card_delta') || 4.0) +
-      injuryDelta * (weights.get('injury_delta') || 0.45) +
-      starDelta * (weights.get('star_rating_delta') || 1.1) +
-      formDelta * (weights.get('form_score_delta') || 0.035)
-    ));
-    const awayBoost = -homeBoost;
-    const drawShift = -Math.abs(homeBoost) * 0.2;
-    return { ...normalise(probs.home + homeBoost, probs.draw + drawShift, probs.away + awayBoost), adjustment: { homeBoost, factors: { scoreDelta, redDelta, injuryDelta, starDelta, formDelta } } };
-  } catch (err) {
-    logger.warn({ err, fixtureId: match.id }, "circumstance calibration failed");
-    return { ...probs, adjustment: null };
-  }
+export async function applyCircumstanceCalibration(match: Match, prediction: { home: number; draw: number; away: number }) {
+  const row = await db.query.matchCircumstances.findFirst({ where: eq(matchCircumstances.fixtureId, match.id) });
+  if (!row) return { ...prediction, adjustment: null as null | { homeBoost: number; awayBoost: number; drawBoost: number } };
+  const diff = Number(row.circumstanceScoreHome ?? 0) - Number(row.circumstanceScoreAway ?? 0);
+  const homeBoost = Math.max(-6, Math.min(6, diff * 0.04));
+  const awayBoost = -homeBoost;
+  const drawBoost = Math.abs(diff) < 5 ? 1.5 : -Math.min(1.5, Math.abs(diff) * 0.01);
+  const adjusted = normalise(prediction.home + homeBoost, prediction.draw + drawBoost, prediction.away + awayBoost);
+  return { ...adjusted, adjustment: { homeBoost, awayBoost, drawBoost } };
 }
 
 export async function analyzeCircumstanceInfluence() {
-  const rows = await db.execute(sql`
-    WITH joined AS (
-      SELECT c.*, o.outcome, o.score_home, o.score_away,
-        CASE WHEN o.score_home > o.score_away THEN 1 WHEN o.score_home = o.score_away THEN 0 ELSE -1 END AS home_result,
-        (o.score_home - o.score_away) AS goal_diff
-      FROM match_circumstances c
-      JOIN match_outcomes o ON o.fixture_id = c.fixture_id
-    ), factors AS (
-      SELECT 'circumstance_score_delta' AS factor_name, 'team_context' AS factor_group, league_id,
-        (circumstance_score_home - circumstance_score_away) AS value, home_result, goal_diff FROM joined
-      UNION ALL SELECT 'red_card_delta', 'discipline', league_id, (away_red_cards - home_red_cards), home_result, goal_diff FROM joined
-      UNION ALL SELECT 'injury_delta', 'availability', league_id, ((away_missing_players + away_in_match_injuries * 2) - (home_missing_players + home_in_match_injuries * 2)), home_result, goal_diff FROM joined
-      UNION ALL SELECT 'star_rating_delta', 'player_quality', league_id, (COALESCE(home_star_player_rating,0) - COALESCE(away_star_player_rating,0)), home_result, goal_diff FROM joined
-      UNION ALL SELECT 'form_score_delta', 'team_form', league_id, (COALESCE(home_form_score,50) - COALESCE(away_form_score,50)), home_result, goal_diff FROM joined
-    )
-    SELECT factor_name, factor_group, league_id,
-      COUNT(*)::int AS sample_size,
-      AVG(CASE WHEN value > 0 THEN CASE WHEN home_result = 1 THEN 1 ELSE 0 END END)::float AS win_rate_when_positive,
-      AVG(CASE WHEN value < 0 THEN CASE WHEN home_result = -1 THEN 1 ELSE 0 END END)::float AS win_rate_when_negative,
-      AVG(CASE WHEN value <> 0 THEN goal_diff * CASE WHEN value > 0 THEN 1 ELSE -1 END END)::float AS avg_goal_diff_impact,
-      CASE WHEN stddev_pop(value) = 0 THEN 0 ELSE corr(value, goal_diff) END::float AS correlation
-    FROM factors
-    WHERE value IS NOT NULL
-    GROUP BY factor_name, factor_group, league_id
-    HAVING COUNT(*) >= ${MIN_FACTOR_SAMPLE}
+  const settled = await db.execute(sql`
+    SELECT mc.*, mo.result
+    FROM match_circumstances mc
+    INNER JOIN match_outcomes mo ON mo.fixture_id = mc.fixture_id
+    ORDER BY mc.updated_at DESC
+    LIMIT 1000
   `);
+  const rows = ((settled as any)?.rows ?? settled ?? []) as any[];
+  if (!rows.length) return { analyzed: 0, stored: 0 };
 
-  const resultRows = Array.isArray((rows as any).rows) ? (rows as any).rows : (rows as any);
+  const buckets = [
+    { key: "red_card_edge", predicate: (r: any) => Number(r.home_red_cards ?? 0) !== Number(r.away_red_cards ?? 0) },
+    { key: "missing_player_edge", predicate: (r: any) => Number(r.home_missing_players ?? 0) !== Number(r.away_missing_players ?? 0) },
+    { key: "form_edge", predicate: (r: any) => Math.abs(Number(r.home_form_score ?? 50) - Number(r.away_form_score ?? 50)) >= 15 },
+    { key: "player_rating_edge", predicate: (r: any) => Math.abs(Number(r.home_avg_player_rating ?? 6) - Number(r.away_avg_player_rating ?? 6)) >= 0.5 },
+    { key: "star_player_edge", predicate: (r: any) => Math.abs(Number(r.home_star_player_rating ?? 6) - Number(r.away_star_player_rating ?? 6)) >= 0.7 },
+  ];
   let stored = 0;
-  await db.update(factorLearningInsights).set({ active: false }).where(eq(factorLearningInsights.active, true));
-  for (const r of resultRows) {
-    const corr = Number(r.correlation ?? 0);
-    const impact = Number(r.avg_goal_diff_impact ?? 0);
-    const sample = Number(r.sample_size ?? 0);
-    const learnedWeight = Math.max(-5, Math.min(5, corr * 2.5 + impact * 0.35));
-    const confidence = Math.min(95, Math.round(Math.sqrt(sample) * Math.min(1, Math.abs(corr) + Math.abs(impact) / 5) * 20));
-    await db.insert(factorLearningInsights).values({
-      factorName: String(r.factor_name), factorGroup: String(r.factor_group), leagueId: r.league_id ?? null,
-      sampleSize: sample, winRateWhenPositive: n(r.win_rate_when_positive), winRateWhenNegative: n(r.win_rate_when_negative),
-      avgGoalDiffImpact: n(r.avg_goal_diff_impact), correlation: n(r.correlation), learnedWeight, confidence,
-      notes: `Auto-learned from ${sample} settled matches. Positive values favour home; negative values favour away.`, active: true,
-    });
+  for (const bucket of buckets) {
+    const sample = rows.filter(bucket.predicate);
+    if (sample.length < MIN_FACTOR_SAMPLE) continue;
+    let correctSide = 0;
+    for (const r of sample) {
+      const homeSignal = Number(r.home_circumstance_score ?? 0) >= Number(r.away_circumstance_score ?? 0);
+      if ((homeSignal && r.result === "home") || (!homeSignal && r.result === "away")) correctSide++;
+    }
+    const hitRate = correctSide / sample.length;
+    const influence = Math.max(-1, Math.min(1, (hitRate - 0.5) * 2));
+    const confidence = Math.min(1, sample.length / 250);
+    await db.insert(factorLearningInsights).values({ factorKey: bucket.key, sampleSize: sample.length, hitRate, influenceWeight: influence, confidence, active: true, metadataJson: { generatedBy: "circumstance-learning" } }).onConflictDoNothing();
     stored++;
   }
-  return { analysed: resultRows.length, stored, minSample: MIN_FACTOR_SAMPLE };
+  return { analyzed: rows.length, stored };
 }
 
 export async function getCircumstanceLearningReport() {
   const [recentInsights, recentCircumstances] = await Promise.all([
-    db.select().from(factorLearningInsights).where(eq(factorLearningInsights.active, true)).orderBy(desc(factorLearningInsights.createdAt)).limit(50),
-    db.select().from(matchCircumstances).orderBy(desc(matchCircumstances.updatedAt)).limit(20),
+    db.select().from(factorLearningInsights).orderBy(desc(factorLearningInsights.createdAt)).limit(30),
+    db.select().from(matchCircumstances).orderBy(desc(matchCircumstances.updatedAt)).limit(30),
   ]);
   return { recentInsights, recentCircumstances };
 }
