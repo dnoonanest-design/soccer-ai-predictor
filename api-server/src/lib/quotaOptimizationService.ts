@@ -91,6 +91,7 @@ const FINISHED_STATUSES = new Set(["FT", "AET", "PEN", "AWD", "WO"]);
 let installed = false;
 let scheduleFetchedAt = 0;
 let scheduleRefreshes = 0;
+let scheduleRefreshInFlight: Promise<void> | null = null;
 let lastScheduleAttemptAt = 0;
 let providerCallsToday = 0;
 let providerLimit: number | null = null;
@@ -156,6 +157,7 @@ export function getQuotaOptimizationStatus() {
       refreshMs: SCHEDULE_REFRESH_MS,
       failureBackoffMs: SCHEDULE_FAILURE_BACKOFF_MS,
       refreshes: scheduleRefreshes,
+      refreshInFlight: scheduleRefreshInFlight != null,
       lastRefreshAt: lastScheduleRefreshAt,
       lastError: lastScheduleError,
     },
@@ -313,6 +315,22 @@ async function ensureSchedule(init?: RequestInit): Promise<void> {
   if (lastScheduleError && schedule.size === 0 && Date.now() - lastScheduleAttemptAt < SCHEDULE_FAILURE_BACKOFF_MS) return;
   if (!requestAllowed("normal") && schedule.size > 0) return;
 
+  if (scheduleRefreshInFlight) {
+    estimatedCallsSaved++;
+    await scheduleRefreshInFlight;
+    return;
+  }
+
+  const work = refreshSchedule(init);
+  scheduleRefreshInFlight = work;
+  try {
+    await work;
+  } finally {
+    if (scheduleRefreshInFlight === work) scheduleRefreshInFlight = null;
+  }
+}
+
+async function refreshSchedule(init?: RequestInit): Promise<void> {
   lastScheduleAttemptAt = Date.now();
   const start = new Date();
   const fetched = new Map<number, FixtureRecord>();
