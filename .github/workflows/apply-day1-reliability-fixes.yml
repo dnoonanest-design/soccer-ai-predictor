@@ -6,6 +6,7 @@ on:
       - fix/day1-reliability-learning
     paths:
       - scripts/apply-day1-fixes.mjs
+      - scripts/day1-trigger.txt
 
 permissions:
   contents: write
