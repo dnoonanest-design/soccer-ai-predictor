@@ -47,11 +47,21 @@ export async function collectPlayerStatsForFixture(
     }
 
     const isInternational = INTERNATIONAL_LEAGUE_IDS.has(leagueId);
-    const data = await fetchFootball(`/fixtures/players?fixture=${fixtureId}`) as any;
-    if (!data?.response?.length) return;
+    // soccerService.fetchFootball already unwraps API-Football's `response`
+    // envelope, so this is the array of team/player rows directly.
+    const payload = await fetchFootball(`/fixtures/players?fixture=${fixtureId}`) as unknown;
+    const teamRows = Array.isArray(payload) ? payload : [];
+    if (!teamRows.length) {
+      logger.debug({ fixtureId }, "no finished player stats returned");
+      return;
+    }
 
-    for (const teamData of data.response) {
+    for (const teamData of teamRows as any[]) {
       const teamId = teamData.team?.id;
+      if (teamId !== homeTeamId && teamId !== awayTeamId) {
+        logger.debug({ fixtureId, teamId }, "ignoring unexpected player-stats team row");
+        continue;
+      }
       const teamSide = teamId === homeTeamId ? "home" : "away";
       const teamResult = teamSide === "home" ? homeResult :
         homeResult === "win" ? "loss" : homeResult === "loss" ? "win" : "draw";
