@@ -7,7 +7,8 @@ import {
   BacktestScenario, MatchEvent, H2HMatch, TeamStats,
 } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
-import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity } from "lucide-react";
+import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card } from "@/components/ui/card";
@@ -31,6 +32,66 @@ function Tip({ children, text, side = "top" }: {
 }
 
 // ─── Stats Panel ──────────────────────────────────────────────────────────
+
+type PresentationPlayer = { id: number; name: string; number: number | null; position: string | null; photo: string | null; value?: number | null; appearances?: number };
+type PresentationTeam = {
+  team_id: number; team_name: string; formation: string | null; coach: string | null;
+  starting_xi: PresentationPlayer[]; substitutes: PresentationPlayer[];
+  star_player: PresentationPlayer | null; in_form: PresentationPlayer[];
+  top_scorer: PresentationPlayer | null; top_assister: PresentationPlayer | null; top_fouler: PresentationPlayer | null;
+};
+type MatchPresentation = { match_id: number; season: number; lineups_announced: boolean; player_stats_available: boolean; source: string; note: string; home: PresentationTeam; away: PresentationTeam };
+
+function PlayerMetric({ label, player, suffix }: { label: string; player: PresentationPlayer | null; suffix: string }) {
+  return (
+    <div className="rounded-lg border border-border/50 bg-background/50 px-3 py-2.5 min-w-0">
+      <div className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">{label}</div>
+      {player ? <div className="mt-1 flex items-center justify-between gap-2"><span className="text-xs font-semibold truncate">{player.name}</span><span className="text-[10px] font-mono text-primary whitespace-nowrap">{player.value ?? 0}{suffix}</span></div> : <div className="mt-1 text-xs text-muted-foreground">Unavailable</div>}
+    </div>
+  );
+}
+
+function TeamSquad({ team, side }: { team: PresentationTeam; side: "home" | "away" }) {
+  const color = side === "home" ? "text-primary" : "text-chart-2";
+  return (
+    <div className="space-y-4 min-w-0">
+      <div className="flex items-start justify-between gap-3 border-b border-border/50 pb-3">
+        <div><h3 className="font-bold truncate">{team.team_name}</h3><p className="text-[10px] text-muted-foreground font-mono mt-1">Coach: {team.coach ?? "Not available"}</p></div>
+        {team.formation && <span className={`rounded-full border border-current/20 bg-current/5 px-2 py-1 text-[10px] font-mono font-bold ${color}`}>{team.formation}</span>}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <PlayerMetric label="Star player" player={team.star_player} suffix=" rating" />
+        <PlayerMetric label="Most goals" player={team.top_scorer} suffix=" goals" />
+        <PlayerMetric label="Most assists" player={team.top_assister} suffix=" assists" />
+        <PlayerMetric label="Most fouls" player={team.top_fouler} suffix=" fouls" />
+      </div>
+      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+        <div className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground mb-2">Players in form · season rating</div>
+        {team.in_form.length ? <div className="flex flex-wrap gap-2">{team.in_form.map((p) => <span key={p.id} className="inline-flex gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[10px]"><span className="font-semibold">{p.name}</span><span className={color}>{p.value}</span></span>)}</div> : <p className="text-xs text-muted-foreground">No rated player data available.</p>}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <SquadList title="Starting XI" players={team.starting_xi} />
+        <SquadList title="Substitutes" players={team.substitutes} />
+      </div>
+    </div>
+  );
+}
+
+function SquadList({ title, players }: { title: string; players: PresentationPlayer[] }) {
+  return <div><div className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground mb-2">{title}</div>{players.length ? <div className="space-y-1.5">{players.map((p) => <div key={p.id} className="flex items-center gap-2 text-xs"><span className="w-6 text-right font-mono text-muted-foreground">{p.number ?? "–"}</span><span className="truncate">{p.name}</span>{p.position && <span className="ml-auto text-[9px] font-mono text-muted-foreground">{p.position}</span>}</div>)}</div> : <p className="text-xs text-muted-foreground">Not announced</p>}</div>;
+}
+
+function LineupsAndPlayers({ matchId }: { matchId: number }) {
+  const { data, isLoading, isError } = useQuery<MatchPresentation>({
+    queryKey: ["match-presentation", matchId],
+    queryFn: async () => { const response = await fetch(`/api/matches/${matchId}/presentation`); if (!response.ok) throw new Error("presentation unavailable"); return response.json(); },
+    refetchInterval: 60_000,
+  });
+  return <Card className="border-border/50 overflow-hidden"><div className="p-5 space-y-5">
+    <div className="flex items-start justify-between gap-4"><div className="flex items-center gap-2"><Users className="w-4 h-4 text-primary"/><div><div className="font-mono text-sm font-bold uppercase tracking-widest text-muted-foreground">Lineups & Player Intelligence</div><p className="text-[10px] text-muted-foreground mt-1">Official lineups plus season-to-date player leaders</p></div></div>{data && <span className="text-[9px] font-mono text-muted-foreground">{data.season}/{String(data.season + 1).slice(2)}</span>}</div>
+    {isLoading ? <div className="grid sm:grid-cols-2 gap-4"><Skeleton className="h-72"/><Skeleton className="h-72"/></div> : isError || !data ? <p className="py-8 text-center text-xs text-muted-foreground">Lineup and player data are temporarily unavailable.</p> : <><div className={`rounded-lg border px-3 py-2 text-[10px] font-mono ${data.lineups_announced ? "border-primary/25 bg-primary/5 text-primary" : "border-amber-400/25 bg-amber-400/5 text-amber-300"}`}><span className="inline-flex items-center gap-1.5"><Star className="w-3 h-3"/>{data.note}</span></div><div className="grid lg:grid-cols-2 gap-6 lg:divide-x lg:divide-border/50"><TeamSquad team={data.home} side="home"/><div className="lg:pl-6"><TeamSquad team={data.away} side="away"/></div></div><p className="text-[9px] text-muted-foreground/60 font-mono">Source: {data.source}. Player leaders are informational and are not derived from this fixture's result.</p></>}
+  </div></Card>;
+}
 
 const FORM_STYLES: Record<string, string> = {
   W: "bg-primary text-primary-foreground",
@@ -1267,6 +1328,8 @@ export default function MatchDetail() {
         homeTeamName={match.home_team.name}
         awayTeamName={match.away_team.name}
       />
+
+      <LineupsAndPlayers matchId={match.id} />
 
       {/* Head-to-Head — always visible for any match */}
       <HeadToHead

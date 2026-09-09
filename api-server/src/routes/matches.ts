@@ -2,6 +2,7 @@ import { Router, type IRouter, type Response } from "express";
 import { getAllMatches, getMatchById } from "../lib/soccerService";
 import { saveOutcome } from "../lib/predictionStore";
 import { isTrackedLeague } from "../lib/leagueConfig";
+import { getMatchPresentation } from "../lib/matchPresentationService";
 import {
   getApiFootballProviderHealth,
   isApiFootballProviderError,
@@ -96,6 +97,24 @@ router.get("/matches/:match_id", async (req, res) => {
     return res.json(match);
   } catch (err) {
     return handleMatchRouteError(err, res);
+  }
+});
+
+router.get("/matches/:match_id/presentation", async (req, res) => {
+  try {
+    const id = parseInt(req.params.match_id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid match ID" });
+      return;
+    }
+    const match = await getMatchById(id);
+    if (!match || !isTrackedLeague(match.league_id) || isBlockedLeague(match.league_name)) {
+      res.status(404).json({ error: "Match not found" });
+      return;
+    }
+    res.json(await getMatchPresentation(match));
+  } catch (err) {
+    res.status(502).json({ error: "Lineup and player data are temporarily unavailable" });
   }
 });
 

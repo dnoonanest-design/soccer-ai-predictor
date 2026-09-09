@@ -209,6 +209,19 @@ type Threshold = (typeof THRESHOLDS)[number];
 
 type Filter = "all" | "live" | "upcoming" | "finished" | "value";
 
+function competitionTheme(name: string, country: string) {
+  const key = `${name} ${country}`.toLowerCase();
+  if (key.includes("champions league")) return { accent: "border-violet-500/70", glow: "from-violet-500/15", badge: "bg-violet-500/15 text-violet-300 border-violet-500/30" };
+  if (key.includes("europa league")) return { accent: "border-orange-500/70", glow: "from-orange-500/15", badge: "bg-orange-500/15 text-orange-300 border-orange-500/30" };
+  if (key.includes("conference league")) return { accent: "border-emerald-500/70", glow: "from-emerald-500/15", badge: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" };
+  if (key.includes("cup")) return { accent: "border-amber-400/70", glow: "from-amber-400/10", badge: "bg-amber-400/15 text-amber-300 border-amber-400/30" };
+  if (key.includes("england")) return { accent: "border-sky-500/70", glow: "from-sky-500/15", badge: "bg-sky-500/15 text-sky-300 border-sky-500/30" };
+  if (key.includes("spain")) return { accent: "border-rose-500/70", glow: "from-rose-500/15", badge: "bg-rose-500/15 text-rose-300 border-rose-500/30" };
+  if (key.includes("italy")) return { accent: "border-cyan-500/70", glow: "from-cyan-500/15", badge: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30" };
+  if (key.includes("germany")) return { accent: "border-red-500/70", glow: "from-red-500/15", badge: "bg-red-500/15 text-red-300 border-red-500/30" };
+  return { accent: "border-primary/60", glow: "from-primary/10", badge: "bg-primary/10 text-primary border-primary/25" };
+}
+
 export default function Dashboard() {
   const [filter, setFilter] = useState<Filter>("all");
   const [threshold, setThreshold] = useState<Threshold>(10);
@@ -432,16 +445,22 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="space-y-8">
-          {Object.entries(groupedMatches).map(([leagueId, group]) => (
-            <div key={leagueId} className="space-y-4">
-              <div className="flex items-center gap-3">
+          {Object.entries(groupedMatches).map(([leagueId, group]) => {
+            const theme = competitionTheme(group.name, group.country);
+            return (
+            <section key={leagueId} className={`relative overflow-hidden rounded-xl border border-border/50 border-l-4 ${theme.accent} bg-card/35 p-4 sm:p-5 shadow-sm`}>
+              <div className={`pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b ${theme.glow} to-transparent`} />
+              <div className="relative flex items-center gap-3 mb-4">
                 {group.logo ? (
-                  <img src={group.logo} alt={group.name} className="w-6 h-6 object-contain" />
+                  <div className="rounded-lg bg-background/80 border border-border/60 p-1.5 shadow-sm"><img src={group.logo} alt={group.name} className="w-7 h-7 object-contain" /></div>
                 ) : (
                   <Trophy className="w-5 h-5 text-muted-foreground" />
                 )}
-                <h2 className="text-lg font-semibold tracking-tight">{group.name}</h2>
-                <span className="text-xs text-muted-foreground uppercase tracking-wider">{group.country}</span>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold tracking-tight truncate">{group.name}</h2>
+                  <span className={`inline-flex mt-1 px-2 py-0.5 rounded-full border text-[9px] font-mono font-bold uppercase tracking-[0.14em] ${theme.badge}`}>{group.country}</span>
+                </div>
+                <span className="ml-auto text-[10px] font-mono text-muted-foreground">{group.matches.length} fixture{group.matches.length === 1 ? "" : "s"}</span>
                 {(() => {
                   const leagueValueCount = group.matches.filter((m) => (valueBetMap.get(m.id) ?? []).length > 0).length;
                   return leagueValueCount > 0 ? (
@@ -451,7 +470,7 @@ export default function Dashboard() {
                   ) : null;
                 })()}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              <div className="relative grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {group.matches.map((match) => (
                   <MatchCard
                     key={match.id}
@@ -461,8 +480,8 @@ export default function Dashboard() {
                   />
                 ))}
               </div>
-            </div>
-          ))}
+            </section>
+          )})}
         </div>
       )}
     </div>

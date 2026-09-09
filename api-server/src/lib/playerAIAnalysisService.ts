@@ -4,10 +4,15 @@ import { eq, desc, and, gte } from "drizzle-orm";
 import { logger } from "./logger.js";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 // AI analyses a player and discovers its own predictive signals
 export async function analysePlayerWithAI(playerId: number): Promise<void> {
   try {
+    if (!ANTHROPIC_API_KEY) {
+      logger.warn({ playerId }, "Skipping AI player analysis: ANTHROPIC_API_KEY is not configured");
+      return;
+    }
     const profile = await db.query.playerProfiles.findFirst({
       where: eq(playerProfiles.playerId, playerId)
     });
@@ -43,8 +48,7 @@ Career Stage: ${profile.careerStage ?? "Unknown"}
 Growth Rate: ${profile.growthRate?.toFixed(3) ?? "N/A"}
 
 LAST 20 MATCHES (most recent first):
-${recentMatches.map((m, i) => `Match ${i+1}: ${m.matchDate?.toISOString().split("T")[0]} | ${m.isInternational ? "INT" : "CLUB"} | ${m.minutesPlayed}mins | Rating: ${m.rating ?? "N/A"} | Goals: ${m.goals} | Assists: ${m.assists} | Shots: ${m.shots} | PassAcc: ${m.passAccuracy ?? "N/A"}% | Tackles: ${m.successfulTackles} | YC: ${m.yellowCards} | Result: ${m.teamResult}`).join("
-")}
+${recentMatches.map((m, i) => `Match ${i+1}: ${m.matchDate?.toISOString().split("T")[0]} | ${m.isInternational ? "INT" : "CLUB"} | ${m.minutesPlayed}mins | Rating: ${m.rating ?? "N/A"} | Goals: ${m.goals} | Assists: ${m.assists} | Shots: ${m.shots} | PassAcc: ${m.passAccuracy ?? "N/A"}% | Tackles: ${m.successfulTackles} | YC: ${m.yellowCards} | Result: ${m.teamResult}`).join("\n")}
 
 Your task:
 1. Identify 3-5 unique predictive signals specific to THIS player
@@ -72,13 +76,21 @@ Respond in JSON only:
 
     const response = await fetch(ANTHROPIC_API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }]
       })
     });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic request failed with status ${response.status}`);
+    }
 
     const data = await response.json() as any;
     const text = data.content?.[0]?.text ?? "";
