@@ -9,6 +9,7 @@ import {
   applyCalibration,
 } from "../lib/predictionStore";
 import { saveLiveAlert, savePredictionSnapshot } from "../lib/predictionPlatformService";
+import { getMarketAssessment } from "../lib/marketIntelligenceService";
 
 const router = Router();
 
@@ -113,6 +114,16 @@ router.get("/matches/:match_id/stats", async (req, res) => {
           const normDraw = normalized.draw;
           const normAway = normalized.away;
 
+          const predictionAt = new Date();
+          const marketIntelligence = await getMarketAssessment(matchId, {
+            home: normHome,
+            draw: normDraw,
+            away: normAway,
+          }, predictionAt).catch((err) => {
+            logger.warn({ err, matchId }, "Market assessment failed; independent prediction preserved");
+            return null;
+          });
+
           enhancedPred = {
             ...rawPred,
             home_win: normHome,
@@ -124,6 +135,10 @@ router.get("/matches/:match_id/stats", async (req, res) => {
               draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),
               away: valueEdge(normAway, match.odds?.away_odds ?? null),
             },
+            market_intelligence: marketIntelligence ? {
+              ...marketIntelligence,
+              probability_scale: "0-1",
+            } : null,
           };
 
           const confidenceScore = Number((enhancedPred as any).confidence_score ?? 0);

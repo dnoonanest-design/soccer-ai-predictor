@@ -32,6 +32,7 @@ async function fetchFootball(path: string): Promise<unknown> {
   await waitForRateLimit();
   const res = await fetch(url, {
     headers: { "x-apisports-key": API_FOOTBALL_KEY },
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) {
     logger.error({ status: res.status, url }, "API-Football request failed");

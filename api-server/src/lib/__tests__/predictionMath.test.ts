@@ -32,10 +32,13 @@ function dcTau(i: number, j: number, lambda: number, mu: number): number {
 
 const MAX_GOALS = 8;
 function poissonProbs(homeXG: number, awayXG: number) {
-  let homeWin = 0, draw = 0, awayWin = 0;
+  let homeWin = 0,
+    draw = 0,
+    awayWin = 0;
   for (let h = 0; h <= MAX_GOALS; h++) {
     for (let a = 0; a <= MAX_GOALS; a++) {
-      const p = poisson(homeXG, h) * poisson(awayXG, a) * dcTau(h, a, homeXG, awayXG);
+      const p =
+        poisson(homeXG, h) * poisson(awayXG, a) * dcTau(h, a, homeXG, awayXG);
       if (h > a) homeWin += p;
       else if (h === a) draw += p;
       else awayWin += p;
@@ -44,29 +47,46 @@ function poissonProbs(homeXG: number, awayXG: number) {
   const total = homeWin + draw + awayWin;
   return {
     homeWin: (homeWin / total) * 100,
-    draw:    (draw    / total) * 100,
+    draw: (draw / total) * 100,
     awayWin: (awayWin / total) * 100,
   };
 }
 
-const MAX_H2H_WEIGHT    = 0.30;
+const MAX_H2H_WEIGHT = 0.3;
 const FULL_WEIGHT_THRESHOLD = 20;
 function blendH2H(
-  poissonHome: number, poissonDraw: number, poissonAway: number,
-  h2hMatches: number, h2hHomeRate: number, h2hDrawRate: number, h2hAwayRate: number,
+  poissonHome: number,
+  poissonDraw: number,
+  poissonAway: number,
+  h2hMatches: number,
+  h2hHomeRate: number,
+  h2hDrawRate: number,
+  h2hAwayRate: number,
 ): { home: number; draw: number; away: number } {
-  const w = Math.min(MAX_H2H_WEIGHT, (h2hMatches / FULL_WEIGHT_THRESHOLD) * MAX_H2H_WEIGHT);
+  const w = Math.min(
+    MAX_H2H_WEIGHT,
+    (h2hMatches / FULL_WEIGHT_THRESHOLD) * MAX_H2H_WEIGHT,
+  );
   const home = (1 - w) * poissonHome + w * h2hHomeRate * 100;
-  const draw = (1 - w) * poissonDraw  + w * h2hDrawRate  * 100;
-  const away = (1 - w) * poissonAway  + w * h2hAwayRate  * 100;
+  const draw = (1 - w) * poissonDraw + w * h2hDrawRate * 100;
+  const away = (1 - w) * poissonAway + w * h2hAwayRate * 100;
   const total = home + draw + away;
-  return { home: (home / total) * 100, draw: (draw / total) * 100, away: (away / total) * 100 };
+  return {
+    home: (home / total) * 100,
+    draw: (draw / total) * 100,
+    away: (away / total) * 100,
+  };
 }
 
 function formFactor(form: string): number {
-  const chars = form.toUpperCase().split("").filter((c) => ["W", "D", "L"].includes(c)).slice(-5);
+  const chars = form
+    .toUpperCase()
+    .split("")
+    .filter((c) => ["W", "D", "L"].includes(c))
+    .slice(-5);
   if (!chars.length) return 1.0;
-  let weightedScore = 0, totalWeight = 0;
+  let weightedScore = 0,
+    totalWeight = 0;
   chars.forEach((c, idx) => {
     const w = Math.pow(0.8, chars.length - 1 - idx);
     weightedScore += w * (c === "W" ? 1 : c === "D" ? 0.5 : 0);
@@ -77,10 +97,14 @@ function formFactor(form: string): number {
 }
 
 function applyPriorNudge(
-  home: number, draw: number, away: number,
-  priorHome: number, priorDraw: number, priorAway: number,
+  home: number,
+  draw: number,
+  away: number,
+  priorHome: number,
+  priorDraw: number,
+  priorAway: number,
 ): { home: number; draw: number; away: number } {
-  const PRIOR_WEIGHT = 0.10;
+  const PRIOR_WEIGHT = 0.1;
   const h = (1 - PRIOR_WEIGHT) * (home / 100) + PRIOR_WEIGHT * priorHome;
   const d = (1 - PRIOR_WEIGHT) * (draw / 100) + PRIOR_WEIGHT * priorDraw;
   const a = (1 - PRIOR_WEIGHT) * (away / 100) + PRIOR_WEIGHT * priorAway;
@@ -135,10 +159,15 @@ describe("poissonProbs", () => {
     const withDC = poissonProbs(1.3, 1.0);
     // Raw Poisson (rho=0) baseline
     let rawDraw = 0;
-    for (let g = 0; g <= MAX_GOALS; g++) {
-      rawDraw += poisson(1.3, g) * poisson(1.0, g); // dcTau=1 when rho=0
+    let rawTotal = 0;
+    for (let h = 0; h <= MAX_GOALS; h++) {
+      for (let a = 0; a <= MAX_GOALS; a++) {
+        const joint = poisson(1.3, h) * poisson(1.0, a);
+        rawTotal += joint;
+        if (h === a) rawDraw += joint;
+      }
     }
-    rawDraw = (rawDraw / (rawDraw + 0.01)) * 100; // rough normalised
+    rawDraw = (rawDraw / rawTotal) * 100;
     // DC draw should be >= raw (rho correction raises low-score draws)
     expect(withDC.draw).toBeGreaterThanOrEqual(rawDraw * 0.95);
   });
@@ -176,8 +205,11 @@ describe("blendH2H", () => {
     // With old code: w = min(0.30, 5/5 * 0.30) = 0.30 at just 5 matches
     // With new code: w = min(0.30, 5/20 * 0.30) = 0.075 at 5 matches
     // This test confirms new code gives a smaller weight for 5-match H2H
-    const w_new = Math.min(MAX_H2H_WEIGHT, (5 / FULL_WEIGHT_THRESHOLD) * MAX_H2H_WEIGHT);
-    const w_old = 5 >= 5 ? 0.30 : (5 / 5) * 0.30;
+    const w_new = Math.min(
+      MAX_H2H_WEIGHT,
+      (5 / FULL_WEIGHT_THRESHOLD) * MAX_H2H_WEIGHT,
+    );
+    const w_old = 5 >= 5 ? 0.3 : (5 / 5) * 0.3;
     expect(w_new).toBeLessThan(w_old);
     expect(w_new).toBeCloseTo(0.075, 3);
   });
@@ -241,8 +273,8 @@ describe("integration: full prediction pipeline properties", () => {
   it("strongly favoured home team has home_win > 50%", () => {
     // Home team scores 2.5/game, away 0.8/game; home concedes 0.6, away 1.8
     const probs = poissonProbs(
-      ((2.5 + 1.8) / 2) * 1.07,  // homeXG with home advantage
-      (0.8 + 0.6) / 2             // awayXG
+      ((2.5 + 1.8) / 2) * 1.07, // homeXG with home advantage
+      (0.8 + 0.6) / 2, // awayXG
     );
     expect(probs.homeWin).toBeGreaterThan(50);
   });
@@ -266,12 +298,13 @@ function competitionFormFactor(form: string): number {
   if (!form || form.length === 0) return 1.0;
   const chars = form.slice(-5).split("").reverse();
   const decayWeights = [1.0, 0.8, 0.64, 0.51, 0.41];
-  let weightedScore = 0, totalWeight = 0;
+  let weightedScore = 0,
+    totalWeight = 0;
   chars.forEach((c, i) => {
     const w = decayWeights[i] ?? 0.41;
     const score = c === "W" ? 1.0 : c === "D" ? 0.4 : 0.0;
     weightedScore += w * score;
-    totalWeight   += w;
+    totalWeight += w;
   });
   const avgScore = totalWeight > 0 ? weightedScore / totalWeight : 0.5;
   return 0.92 + avgScore * 0.16;
@@ -295,7 +328,7 @@ describe("computePositionFactor", () => {
   });
 
   it("factor scales linearly — rank 5 > rank 10 > rank 15 in 20-team league", () => {
-    const f5  = computePositionFactor(5,  20);
+    const f5 = computePositionFactor(5, 20);
     const f10 = computePositionFactor(10, 20);
     const f15 = computePositionFactor(15, 20);
     expect(f5).toBeGreaterThan(f10);
@@ -326,7 +359,9 @@ describe("competitionFormFactor", () => {
   });
 
   it("recent wins more valuable than old wins (LLWWW > WWWLL)", () => {
-    expect(competitionFormFactor("LLWWW")).toBeGreaterThan(competitionFormFactor("WWWLL"));
+    expect(competitionFormFactor("LLWWW")).toBeGreaterThan(
+      competitionFormFactor("WWWLL"),
+    );
   });
 
   it("output is bounded [0.92, 1.08]", () => {
@@ -340,28 +375,29 @@ describe("competitionFormFactor", () => {
 
 describe("competition factor combination", () => {
   it("top-of-table team with 5 wins has factor > 1.08", () => {
-    const posFactor   = computePositionFactor(1, 20);  // 1.08
-    const formFactor  = competitionFormFactor("WWWWW"); // 1.08
-    const venueFactor = 0.97 + Math.min(0.07, (0.80 - 0.45) * 0.5); // home win rate 80%
-    const raw = posFactor * 0.40 + formFactor * 0.40 + venueFactor * 0.20;
+    const posFactor = computePositionFactor(1, 20); // 1.08
+    const formFactor = competitionFormFactor("WWWWW"); // 1.08
+    const venueFactor = 0.97 + Math.min(0.07, (0.8 - 0.45) * 0.5); // home win rate 80%
+    const raw = posFactor * 0.4 + formFactor * 0.4 + venueFactor * 0.2;
     const capped = Math.max(0.88, Math.min(1.12, raw));
     expect(capped).toBeCloseTo(1.12, 1); // hits the cap
   });
 
   it("bottom-of-table team with 5 losses has factor <= 0.92 (hits floor)", () => {
-    const posFactor   = computePositionFactor(20, 20); // 0.92
-    const formFactor  = competitionFormFactor("LLLLL"); // 0.92
-    const venueFactor = 0.97 + Math.max(-0.07, (0.10 - 0.45) * 0.5); // poor home rate
-    const raw = posFactor * 0.40 + formFactor * 0.40 + venueFactor * 0.20;
+    const posFactor = computePositionFactor(20, 20); // 0.92
+    const formFactor = competitionFormFactor("LLLLL"); // 0.92
+    const venueFactor = 0.97 + Math.max(-0.07, (0.1 - 0.45) * 0.5); // poor home rate
+    const raw = posFactor * 0.4 + formFactor * 0.4 + venueFactor * 0.2;
     const capped = Math.max(0.88, Math.min(1.12, raw));
     expect(capped).toBeCloseTo(0.88, 1); // hits the floor
   });
 
   it("mid-table team with mixed form has factor close to 1.0", () => {
-    const posFactor   = computePositionFactor(10, 20); // ~1.0
-    const formFactor  = competitionFormFactor("WDLDW"); // roughly neutral
-    const venueFactor = 0.97 + Math.max(-0.07, Math.min(0.07, (0.45 - 0.45) * 0.5)); // league average
-    const raw = posFactor * 0.40 + formFactor * 0.40 + venueFactor * 0.20;
+    const posFactor = computePositionFactor(10, 20); // ~1.0
+    const formFactor = competitionFormFactor("WDLDW"); // roughly neutral
+    const venueFactor =
+      0.97 + Math.max(-0.07, Math.min(0.07, (0.45 - 0.45) * 0.5)); // league average
+    const raw = posFactor * 0.4 + formFactor * 0.4 + venueFactor * 0.2;
     const capped = Math.max(0.88, Math.min(1.12, raw));
     expect(Math.abs(capped - 1.0)).toBeLessThan(0.05);
   });

@@ -10,7 +10,9 @@ const app: Express = express();
 
 app.use(
   pinoHttp({
-    logger,
+    // pino-http carries its own compatible pino type; the runtime logger API
+    // is identical even when pnpm resolves the declarations separately.
+    logger: logger as any,
     serializers: {
       req(req) {
         return {
@@ -35,13 +37,22 @@ app.use("/api", router);
 
 // Railway/production: serve the built React dashboard from the same service.
 // This keeps deployment simple: one Railway web service handles API + iPad/PWA frontend.
-const dashboardDist = path.resolve(import.meta.dirname, "..", "..", "soccer-dashboard", "dist", "public");
+const dashboardDist = path.resolve(
+  import.meta.dirname,
+  "..",
+  "..",
+  "soccer-dashboard",
+  "dist",
+  "public",
+);
 if (process.env.NODE_ENV === "production" && fs.existsSync(dashboardDist)) {
-  app.use(express.static(dashboardDist, {
-    maxAge: "1h",
-    etag: true,
-    index: false,
-  }));
+  app.use(
+    express.static(dashboardDist, {
+      maxAge: "1h",
+      etag: true,
+      index: false,
+    }),
+  );
 
   app.use((req, res, next) => {
     if (req.path.startsWith("/api")) return next();

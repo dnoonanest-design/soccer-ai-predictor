@@ -3,13 +3,26 @@ import { waitForRateLimit } from "./rateLimiter";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
-const SEASON = parseInt(process.env.FOOTBALL_SEASON ?? "2025", 10);
+const current = new Date();
+const SEASON = parseInt(
+  process.env.FOOTBALL_SEASON ??
+    String(
+      current.getUTCMonth() >= 6
+        ? current.getUTCFullYear()
+        : current.getUTCFullYear() - 1,
+    ),
+  10,
+);
 
 const TEAM_CACHE_TTL = 10 * 60 * 1000;
 const LIVE_CACHE_TTL = 12 * 1000;
 
-interface CacheEntry<T> { data: T; fetchedAt: number; }
+interface CacheEntry<T> {
+  data: T;
+  fetchedAt: number;
+}
 const cache = new Map<string, CacheEntry<unknown>>();
+const inFlight = new Map<string, Promise<unknown>>();
 
 function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -21,12 +34,26 @@ function setCache<T>(key: string, data: T): void {
 }
 
 async function fetchFootball(path: string): Promise<unknown> {
-  if (!API_FOOTBALL_KEY) { logger.warn("API_FOOTBALL_KEY not set"); return null; }
+  if (!API_FOOTBALL_KEY) {
+    logger.warn("API_FOOTBALL_KEY not set");
+    return null;
+  }
   const url = `${API_FOOTBALL_BASE}${path}`;
-  await waitForRateLimit();
-  const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
-  if (!res.ok) { logger.error({ status: res.status, url }, "API-Football failed"); return null; }
-  return res.json();
+  await waitForRateLimit(); // FIXED: was missing entirely
+  try {
+    const res = await fetch(url, {
+      headers: { "x-apisports-key": API_FOOTBALL_KEY },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      logger.error({ status: res.status, path }, "API-Football failed");
+      return null;
+    }
+    return res.json();
+  } catch (err) {
+    logger.error({ err, path }, "API-Football request errored or timed out");
+    return null;
+  }
 }
 
 export interface TeamStats {
@@ -92,25 +119,44 @@ type ApiFixtureStatResp = {
 };
 type TeamStatEntry = NonNullable<ApiFixtureStatResp["response"]>[number];
 
-async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamStats | null> {
+async function fetchTeamStats(
+  teamId: number,
+  leagueId: number,
+): Promise<TeamStats | null> {
   const key = `teamstats:${teamId}:${leagueId}`;
   const cached = getCached<TeamStats>(key, TEAM_CACHE_TTL);
   if (cached) return cached;
 
+  const existing = inFlight.get(key) as Promise<TeamStats | null> | undefined;
+  if (existing) return existing;
+  const request = fetchTeamStatsUncached(teamId, leagueId, key);
+  inFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+async function fetchTeamStatsUncached(
+  teamId: number,
+  leagueId: number,
+  key: string,
+): Promise<TeamStats | null> {
   const data = (await fetchFootball(
-    `/teams/statistics?team=${teamId}&league=${leagueId}&season=${SEASON}`
+    `/teams/statistics?team=${teamId}&league=${leagueId}&season=${SEASON}`,
   )) as ApiTeamStatsResp | null;
 
   const r = data?.response;
   if (!r) return null;
 
   const played = r.fixtures?.played?.total ?? 0;
-  const wins   = r.fixtures?.wins?.total ?? 0;
-  const draws  = r.fixtures?.draws?.total ?? 0;
+  const wins = r.fixtures?.wins?.total ?? 0;
+  const draws = r.fixtures?.draws?.total ?? 0;
   const losses = r.fixtures?.loses?.total ?? 0;
-  const gpg    = parseFloat(r.goals?.for?.average?.total ?? "0") || 0;
-  const cpg    = parseFloat(r.goals?.against?.average?.total ?? "0") || 0;
-  const cs     = r.clean_sheet?.total ?? 0;
+  const gpg = parseFloat(r.goals?.for?.average?.total ?? "0") || 0;
+  const cpg = parseFloat(r.goals?.against?.average?.total ?? "0") || 0;
+  const cs = r.clean_sheet?.total ?? 0;
   const rawForm = r.form ?? "";
   const form = rawForm.slice(-5);
 
@@ -157,7 +203,9 @@ function pickStat(
   ...names: string[]
 ): string | number | null {
   const wanted = new Set(names.map(normaliseStatName));
-  return stats.find((s) => wanted.has(normaliseStatName(s.type)))?.value ?? null;
+  return (
+    stats.find((s) => wanted.has(normaliseStatName(s.type)))?.value ?? null
+  );
 }
 
 function toNumber(v: string | number | null): number | null {
@@ -175,15 +223,19 @@ function toInt(v: string | number | null): number | null {
 }
 
 function hasAnyLiveMetric(stats: Partial<TeamStats>): boolean {
-  return Object.entries(stats).some(([key, value]) =>
-    key !== "team" && key !== "team_id" && value !== null && value !== undefined
+  return Object.entries(stats).some(
+    ([key, value]) =>
+      key !== "team" &&
+      key !== "team_id" &&
+      value !== null &&
+      value !== undefined,
   );
 }
 
 async function fetchLiveFixtureStats(
   fixtureId: number,
   homeTeamId: number,
-  awayTeamId: number
+  awayTeamId: number,
 ): Promise<{ home: Partial<TeamStats>; away: Partial<TeamStats> } | null> {
   const key = `fixturestats:${fixtureId}`;
   type LFResult = { home: Partial<TeamStats>; away: Partial<TeamStats> };
@@ -191,14 +243,20 @@ async function fetchLiveFixtureStats(
   if (cached) return cached;
 
   const data = (await fetchFootball(
-    `/fixtures/statistics?fixture=${fixtureId}`
+    `/fixtures/statistics?fixture=${fixtureId}`,
   )) as ApiFixtureStatResp | null;
   if (!data?.response || data.response.length === 0) return null;
 
   const parse = (teamEntry: TeamStatEntry): Partial<TeamStats> => {
     const s = teamEntry.statistics ?? [];
     const possession = pickStat(s, "Ball Possession", "Possession");
-    const passPct = pickStat(s, "Passes %", "Passes Percent", "Pass Accuracy", "Passes Accuracy");
+    const passPct = pickStat(
+      s,
+      "Passes %",
+      "Passes Percent",
+      "Pass Accuracy",
+      "Passes Accuracy",
+    );
     return {
       possession: possession == null ? null : String(possession),
       shots_total: toInt(pickStat(s, "Total Shots", "Shots Total")),
@@ -208,16 +266,32 @@ async function fetchLiveFixtureStats(
       offsides: toInt(pickStat(s, "Offsides")),
       yellow_cards: toInt(pickStat(s, "Yellow Cards", "Yellow Card")),
       red_cards: toInt(pickStat(s, "Red Cards", "Red Card")),
-      goalkeeper_saves: toInt(pickStat(s, "Goalkeeper Saves", "Keeper Saves", "Saves")),
-      shots_off_target: toInt(pickStat(s, "Shots off Goal", "Shots off Target")),
+      goalkeeper_saves: toInt(
+        pickStat(s, "Goalkeeper Saves", "Keeper Saves", "Saves"),
+      ),
+      shots_off_target: toInt(
+        pickStat(s, "Shots off Goal", "Shots off Target"),
+      ),
       blocked_shots: toInt(pickStat(s, "Blocked Shots")),
-      shots_inside_box: toInt(pickStat(s, "Shots insidebox", "Shots inside box", "Shots in Box")),
-      shots_outside_box: toInt(pickStat(s, "Shots outsidebox", "Shots outside box", "Shots out Box")),
-      total_passes: toInt(pickStat(s, "Total passes", "Total Passes", "Passes Total")),
-      accurate_passes: toInt(pickStat(s, "Passes accurate", "Accurate Passes", "Passes Accurate")),
+      shots_inside_box: toInt(
+        pickStat(s, "Shots insidebox", "Shots inside box", "Shots in Box"),
+      ),
+      shots_outside_box: toInt(
+        pickStat(s, "Shots outsidebox", "Shots outside box", "Shots out Box"),
+      ),
+      total_passes: toInt(
+        pickStat(s, "Total passes", "Total Passes", "Passes Total"),
+      ),
+      accurate_passes: toInt(
+        pickStat(s, "Passes accurate", "Accurate Passes", "Passes Accurate"),
+      ),
       pass_accuracy: passPct == null ? null : String(passPct),
-      expected_goals_live: toNumber(pickStat(s, "expected_goals", "Expected Goals", "xG", "Expected goals")),
-      dangerous_attacks: toInt(pickStat(s, "Dangerous Attacks", "Dangerous attacks")),
+      expected_goals_live: toNumber(
+        pickStat(s, "expected_goals", "Expected Goals", "xG", "Expected goals"),
+      ),
+      dangerous_attacks: toInt(
+        pickStat(s, "Dangerous Attacks", "Dangerous attacks"),
+      ),
     };
   };
 
@@ -228,7 +302,8 @@ async function fetchLiveFixtureStats(
     away: awayEntry ? parse(awayEntry) : {},
   };
 
-  if (!hasAnyLiveMetric(result.home) && !hasAnyLiveMetric(result.away)) return null;
+  if (!hasAnyLiveMetric(result.home) && !hasAnyLiveMetric(result.away))
+    return null;
 
   setCache(key, result);
   return result;
@@ -253,13 +328,23 @@ export interface XGPrediction {
 }
 
 function computeXG(
-  homeGpg: number, homeCpg: number,
-  awayGpg: number, awayCpg: number,
-  homeAdvantage = 1.10
-): { homeXG: number; awayXG: number; homeWin: number; draw: number; awayWin: number } {
+  homeGpg: number,
+  homeCpg: number,
+  awayGpg: number,
+  awayCpg: number,
+  homeAdvantage = 1.1,
+): {
+  homeXG: number;
+  awayXG: number;
+  homeWin: number;
+  draw: number;
+  awayWin: number;
+} {
   const homeXG = ((homeGpg + awayCpg) / 2) * homeAdvantage;
   const awayXG = (awayGpg + homeCpg) / 2;
-  let homeWin = 0, draw = 0, awayWin = 0;
+  let homeWin = 0,
+    draw = 0,
+    awayWin = 0;
   for (let h = 0; h <= MAX_GOALS; h++) {
     const pH = poisson(homeXG, h);
     for (let a = 0; a <= MAX_GOALS; a++) {
@@ -285,24 +370,50 @@ export async function getAllXGPredictions(
     home_team: { id: number; name: string };
     away_team: { id: number; name: string };
     league_id: number;
-  }>
+  }>,
 ): Promise<XGPrediction[]> {
   const statsMap = new Map<string, TeamStats | null>();
+  const uniqueTeams = new Map<string, { teamId: number; leagueId: number }>();
   for (const m of matches) {
     const hKey = `teamstats:${m.home_team.id}:${m.league_id}`;
     const aKey = `teamstats:${m.away_team.id}:${m.league_id}`;
-    statsMap.set(hKey, getCached<TeamStats>(hKey, TEAM_CACHE_TTL));
-    statsMap.set(aKey, getCached<TeamStats>(aKey, TEAM_CACHE_TTL));
+    uniqueTeams.set(hKey, { teamId: m.home_team.id, leagueId: m.league_id });
+    uniqueTeams.set(aKey, { teamId: m.away_team.id, leagueId: m.league_id });
+  }
+
+  const teams = Array.from(uniqueTeams.entries());
+  const batchSize = Math.max(
+    1,
+    Number(process.env.PREDICTION_STATS_BATCH_SIZE ?? 4),
+  );
+  for (let i = 0; i < teams.length; i += batchSize) {
+    const loaded = await Promise.all(
+      teams
+        .slice(i, i + batchSize)
+        .map(
+          async ([key, ids]) =>
+            [key, await fetchTeamStats(ids.teamId, ids.leagueId)] as const,
+        ),
+    );
+    for (const [key, value] of loaded) statsMap.set(key, value);
   }
 
   const predictions: XGPrediction[] = [];
   for (const m of matches) {
     const home = statsMap.get(`teamstats:${m.home_team.id}:${m.league_id}`);
     const away = statsMap.get(`teamstats:${m.away_team.id}:${m.league_id}`);
-    if (!home || !away || home.matches_played === 0 || away.matches_played === 0) continue;
+    if (
+      !home ||
+      !away ||
+      home.matches_played === 0 ||
+      away.matches_played === 0
+    )
+      continue;
     const xg = computeXG(
-      home.goals_per_game, home.conceded_per_game,
-      away.goals_per_game, away.conceded_per_game
+      home.goals_per_game,
+      home.conceded_per_game,
+      away.goals_per_game,
+      away.conceded_per_game,
     );
     predictions.push({
       match_id: m.id,
@@ -316,6 +427,7 @@ export async function getAllXGPredictions(
   return predictions;
 }
 
+// ── FIXED: Sequential fetching instead of Promise.all ────────────────────────
 export async function getMatchStats(
   fixtureId: number,
   homeTeamId: number,
@@ -323,7 +435,7 @@ export async function getMatchStats(
   awayTeamId: number,
   awayTeamName: string,
   leagueId: number,
-  isLiveOrFinished: boolean
+  isLiveOrFinished: boolean,
 ): Promise<MatchStatsResult> {
   const homeStats = await fetchTeamStats(homeTeamId, leagueId);
   const awayStats = await fetchTeamStats(awayTeamId, leagueId);
@@ -332,17 +444,34 @@ export async function getMatchStats(
     : null;
 
   const empty = (id: number, name: string): TeamStats => ({
-    team_id: id, team: name, form: "",
-    goals_per_game: 0, conceded_per_game: 0,
-    clean_sheets: 0, matches_played: 0,
-    wins: 0, draws: 0, losses: 0,
-    possession: null, shots_total: null, shots_on_target: null,
-    corners: null, fouls: null, offsides: null,
-    yellow_cards: null, red_cards: null, goalkeeper_saves: null,
-    shots_off_target: null, blocked_shots: null,
-    shots_inside_box: null, shots_outside_box: null,
-    total_passes: null, accurate_passes: null, pass_accuracy: null,
-    expected_goals_live: null, dangerous_attacks: null,
+    team_id: id,
+    team: name,
+    form: "",
+    goals_per_game: 0,
+    conceded_per_game: 0,
+    clean_sheets: 0,
+    matches_played: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    possession: null,
+    shots_total: null,
+    shots_on_target: null,
+    corners: null,
+    fouls: null,
+    offsides: null,
+    yellow_cards: null,
+    red_cards: null,
+    goalkeeper_saves: null,
+    shots_off_target: null,
+    blocked_shots: null,
+    shots_inside_box: null,
+    shots_outside_box: null,
+    total_passes: null,
+    accurate_passes: null,
+    pass_accuracy: null,
+    expected_goals_live: null,
+    dangerous_attacks: null,
   });
 
   const home: TeamStats = {

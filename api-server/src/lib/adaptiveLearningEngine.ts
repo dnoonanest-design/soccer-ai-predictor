@@ -304,9 +304,12 @@ async function loadTrainingRows(limit = 2000): Promise<TrainingRow[]> {
       mc.circumstance_score_home,
       mc.circumstance_score_away
     FROM prediction_snapshots ps
+    JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
     JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
     LEFT JOIN match_circumstances mc ON mc.fixture_id = ps.fixture_id
-    WHERE ps.status NOT IN ('live')
+    WHERE ps.status IN ('upcoming', 'scheduled', 'not_started', 'ns', 'tbd')
+      AND mp.kickoff_at IS NOT NULL
+      AND ps.created_at < mp.kickoff_at
     ORDER BY ps.created_at DESC
     LIMIT ${limit}
   `) as any;
@@ -961,8 +964,11 @@ export async function resolveImprovementQueue(): Promise<{
           const countResult = await db.execute(sql`
             SELECT COUNT(*)::int AS n
             FROM prediction_snapshots ps
+            JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
             JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
-            WHERE ps.status NOT IN ('live')
+            WHERE ps.status IN ('upcoming', 'scheduled', 'not_started', 'ns', 'tbd')
+              AND mp.kickoff_at IS NOT NULL
+              AND ps.created_at < mp.kickoff_at
           `) as any;
           const n = Number((countResult.rows ?? countResult)[0]?.n ?? 0);
           if (n >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {

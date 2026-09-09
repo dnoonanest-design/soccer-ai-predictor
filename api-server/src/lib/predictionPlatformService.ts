@@ -2,6 +2,7 @@ import { db, predictionSnapshots, betTracker, modelTrainingRuns, liveAlerts, mat
 import { desc, eq, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import { getCalibrationReport } from "./predictionStore";
+import { LEAKAGE_POLICY } from "./predictionIntegrity";
 
 export interface PredictionSnapshotInput {
   fixtureId: number;
@@ -26,6 +27,12 @@ export interface PredictionSnapshotInput {
 
 export async function savePredictionSnapshot(input: PredictionSnapshotInput): Promise<void> {
   try {
+    const existingOutcome = await db.select({ fixtureId: matchOutcomes.fixtureId })
+      .from(matchOutcomes).where(eq(matchOutcomes.fixtureId, input.fixtureId)).limit(1);
+    if (input.status === "finished" || existingOutcome.length > 0) {
+      logger.error({ fixtureId: input.fixtureId, status: input.status }, `Prediction snapshot rejected: ${LEAKAGE_POLICY}`);
+      return;
+    }
     await db.insert(predictionSnapshots).values({
       fixtureId: input.fixtureId,
       leagueId: input.leagueId ?? null,
@@ -137,7 +144,7 @@ export async function runTrainingPipeline() {
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+    .where(sql`${matchPredictions.isLive} = false AND ${matchPredictions.kickoffAt} IS NOT NULL AND ${matchPredictions.createdAt} < ${matchPredictions.kickoffAt} AND ${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`);
 
   const n = rows.length;
   const holdoutRows = Math.max(0, Math.floor(n * 0.2));
@@ -164,7 +171,7 @@ export async function runTrainingPipeline() {
 
   const weights = {
     model: "calibrated-statistical-v4",
-    note: "Bookmaker odds are intentionally excluded from the core predictor. The statistical model is trained and calibrated from football data only; bookmaker movement is evaluated separately by the market-intelligence layer.",
+    note: "Lightweight training pipeline: learns outcome priors and records holdout-style metrics. Replace with XGBoost/LightGBM when historic feature rows exceed 2,000.",
     priors: {
       home: n ? outcomeCounts.home / n : 0.45,
       draw: n ? outcomeCounts.draw / n : 0.27,
@@ -176,16 +183,16 @@ export async function runTrainingPipeline() {
       buckets: calibrationReport.buckets,
     },
     recommendedFeatureWeights: {
-      marketOdds: 0,
-      xg: 0.35,
-      elo: 0.20,
-      form: 0.15,
-      injuriesLineups: 0.15,
-      liveMomentum: 0.15,
-    },
-    marketIntelligence: {
-      mode: "evaluation_only",
-      feedsCorePrediction: false,
+      // The statistical model remains market-independent. Market evidence is
+      // applied later by marketIntelligenceService in a separately evaluated,
+      // capped ensemble.
+      marketOddsInIndependentModel: 0,
+      marketIntelligenceMaxWeight: 0.15,
+      xg: 0.27,
+      elo: 0.16,
+      form: 0.12,
+      injuriesLineups: 0.11,
+      liveMomentum: 0.12,
     },
   };
 

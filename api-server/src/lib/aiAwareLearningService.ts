@@ -77,8 +77,12 @@ export async function buildSimilarMatchMemory(limit = 500) {
            mc.home_star_player_rating, mc.away_star_player_rating, mc.home_missing_players, mc.away_missing_players,
            mo.outcome, mo.score_home, mo.score_away
     FROM prediction_snapshots ps
+    JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
     JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
     LEFT JOIN match_circumstances mc ON mc.fixture_id = ps.fixture_id
+    WHERE ps.status IN ('upcoming', 'scheduled', 'not_started', 'ns', 'tbd')
+      AND mp.kickoff_at IS NOT NULL
+      AND ps.created_at < mp.kickoff_at
     ORDER BY ps.created_at DESC
     LIMIT ${limit}
   `) as any;

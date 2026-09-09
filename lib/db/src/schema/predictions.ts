@@ -64,6 +64,62 @@ export const predictionSnapshots = pgTable("prediction_snapshots", {
   createdAt:       timestamp("created_at").notNull().defaultNow(),
 });
 
+// Raw, timestamped bookmaker observations. These are deliberately separate
+// from match_predictions so the statistical model remains independent and a
+// historic prediction can only be compared with odds known at that time.
+export const marketOddsSnapshots = pgTable(
+  "market_odds_snapshots",
+  {
+    id: serial("id").primaryKey(),
+    fixtureId: integer("fixture_id").notNull(),
+    providerEventId: text("provider_event_id"),
+    bookmakerKey: text("bookmaker_key").notNull(),
+    marketKey: text("market_key").notNull().default("h2h"),
+    homeDecimal: real("home_decimal").notNull(),
+    drawDecimal: real("draw_decimal").notNull(),
+    awayDecimal: real("away_decimal").notNull(),
+    homeFairProb: real("home_fair_prob").notNull(),
+    drawFairProb: real("draw_fair_prob").notNull(),
+    awayFairProb: real("away_fair_prob").notNull(),
+    overround: real("overround").notNull(),
+    isInPlay: boolean("is_in_play").notNull().default(false),
+    kickoffAt: timestamp("kickoff_at"),
+    sourceUpdatedAt: timestamp("source_updated_at").notNull(),
+    observedAt: timestamp("observed_at").notNull().defaultNow(),
+    rawJson: jsonb("raw_json"),
+  },
+  (t) => [
+    unique("uniq_market_source_observation").on(
+      t.fixtureId,
+      t.bookmakerKey,
+      t.marketKey,
+      t.sourceUpdatedAt,
+    ),
+  ],
+);
+
+export const marketAssessments = pgTable("market_assessments", {
+  id: serial("id").primaryKey(),
+  fixtureId: integer("fixture_id").notNull(),
+  predictionAt: timestamp("prediction_at").notNull(),
+  independentHomeProb: real("independent_home_prob").notNull(),
+  independentDrawProb: real("independent_draw_prob").notNull(),
+  independentAwayProb: real("independent_away_prob").notNull(),
+  marketHomeProb: real("market_home_prob").notNull(),
+  marketDrawProb: real("market_draw_prob").notNull(),
+  marketAwayProb: real("market_away_prob").notNull(),
+  assistedHomeProb: real("assisted_home_prob").notNull(),
+  assistedDrawProb: real("assisted_draw_prob").notNull(),
+  assistedAwayProb: real("assisted_away_prob").notNull(),
+  marketWeight: real("market_weight").notNull(),
+  movementStrength: real("movement_strength").notNull(),
+  consensusScore: real("consensus_score").notNull(),
+  bookmakerCount: integer("bookmaker_count").notNull(),
+  isInPlay: boolean("is_in_play").notNull().default(false),
+  explanationJson: jsonb("explanation_json"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 export const betTracker = pgTable("bet_tracker", {
   id:             serial("id").primaryKey(),
   fixtureId:      integer("fixture_id").notNull(),
@@ -367,6 +423,8 @@ export type BetTrackerEntry = typeof betTracker.$inferSelect;
 export type InsertBetTrackerEntry = z.infer<typeof insertBetTrackerSchema>;
 export type ModelTrainingRun = typeof modelTrainingRuns.$inferSelect;
 export type LiveAlert = typeof liveAlerts.$inferSelect;
+export type MarketOddsSnapshot = typeof marketOddsSnapshots.$inferSelect;
+export type MarketAssessment = typeof marketAssessments.$inferSelect;
 
 
 export const insertDeepMatchStatsSchema = createInsertSchema(deepMatchStats).omit({ id: true, collectedAt: true });

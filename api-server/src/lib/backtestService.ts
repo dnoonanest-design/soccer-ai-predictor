@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -62,8 +63,10 @@ async function fetchFixtures(leagueId: number, season: number): Promise<ApiFixtu
   if (!API_FOOTBALL_KEY) return [];
   const url = `${API_FOOTBALL_BASE}/fixtures?league=${leagueId}&season=${season}&status=FT`;
   try {
+    await waitForRateLimit();
     const res = await fetch(url, {
       headers: { "x-apisports-key": API_FOOTBALL_KEY },
+      signal: AbortSignal.timeout(8_000),
     });
     if (!res.ok) {
       logger.warn({ status: res.status, leagueId, season }, "API-Football fixture fetch failed");

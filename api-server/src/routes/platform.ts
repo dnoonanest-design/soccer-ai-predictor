@@ -3,8 +3,41 @@ import { logger } from "../lib/logger";
 import { getAllMatches } from "../lib/soccerService";
 import { createTrackedBet, getBetTrackerSummary, getLiveAlerts, getPredictionHistory, getTrainingRuns, runTrainingPipeline, saveLiveAlert, settleTrackedBet } from "../lib/predictionPlatformService";
 import { getCalibrationReport, getTrainingDataset, saveOutcome } from "../lib/predictionStore";
+import { assessLatestIndependentPrediction, getMarketHistory, getMarketPerformanceReport } from "../lib/marketIntelligenceService";
 
 const router = Router();
+
+router.get("/matches/:match_id/market-history", async (req, res) => {
+  const fixtureId = Number(req.params.match_id);
+  if (!Number.isFinite(fixtureId)) return res.status(400).json({ error: "Invalid match_id" });
+  try {
+    const snapshots = await getMarketHistory(fixtureId, Number(req.query.limit ?? 250));
+    return res.json({ fixture_id: fixtureId, snapshots, count: snapshots.length });
+  } catch (err) {
+    logger.error({ err, fixtureId }, "market history failed");
+    return res.status(500).json({ error: "Failed to fetch market history" });
+  }
+});
+
+router.get("/matches/:match_id/market-intelligence", async (req, res) => {
+  const fixtureId = Number(req.params.match_id);
+  if (!Number.isFinite(fixtureId)) return res.status(400).json({ error: "Invalid match_id" });
+  const asOf = req.query.as_of ? new Date(String(req.query.as_of)) : new Date();
+  if (Number.isNaN(asOf.getTime())) return res.status(400).json({ error: "as_of must be a valid ISO timestamp" });
+  try {
+    const assessment = await assessLatestIndependentPrediction(fixtureId, asOf);
+    if (!assessment) return res.status(404).json({ error: "Independent prediction or market snapshots not available" });
+    return res.json({ ...assessment, probability_scale: "0-1" });
+  } catch (err) {
+    logger.error({ err, fixtureId }, "market assessment failed");
+    return res.status(500).json({ error: "Failed to assess market intelligence" });
+  }
+});
+
+router.get("/market-intelligence/performance", async (_req, res) => {
+  try { return res.json(await getMarketPerformanceReport()); }
+  catch (err) { logger.error({ err }, "market performance failed"); return res.status(500).json({ error: "Failed to fetch market performance" }); }
+});
 
 router.get("/matches/:match_id/prediction-history", async (req, res) => {
   const fixtureId = Number(req.params.match_id);

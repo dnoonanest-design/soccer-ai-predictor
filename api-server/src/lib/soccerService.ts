@@ -1,27 +1,37 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
 import { isTrackedLeague } from "./leagueConfig";
+import {
+  captureMarketOdds,
+  type BookmakerOddsInput,
+} from "./marketIntelligenceService";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
-const SEASON = process.env.FOOTBALL_SEASON ?? "2025";
+const now = new Date();
+const DEFAULT_SEASON = String(
+  now.getUTCMonth() >= 6 ? now.getUTCFullYear() : now.getUTCFullYear() - 1,
+);
+const SEASON = process.env.FOOTBALL_SEASON ?? DEFAULT_SEASON;
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
 // ─── Per-endpoint cache TTLs (ms) ────────────────────────────────────────────
 const CACHE_TTL = {
-  live_fixtures:  30_000,
-  soccer_odds:    30_000,
-  today_fixtures: 300_000,
-  team_stats:     3_600_000,
-  standings:      3_600_000,
-  h2h:            86_400_000,
-  player_stats:   60_000,
+  live_fixtures: 30_000,
+  soccer_odds_live: 30_000,
+  soccer_odds_prematch: 300_000,
+  today_fixtures: 3_600_000,
+  team_stats: 3_600_000,
+  standings: 3_600_000,
+  h2h: 86_400_000,
+  player_stats: 60_000,
 };
 
 // ─── Cache store ──────────────────────────────────────────────────────────────
 type CacheEntry<T> = { data: T; fetchedAt: number };
 const cache = new Map<string, CacheEntry<unknown>>();
+const inFlight = new Map<string, Promise<unknown>>();
 
 function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -32,6 +42,21 @@ function getCached<T>(key: string, ttl: number): T | null {
 
 function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
+}
+
+async function singleFlight<T>(
+  key: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const existing = inFlight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const request = work();
+  inFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    inFlight.delete(key);
+  }
 }
 
 // ─── Match window detection ───────────────────────────────────────────────────
@@ -48,15 +73,21 @@ export async function fetchFootball(path: string): Promise<unknown> {
   }
   const url = `${API_FOOTBALL_BASE}${path}`;
   await waitForRateLimit();
-  const res = await fetch(url, {
-    headers: { "x-apisports-key": API_FOOTBALL_KEY },
-  });
-  if (!res.ok) {
-    logger.error({ status: res.status, url }, "API-Football request failed");
+  try {
+    const res = await fetch(url, {
+      headers: { "x-apisports-key": API_FOOTBALL_KEY },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      logger.error({ status: res.status, path }, "API-Football request failed");
+      return null;
+    }
+    const json = (await res.json()) as { response: unknown };
+    return json.response;
+  } catch (err) {
+    logger.error({ err, path }, "API-Football request errored or timed out");
     return null;
   }
-  const json = (await res.json()) as { response: unknown };
-  return json.response;
 }
 
 async function fetchOdds(path: string): Promise<unknown> {
@@ -65,13 +96,17 @@ async function fetchOdds(path: string): Promise<unknown> {
     return null;
   }
   const url = `${ODDS_API_BASE}${path}`;
-  await waitForRateLimit();
-  const res = await fetch(url);
-  if (!res.ok) {
-    logger.error({ status: res.status, url }, "Odds API request failed");
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) {
+      logger.error({ status: res.status }, "Odds API request failed");
+      return null;
+    }
+    return res.json();
+  } catch (err) {
+    logger.error({ err }, "Odds API request errored or timed out");
     return null;
   }
-  return res.json();
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
@@ -155,6 +190,8 @@ type OddsApiEvent = {
   away_team: string;
   bookmakers: Array<{
     key: string;
+    title?: string;
+    last_update?: string;
     markets: Array<{
       key: string;
       outcomes: Array<{ name: string; price: number }>;
@@ -177,38 +214,61 @@ function oddsToProb(decimal: number): number {
 }
 
 const normalize = (s: string) =>
-  s.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .trim();
+
+function findOddsEvent(
+  homeTeam: string,
+  awayTeam: string,
+  oddsEvents: OddsApiEvent[],
+) {
+  const normHome = normalize(homeTeam);
+  const normAway = normalize(awayTeam);
+  return oddsEvents.find((e) => {
+    const eHome = normalize(e.home_team);
+    const eAway = normalize(e.away_team);
+    return (
+      (eHome.includes(normHome.slice(0, 5)) ||
+        normHome.includes(eHome.slice(0, 5))) &&
+      (eAway.includes(normAway.slice(0, 5)) ||
+        normAway.includes(eAway.slice(0, 5)))
+    );
+  });
+}
 
 function extractOdds(
   homeTeam: string,
   awayTeam: string,
-  oddsEvents: OddsApiEvent[]
+  oddsEvents: OddsApiEvent[],
 ): Odds {
   const nullOdds: Odds = {
-    home_win: null, draw: null, away_win: null,
-    home_odds: null, draw_odds: null, away_odds: null,
+    home_win: null,
+    draw: null,
+    away_win: null,
+    home_odds: null,
+    draw_odds: null,
+    away_odds: null,
   };
   const normHome = normalize(homeTeam);
   const normAway = normalize(awayTeam);
-  const event = oddsEvents.find(e => {
-    const eHome = normalize(e.home_team);
-    const eAway = normalize(e.away_team);
-    return (
-      (eHome.includes(normHome.slice(0, 5)) || normHome.includes(eHome.slice(0, 5))) &&
-      (eAway.includes(normAway.slice(0, 5)) || normAway.includes(eAway.slice(0, 5)))
-    );
-  });
+  const event = findOddsEvent(homeTeam, awayTeam, oddsEvents);
   if (!event) return nullOdds;
   const bookmaker =
-    event.bookmakers.find(b => b.key === "pinnacle") ??
-    event.bookmakers.find(b => b.key === "betfair") ??
+    event.bookmakers.find((b) => b.key === "pinnacle") ??
+    event.bookmakers.find((b) => b.key === "betfair") ??
     event.bookmakers[0];
   if (!bookmaker) return nullOdds;
-  const h2h = bookmaker.markets.find(m => m.key === "h2h");
+  const h2h = bookmaker.markets.find((m) => m.key === "h2h");
   if (!h2h) return nullOdds;
-  const homeOc = h2h.outcomes.find(o => normalize(o.name) === normHome || o.name === event.home_team);
-  const awayOc = h2h.outcomes.find(o => normalize(o.name) === normAway || o.name === event.away_team);
-  const drawOc = h2h.outcomes.find(o => o.name.toLowerCase() === "draw");
+  const homeOc = h2h.outcomes.find(
+    (o) => normalize(o.name) === normHome || o.name === event.home_team,
+  );
+  const awayOc = h2h.outcomes.find(
+    (o) => normalize(o.name) === normAway || o.name === event.away_team,
+  );
+  const drawOc = h2h.outcomes.find((o) => o.name.toLowerCase() === "draw");
   const homeDecimal = homeOc?.price ?? null;
   const awayDecimal = awayOc?.price ?? null;
   const drawDecimal = drawOc?.price ?? null;
@@ -224,80 +284,181 @@ function extractOdds(
     }
   }
   return {
-    home_win: homeProb, draw: drawProb, away_win: awayProb,
-    home_odds: homeDecimal, draw_odds: drawDecimal, away_odds: awayDecimal,
+    home_win: homeProb,
+    draw: drawProb,
+    away_win: awayProb,
+    home_odds: homeDecimal,
+    draw_odds: drawDecimal,
+    away_odds: awayDecimal,
   };
+}
+
+function bookmakerSnapshots(
+  event: OddsApiEvent,
+  observedAt: Date,
+): BookmakerOddsInput[] {
+  const normHome = normalize(event.home_team);
+  const normAway = normalize(event.away_team);
+  return event.bookmakers.flatMap((bookmaker) => {
+    const h2h = bookmaker.markets.find((market) => market.key === "h2h");
+    if (!h2h) return [];
+    const home = h2h.outcomes.find(
+      (outcome) => normalize(outcome.name) === normHome,
+    );
+    const away = h2h.outcomes.find(
+      (outcome) => normalize(outcome.name) === normAway,
+    );
+    const draw = h2h.outcomes.find(
+      (outcome) => outcome.name.toLowerCase() === "draw",
+    );
+    if (!home || !draw || !away) return [];
+    const parsedUpdate = bookmaker.last_update
+      ? new Date(bookmaker.last_update)
+      : observedAt;
+    return [
+      {
+        bookmakerKey: bookmaker.key,
+        homeDecimal: home.price,
+        drawDecimal: draw.price,
+        awayDecimal: away.price,
+        sourceUpdatedAt: Number.isNaN(parsedUpdate.getTime())
+          ? observedAt
+          : parsedUpdate,
+        raw: { title: bookmaker.title, outcomes: h2h.outcomes },
+      },
+    ];
+  });
 }
 
 // ─── Individual data fetchers ─────────────────────────────────────────────────
 async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
-  const cached = getCached<ApiFootballFixture[]>("today_fixtures", CACHE_TTL.today_fixtures);
+  const cached = getCached<ApiFootballFixture[]>(
+    "today_fixtures",
+    CACHE_TTL.today_fixtures,
+  );
   if (cached) return cached;
-  const today = new Date().toISOString().split("T")[0];
-  const data = (await fetchFootball(
-    `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`
-  )) as ApiFootballFixture[] | null;
-  // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
-  const fixtures = (data ?? []).filter(f => isTrackedLeague(f.league.id));
-  setCache("today_fixtures", fixtures);
-  return fixtures;
+  return singleFlight("today_fixtures", async () => {
+    const today = new Date().toISOString().split("T")[0];
+    const data = (await fetchFootball(
+      `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`,
+    )) as ApiFootballFixture[] | null;
+    if (!Array.isArray(data)) return [];
+    // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
+    const fixtures = (data ?? []).filter((f) => isTrackedLeague(f.league.id));
+    setCache("today_fixtures", fixtures);
+    return fixtures;
+  });
 }
 
 async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
-  const cached = getCached<ApiFootballFixture[]>("live_fixtures", CACHE_TTL.live_fixtures);
+  const cached = getCached<ApiFootballFixture[]>(
+    "live_fixtures",
+    CACHE_TTL.live_fixtures,
+  );
   if (cached) return cached;
-  const data = (await fetchFootball("/fixtures?live=all")) as ApiFootballFixture[] | null;
-  // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
-  const fixtures = (data ?? []).filter(f => isTrackedLeague(f.league.id));
-  _liveMatchCount = fixtures.length;
-  setCache("live_fixtures", fixtures);
-  return fixtures;
+  return singleFlight("live_fixtures", async () => {
+    const data = (await fetchFootball("/fixtures?live=all")) as
+      | ApiFootballFixture[]
+      | null;
+    if (!Array.isArray(data)) return [];
+    // ── FIXED: Only keep tracked leagues ──────────────────────────────────────
+    const fixtures = (data ?? []).filter((f) => isTrackedLeague(f.league.id));
+    _liveMatchCount = fixtures.length;
+    setCache("live_fixtures", fixtures);
+    return fixtures;
+  });
 }
 
-async function getSoccerOdds(): Promise<OddsApiEvent[]> {
-  const cached = getCached<OddsApiEvent[]>("soccer_odds", CACHE_TTL.soccer_odds);
+async function getSoccerOdds(live: boolean): Promise<OddsApiEvent[]> {
+  const ttl = live
+    ? CACHE_TTL.soccer_odds_live
+    : CACHE_TTL.soccer_odds_prematch;
+  const cached = getCached<OddsApiEvent[]>("soccer_odds", ttl);
   if (cached) return cached;
-  const data = (await fetchOdds(
-    `/sports/soccer/odds?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`
-  )) as OddsApiEvent[] | null;
-  const events = Array.isArray(data) ? data : [];
-  setCache("soccer_odds", events);
-  return events;
+  return singleFlight("soccer_odds", async () => {
+    const data = (await fetchOdds(
+      `/sports/soccer/odds?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`,
+    )) as OddsApiEvent[] | null;
+    if (!Array.isArray(data)) return [];
+    const events = Array.isArray(data) ? data : [];
+    setCache("soccer_odds", events);
+    return events;
+  });
+}
+
+function isInMatchPollingWindow(fixtures: ApiFootballFixture[]): boolean {
+  const time = Date.now();
+  return fixtures.some((fixture) => {
+    if (normaliseStatus(fixture.fixture.status.short) === "live") return true;
+    const kickoff = new Date(fixture.fixture.date).getTime();
+    return (
+      Number.isFinite(kickoff) &&
+      time >= kickoff - 15 * 60_000 &&
+      time <= kickoff + 4 * 60 * 60_000
+    );
+  });
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 export async function getAllMatches(
   leagueId?: number | null,
-  status?: string | null
+  status?: string | null,
 ): Promise<Match[]> {
-  // Sequential fetches — fixes 429 errors
   const todayFixtures = await getTodayFixtures();
-  const liveFixtures = await getLiveFixtures();
+  const shouldPollLive =
+    hasLiveMatches() || isInMatchPollingWindow(todayFixtures);
+  const liveFixtures = shouldPollLive ? await getLiveFixtures() : [];
 
   // Only fetch odds if matches are active
   const hasActiveMatches =
     liveFixtures.length > 0 ||
-    todayFixtures.some(f => normaliseStatus(f.fixture.status.short) !== "finished");
-  const oddsEvents = hasActiveMatches ? await getSoccerOdds() : [];
+    todayFixtures.some(
+      (f) => normaliseStatus(f.fixture.status.short) !== "finished",
+    );
+  const oddsEvents = hasActiveMatches
+    ? await getSoccerOdds(liveFixtures.length > 0)
+    : [];
 
   const combined = new Map<number, ApiFootballFixture>();
   for (const f of todayFixtures) combined.set(f.fixture.id, f);
   for (const f of liveFixtures) combined.set(f.fixture.id, f);
 
-  let matches = Array.from(combined.values()).map(f =>
-    fixtureToMatch(f, oddsEvents)
+  let matches = Array.from(combined.values()).map((f) =>
+    fixtureToMatch(f, oddsEvents),
   );
 
+  // Store every available bookmaker, not only the display bookmaker. This is
+  // append-only and de-duplicated by the provider's update timestamp.
+  const observedAt = new Date();
+  void Promise.allSettled(
+    Array.from(combined.values()).map((fixture) => {
+      const event = findOddsEvent(
+        fixture.teams.home.name,
+        fixture.teams.away.name,
+        oddsEvents,
+      );
+      if (!event) return Promise.resolve(0);
+      return captureMarketOdds({
+        fixtureId: fixture.fixture.id,
+        providerEventId: event.id,
+        kickoffAt: new Date(fixture.fixture.date),
+        isInPlay: normaliseStatus(fixture.fixture.status.short) === "live",
+        observedAt,
+        bookmakers: bookmakerSnapshots(event, observedAt),
+      });
+    }),
+  ).catch((err) => logger.warn({ err }, "Market odds persistence failed"));
+
   if (leagueId != null) {
-    matches = matches.filter(m => m.league_id === leagueId);
+    matches = matches.filter((m) => m.league_id === leagueId);
   }
 
   if (status && status !== "all") {
-    const liveIds = new Set(liveFixtures.map(f => f.fixture.id));
+    const liveIds = new Set(liveFixtures.map((f) => f.fixture.id));
     if (status === "live") {
-      matches = matches.filter(m => liveIds.has(m.id) || m.status === "live");
+      matches = matches.filter((m) => liveIds.has(m.id) || m.status === "live");
     } else {
-      matches = matches.filter(m => m.status === status);
+      matches = matches.filter((m) => m.status === status);
     }
   }
 
@@ -306,22 +467,13 @@ export async function getAllMatches(
     return (order[a.status] ?? 3) - (order[b.status] ?? 3);
   });
 
-  // Passive market capture: reuse the already-fetched odds response, so the
-  // intelligence layer adds no Odds API calls and cannot influence the model.
-  if (
-    process.env.MARKET_INTELLIGENCE_ENABLED !== "false" &&
-    oddsEvents.length > 0 &&
-    matches.some((match) => match.status === "upcoming")
-  ) {
-    void import("./marketIntelligenceService")
-      .then(({ captureMarketSnapshots }) => captureMarketSnapshots(matches, oddsEvents))
-      .catch((err) => logger.warn({ err }, "market intelligence capture failed"));
-  }
-
   return matches;
 }
 
-function fixtureToMatch(f: ApiFootballFixture, oddsEvents: OddsApiEvent[]): Match {
+function fixtureToMatch(
+  f: ApiFootballFixture,
+  oddsEvents: OddsApiEvent[],
+): Match {
   const status = normaliseStatus(f.fixture.status.short);
   return {
     id: f.fixture.id,
@@ -329,8 +481,16 @@ function fixtureToMatch(f: ApiFootballFixture, oddsEvents: OddsApiEvent[]): Matc
     league_name: f.league.name,
     league_logo: f.league.logo || null,
     country: f.league.country,
-    home_team: { id: f.teams.home.id, name: f.teams.home.name, logo: f.teams.home.logo || null },
-    away_team: { id: f.teams.away.id, name: f.teams.away.name, logo: f.teams.away.logo || null },
+    home_team: {
+      id: f.teams.home.id,
+      name: f.teams.home.name,
+      logo: f.teams.home.logo || null,
+    },
+    away_team: {
+      id: f.teams.away.id,
+      name: f.teams.away.name,
+      logo: f.teams.away.logo || null,
+    },
     status,
     status_detail: f.fixture.status.short,
     minute: f.fixture.status.elapsed ?? null,
@@ -346,7 +506,7 @@ function fixtureToMatch(f: ApiFootballFixture, oddsEvents: OddsApiEvent[]): Matc
 
 export async function getMatchById(id: number): Promise<Match | null> {
   const matches = await getAllMatches();
-  return matches.find(m => m.id === id) ?? null;
+  return matches.find((m) => m.id === id) ?? null;
 }
 
 export async function getLeagues(): Promise<League[]> {
@@ -358,25 +518,30 @@ export async function getLeagues(): Promise<League[]> {
   for (const m of matches) {
     if (!leagueMap.has(m.league_id)) {
       leagueMap.set(m.league_id, {
-        name: m.league_name, logo: m.league_logo,
-        country: m.country, matches: [],
+        name: m.league_name,
+        logo: m.league_logo,
+        country: m.country,
+        matches: [],
       });
     }
     leagueMap.get(m.league_id)!.matches.push(m);
   }
   return Array.from(leagueMap.entries()).map(([id, data]) => ({
-    id, name: data.name, logo: data.logo, country: data.country,
+    id,
+    name: data.name,
+    logo: data.logo,
+    country: data.country,
     match_count: data.matches.length,
-    live_count: data.matches.filter(m => m.status === "live").length,
+    live_count: data.matches.filter((m) => m.status === "live").length,
   }));
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
   const matches = await getAllMatches();
-  const live = matches.filter(m => m.status === "live").length;
-  const upcoming = matches.filter(m => m.status === "upcoming").length;
-  const finished = matches.filter(m => m.status === "finished").length;
-  const leagueIds = new Set(matches.map(m => m.league_id));
+  const live = matches.filter((m) => m.status === "live").length;
+  const upcoming = matches.filter((m) => m.status === "upcoming").length;
+  const finished = matches.filter((m) => m.status === "finished").length;
+  const leagueIds = new Set(matches.map((m) => m.league_id));
   return {
     live_count: live,
     upcoming_count: upcoming,

@@ -358,3 +358,51 @@ CREATE TABLE IF NOT EXISTS ai_biweekly_updates (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_biweekly_updates_period ON ai_biweekly_updates(period_start DESC, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_biweekly_updates_applied ON ai_biweekly_updates(applied, created_at DESC);
+
+-- Independent bookmaker-market intelligence. Raw odds are append-only and
+-- timestamped so historic predictions never see information from the future.
+CREATE TABLE IF NOT EXISTS market_odds_snapshots (
+  id SERIAL PRIMARY KEY,
+  fixture_id INTEGER NOT NULL,
+  provider_event_id TEXT,
+  bookmaker_key TEXT NOT NULL,
+  market_key TEXT NOT NULL DEFAULT 'h2h',
+  home_decimal REAL NOT NULL,
+  draw_decimal REAL NOT NULL,
+  away_decimal REAL NOT NULL,
+  home_fair_prob REAL NOT NULL,
+  draw_fair_prob REAL NOT NULL,
+  away_fair_prob REAL NOT NULL,
+  overround REAL NOT NULL,
+  is_in_play BOOLEAN NOT NULL DEFAULT FALSE,
+  kickoff_at TIMESTAMP,
+  source_updated_at TIMESTAMP NOT NULL,
+  observed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  raw_json JSONB,
+  CONSTRAINT uniq_market_source_observation UNIQUE(fixture_id, bookmaker_key, market_key, source_updated_at)
+);
+CREATE INDEX IF NOT EXISTS idx_market_odds_fixture_time ON market_odds_snapshots(fixture_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_odds_bookmaker_time ON market_odds_snapshots(bookmaker_key, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_assessments (
+  id SERIAL PRIMARY KEY,
+  fixture_id INTEGER NOT NULL,
+  prediction_at TIMESTAMP NOT NULL,
+  independent_home_prob REAL NOT NULL,
+  independent_draw_prob REAL NOT NULL,
+  independent_away_prob REAL NOT NULL,
+  market_home_prob REAL NOT NULL,
+  market_draw_prob REAL NOT NULL,
+  market_away_prob REAL NOT NULL,
+  assisted_home_prob REAL NOT NULL,
+  assisted_draw_prob REAL NOT NULL,
+  assisted_away_prob REAL NOT NULL,
+  market_weight REAL NOT NULL,
+  movement_strength REAL NOT NULL,
+  consensus_score REAL NOT NULL,
+  bookmaker_count INTEGER NOT NULL,
+  is_in_play BOOLEAN NOT NULL DEFAULT FALSE,
+  explanation_json JSONB,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_market_assessment_fixture_time ON market_assessments(fixture_id, prediction_at DESC);

@@ -1,6 +1,7 @@
 import { db, matchPredictions, matchOutcomes } from "@workspace/db";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { logger } from "./logger";
+import { isPredictionWriteAllowed, LEAKAGE_POLICY } from "./predictionIntegrity";
 
 export async function savePrediction(opts: {
   fixtureId:   number;
@@ -14,6 +15,17 @@ export async function savePrediction(opts: {
   kickoffAt?:  Date | null;
 }): Promise<void> {
   try {
+    const existingOutcome = await db.select({ fixtureId: matchOutcomes.fixtureId })
+      .from(matchOutcomes).where(eq(matchOutcomes.fixtureId, opts.fixtureId)).limit(1);
+    if (!isPredictionWriteAllowed({
+      isLive: opts.isLive,
+      status: opts.isLive ? "live" : "upcoming",
+      kickoffAt: opts.kickoffAt,
+      outcomeExists: existingOutcome.length > 0,
+    })) {
+      logger.error({ fixtureId: opts.fixtureId, isLive: opts.isLive }, `Prediction rejected: ${LEAKAGE_POLICY}`);
+      return;
+    }
     await db
       .insert(matchPredictions)
       .values({
@@ -111,7 +123,7 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
       })
       .from(matchPredictions)
       .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-      .where(eq(matchPredictions.isLive, false));
+      .where(sql`${matchPredictions.isLive} = false AND ${matchPredictions.kickoffAt} IS NOT NULL AND ${matchPredictions.createdAt} < ${matchPredictions.kickoffAt} AND ${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`);
 
     if (rows.length < 10) {
       _calibCache = { factors: EMPTY, fetchedAt: Date.now() };
@@ -215,7 +227,7 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+    .where(sql`${matchPredictions.isLive} = false AND ${matchPredictions.kickoffAt} IS NOT NULL AND ${matchPredictions.createdAt} < ${matchPredictions.kickoffAt} AND ${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`);
 
   const byOutcome = {
     home: { predicted: 0, actual: 0, correct: 0 },
@@ -316,7 +328,7 @@ export async function getCalibrationReport(): Promise<CalibrationReport> {
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+    .where(sql`${matchPredictions.isLive} = false AND ${matchPredictions.kickoffAt} IS NOT NULL AND ${matchPredictions.createdAt} < ${matchPredictions.kickoffAt} AND ${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`);
 
   const outcomes = ["home", "draw", "away"] as const;
   type Bucket = { sumPred: number; actual: number; total: number };
@@ -404,7 +416,7 @@ export async function getTrainingDataset(limit = 5000) {
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false))
+    .where(sql`${matchPredictions.isLive} = false AND ${matchPredictions.kickoffAt} IS NOT NULL AND ${matchPredictions.createdAt} < ${matchPredictions.kickoffAt} AND ${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`)
     .orderBy(desc(matchPredictions.updatedAt))
     .limit(safeLimit);
 
