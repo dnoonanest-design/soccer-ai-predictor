@@ -2,21 +2,92 @@ import { Router } from "express";
 import { pool } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaselineService";
+import { isTrackedLeague } from "../lib/leagueConfig";
 
 const router = Router();
 const DAY_MS = 24 * 60 * 60_000;
+const DEFAULT_PREDICTION_TIME_ZONE = "Europe/Dublin";
+
+function resolvePredictionTimeZone() {
+  const configured = String(process.env.PREDICTION_TIME_ZONE ?? DEFAULT_PREDICTION_TIME_ZONE).trim();
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: configured }).format(new Date());
+    return configured;
+  } catch {
+    logger.warn({ configured }, "invalid PREDICTION_TIME_ZONE; falling back to Europe/Dublin");
+    return DEFAULT_PREDICTION_TIME_ZONE;
+  }
+}
+
+const PREDICTION_TIME_ZONE = resolvePredictionTimeZone();
+const zonedDateFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: PREDICTION_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const zonedDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: PREDICTION_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
 
 function validDateKey(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function formatterParts(formatter: Intl.DateTimeFormat, date: Date) {
+  return formatter.formatToParts(date).reduce<Record<string, string>>((acc, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
 }
 
 function dateKey(date: Date) {
-  return date.toISOString().slice(0, 10);
+  const parts = formatterParts(zonedDateFormatter, date);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function addDaysToDateKey(key: string, days: number) {
+  return new Date(Date.parse(`${key}T00:00:00.000Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+function timeZoneOffsetMs(date: Date) {
+  const parts = formatterParts(zonedDateTimeFormatter, date);
+  const representedAsUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  );
+  return representedAsUtc - date.getTime();
+}
+
+function zonedMidnightUtc(key: string) {
+  const [year, month, day] = key.split("-").map(Number);
+  const localMidnightAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+
+  let candidateMs = localMidnightAsUtc - timeZoneOffsetMs(new Date(localMidnightAsUtc));
+  const correctedOffset = timeZoneOffsetMs(new Date(candidateMs));
+  candidateMs = localMidnightAsUtc - correctedOffset;
+
+  return new Date(candidateMs);
 }
 
 function dayRange(key: string) {
-  const start = new Date(`${key}T00:00:00.000Z`);
-  return { start, end: new Date(start.getTime() + DAY_MS) };
+  return {
+    start: zonedMidnightUtc(key),
+    end: zonedMidnightUtc(addDaysToDateKey(key, 1)),
+  };
 }
 
 function predictedOutcome(home: number, draw: number, away: number) {
@@ -84,39 +155,41 @@ async function readPredictions(start: Date, end: Date) {
     [start, end],
   );
 
-  return result.rows.map((row) => {
-    const home = Number(row.home_win_prob ?? 0);
-    const draw = Number(row.draw_prob ?? 0);
-    const away = Number(row.away_win_prob ?? 0);
-    const kickoff = row.kickoff_at ? new Date(row.kickoff_at) : null;
-    return {
-      fixture_id: Number(row.fixture_id),
-      league_id: row.league_id == null ? null : Number(row.league_id),
-      home_team: String(row.home_team),
-      away_team: String(row.away_team),
-      kickoff: kickoff?.toISOString() ?? null,
-      date: kickoff ? dateKey(kickoff) : null,
-      prediction: {
-        home_win: home,
-        draw,
-        away_win: away,
-        predicted_outcome: predictedOutcome(home, draw, away),
-        over_25: row.over25_prob == null ? null : Number(row.over25_prob),
-        btts: row.btts_prob == null ? null : Number(row.btts_prob),
-        home_xg: row.home_xg == null ? null : Number(row.home_xg),
-        away_xg: row.away_xg == null ? null : Number(row.away_xg),
-        confidence: row.confidence == null ? null : Number(row.confidence),
-        pick_confidence: row.pick_confidence == null ? Math.max(home, draw, away) : Number(row.pick_confidence),
-        confidence_band: row.confidence_band ?? null,
-      },
-      checkpoint: row.checkpoint ?? null,
-      data_tier: row.data_tier ?? null,
-      model_version: row.model_version ?? null,
-      engine_revision: row.engine_revision ?? null,
-      source: row.source,
-      generated_at: row.generated_at ? new Date(row.generated_at).toISOString() : null,
-    };
-  });
+  return result.rows
+    .map((row) => {
+      const home = Number(row.home_win_prob ?? 0);
+      const draw = Number(row.draw_prob ?? 0);
+      const away = Number(row.away_win_prob ?? 0);
+      const kickoff = row.kickoff_at ? new Date(row.kickoff_at) : null;
+      return {
+        fixture_id: Number(row.fixture_id),
+        league_id: row.league_id == null ? null : Number(row.league_id),
+        home_team: String(row.home_team),
+        away_team: String(row.away_team),
+        kickoff: kickoff?.toISOString() ?? null,
+        date: kickoff ? dateKey(kickoff) : null,
+        prediction: {
+          home_win: home,
+          draw,
+          away_win: away,
+          predicted_outcome: predictedOutcome(home, draw, away),
+          over_25: row.over25_prob == null ? null : Number(row.over25_prob),
+          btts: row.btts_prob == null ? null : Number(row.btts_prob),
+          home_xg: row.home_xg == null ? null : Number(row.home_xg),
+          away_xg: row.away_xg == null ? null : Number(row.away_xg),
+          confidence: row.confidence == null ? null : Number(row.confidence),
+          pick_confidence: row.pick_confidence == null ? Math.max(home, draw, away) : Number(row.pick_confidence),
+          confidence_band: row.confidence_band ?? null,
+        },
+        checkpoint: row.checkpoint ?? null,
+        data_tier: row.data_tier ?? null,
+        model_version: row.model_version ?? null,
+        engine_revision: row.engine_revision ?? null,
+        source: row.source,
+        generated_at: row.generated_at ? new Date(row.generated_at).toISOString() : null,
+      };
+    })
+    .filter((fixture) => fixture.league_id != null && isTrackedLeague(fixture.league_id));
 }
 
 function grouped(fixtures: any[]) {
@@ -130,6 +203,10 @@ function grouped(fixtures: any[]) {
 async function sendRange(res: any, start: Date, end: Date, label: string) {
   try {
     const fixtures = await readPredictions(start, end);
+    res.set("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+    res.set("X-Prediction-Source", "stored-model-output");
+    res.set("X-External-Provider-Requests", "0");
+    res.set("X-Prediction-Time-Zone", PREDICTION_TIME_ZONE);
     return res.json({
       label,
       start: start.toISOString(),
@@ -137,8 +214,14 @@ async function sendRange(res: any, start: Date, end: Date, label: string) {
       count: fixtures.length,
       fixtures,
       fixtures_by_date: grouped(fixtures),
+      delivery: {
+        source: "stored_model_output",
+        external_provider_requests: 0,
+        time_zone: PREDICTION_TIME_ZONE,
+        cache_policy: "15s client / 30s shared / 60s stale-while-revalidate",
+      },
       baseline_worker: getFuturePredictionBaselineStatus(),
-      note: "Read-only model output. No bookmaker or external prediction data is used to generate these probabilities.",
+      note: "Fast read-only stored model output. This request does not call API-Football, an odds provider, or an external prediction service.",
     });
   } catch (err) {
     logger.error({ err, start, end }, "prediction read API failed");
@@ -153,7 +236,7 @@ router.get("/predictions/today", async (_req, res) => {
 });
 
 router.get("/predictions/tomorrow", async (_req, res) => {
-  const key = dateKey(new Date(Date.now() + DAY_MS));
+  const key = addDaysToDateKey(dateKey(new Date()), 1);
   const { start, end } = dayRange(key);
   return sendRange(res, start, end, key);
 });
