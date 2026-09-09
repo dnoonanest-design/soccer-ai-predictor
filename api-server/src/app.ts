@@ -35,7 +35,7 @@ app.use("/api", router);
 
 // Railway/production: serve the built React dashboard from the same service.
 // This keeps deployment simple: one Railway web service handles API + iPad/PWA frontend.
-const dashboardDist = path.resolve(import.meta.dirname, "..", "..", "soccer-dashboard", "dist", "public");
+const dashboardDist = path.resolve(import.meta.dirname, "..", "..", "mockup-sandbox", "dist");
 if (process.env.NODE_ENV === "production" && fs.existsSync(dashboardDist)) {
   app.use(express.static(dashboardDist, {
     maxAge: "1h",
