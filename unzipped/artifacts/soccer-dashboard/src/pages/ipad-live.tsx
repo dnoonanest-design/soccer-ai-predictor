@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
 import { useGetMatches, getGetMatchesQueryKey } from "@workspace/api-client-react";
-import type { Match } from "@workspace/api-client-react";
+import type { GetMatchesParams, Match } from "@workspace/api-client-react";
 import { Activity, Maximize2, Minimize2, PanelsTopLeft, Star, TimerReset, Zap } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -210,7 +210,7 @@ export default function IpadLive() {
   const [focusMode, setFocusMode] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  const matchParams = useMemo(() => ({ status: onlyLive ? "live" : undefined }), [onlyLive]);
+  const matchParams = useMemo<GetMatchesParams>(() => ({ status: onlyLive ? "live" : undefined }), [onlyLive]);
 
   const { data: matches, isLoading } = useGetMatches(matchParams, {
     query: {

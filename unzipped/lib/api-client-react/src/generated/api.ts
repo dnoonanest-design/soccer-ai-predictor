@@ -26,6 +26,7 @@ import type {
   League,
   Match,
   MatchEventsResponse,
+  MatchPresentation,
   MatchStatsResponse,
   XGPredictionsResponse
 } from './api.schemas';
@@ -426,6 +427,84 @@ export function useGetMatchStats<TData = Awaited<ReturnType<typeof getMatchStats
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetMatchStatsQueryOptions(matchId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetMatchPresentationUrl = (matchId: number,) => {
+
+
+
+
+  return `/api/matches/${matchId}/presentation`
+}
+
+/**
+ * Returns provider-backed starting XIs, substitutes, formations, coaches and season-to-date player leaders. Unannounced or unavailable data is returned explicitly, never inferred.
+ * @summary Get official lineups and season player leaders
+ */
+export const getMatchPresentation = async (matchId: number, options?: RequestInit): Promise<MatchPresentation> => {
+
+  return customFetch<MatchPresentation>(getGetMatchPresentationUrl(matchId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetMatchPresentationQueryKey = (matchId: number,) => {
+    return [
+    `/api/matches/${matchId}/presentation`
+    ] as const;
+    }
+
+
+export const getGetMatchPresentationQueryOptions = <TData = Awaited<ReturnType<typeof getMatchPresentation>>, TError = ErrorType<ErrorResponse>>(matchId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMatchPresentation>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetMatchPresentationQueryKey(matchId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getMatchPresentation>>> = ({ signal }) => getMatchPresentation(matchId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(matchId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getMatchPresentation>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetMatchPresentationQueryResult = NonNullable<Awaited<ReturnType<typeof getMatchPresentation>>>
+export type GetMatchPresentationQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Get official lineups and season player leaders
+ */
+
+export function useGetMatchPresentation<TData = Awaited<ReturnType<typeof getMatchPresentation>>, TError = ErrorType<ErrorResponse>>(
+ matchId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMatchPresentation>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetMatchPresentationQueryOptions(matchId,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

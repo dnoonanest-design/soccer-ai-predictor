@@ -172,7 +172,172 @@ export const GetMatchStatsResponse = zod.object({
   "fouls": zod.number().nullish()
 }),
   "season": zod.number(),
-  "has_live_stats": zod.boolean()
+  "has_live_stats": zod.boolean(),
+  "enhanced": zod.union([zod.object({
+  "home_win": zod.number(),
+  "draw": zod.number(),
+  "away_win": zod.number(),
+  "home_xg": zod.number(),
+  "away_xg": zod.number(),
+  "confidence_score": zod.number().optional(),
+  "live_momentum": zod.record(zod.string(), zod.unknown()).nullish()
+}).describe('App-generated statistical prediction. Additional fields describe transparent model adjustments, live momentum and value comparisons.'),zod.null()]).optional()
+})
+
+
+/**
+ * Returns provider-backed starting XIs, substitutes, formations, coaches and season-to-date player leaders. Unannounced or unavailable data is returned explicitly, never inferred.
+ * @summary Get official lineups and season player leaders
+ */
+export const GetMatchPresentationParams = zod.object({
+  "match_id": zod.coerce.number()
+})
+
+export const GetMatchPresentationResponse = zod.object({
+  "match_id": zod.number(),
+  "season": zod.number(),
+  "lineups_announced": zod.boolean(),
+  "player_stats_available": zod.boolean(),
+  "source": zod.string(),
+  "note": zod.string(),
+  "home": zod.object({
+  "team_id": zod.number(),
+  "team_name": zod.string(),
+  "formation": zod.string().nullable(),
+  "coach": zod.string().nullable(),
+  "starting_xi": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "substitutes": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "star_player": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "in_form": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "top_scorer": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "top_assister": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "top_fouler": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()])
+}),
+  "away": zod.object({
+  "team_id": zod.number(),
+  "team_name": zod.string(),
+  "formation": zod.string().nullable(),
+  "coach": zod.string().nullable(),
+  "starting_xi": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "substitutes": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "star_player": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "in_form": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+})),
+  "top_scorer": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "top_assister": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()]),
+  "top_fouler": zod.union([zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "number": zod.number().nullable(),
+  "position": zod.string().nullable(),
+  "photo": zod.string().nullable(),
+  "value": zod.number().nullish(),
+  "appearances": zod.number().optional()
+}),zod.null()])
+})
 })
 
 

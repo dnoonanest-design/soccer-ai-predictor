@@ -4,11 +4,11 @@ import {
   useGetMatchEvents, getGetMatchEventsQueryKey,
   useGetMatchH2H, getGetMatchH2HQueryKey,
   useGetMatchStats, getGetMatchStatsQueryKey,
-  BacktestScenario, MatchEvent, H2HMatch, TeamStats,
+  useGetMatchPresentation, getGetMatchPresentationQueryKey,
+  BacktestScenario, MatchEvent, H2HMatch, TeamStats, PresentationPlayer, PresentationTeam,
 } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card } from "@/components/ui/card";
@@ -32,15 +32,6 @@ function Tip({ children, text, side = "top" }: {
 }
 
 // ─── Stats Panel ──────────────────────────────────────────────────────────
-
-type PresentationPlayer = { id: number; name: string; number: number | null; position: string | null; photo: string | null; value?: number | null; appearances?: number };
-type PresentationTeam = {
-  team_id: number; team_name: string; formation: string | null; coach: string | null;
-  starting_xi: PresentationPlayer[]; substitutes: PresentationPlayer[];
-  star_player: PresentationPlayer | null; in_form: PresentationPlayer[];
-  top_scorer: PresentationPlayer | null; top_assister: PresentationPlayer | null; top_fouler: PresentationPlayer | null;
-};
-type MatchPresentation = { match_id: number; season: number; lineups_announced: boolean; player_stats_available: boolean; source: string; note: string; home: PresentationTeam; away: PresentationTeam };
 
 function PlayerMetric({ label, player, suffix }: { label: string; player: PresentationPlayer | null; suffix: string }) {
   return (
@@ -82,10 +73,8 @@ function SquadList({ title, players }: { title: string; players: PresentationPla
 }
 
 function LineupsAndPlayers({ matchId }: { matchId: number }) {
-  const { data, isLoading, isError } = useQuery<MatchPresentation>({
-    queryKey: ["match-presentation", matchId],
-    queryFn: async () => { const response = await fetch(`/api/matches/${matchId}/presentation`); if (!response.ok) throw new Error("presentation unavailable"); return response.json(); },
-    refetchInterval: 5 * 60_000,
+  const { data, isLoading, isError } = useGetMatchPresentation(matchId, {
+    query: { refetchInterval: 5 * 60_000, queryKey: getGetMatchPresentationQueryKey(matchId) },
   });
   return <Card className="border-border/50 overflow-hidden"><div className="p-5 space-y-5">
     <div className="flex items-start justify-between gap-4"><div className="flex items-center gap-2"><Users className="w-4 h-4 text-primary"/><div><div className="font-mono text-sm font-bold uppercase tracking-widest text-muted-foreground">Lineups & Player Intelligence</div><p className="text-[10px] text-muted-foreground mt-1">Official lineups plus season-to-date player leaders</p></div></div>{data && <span className="text-[9px] font-mono text-muted-foreground">{data.season}/{String(data.season + 1).slice(2)}</span>}</div>

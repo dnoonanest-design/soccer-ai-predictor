@@ -5,8 +5,8 @@
  * Live Soccer Probability Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { EnhancedPrediction } from './enhancedPrediction';
 import type { TeamStats } from './teamStats';
-import type { EnhancedPrediction } from './xGPrediction';
 
 export interface MatchStatsResponse {
   home: TeamStats;

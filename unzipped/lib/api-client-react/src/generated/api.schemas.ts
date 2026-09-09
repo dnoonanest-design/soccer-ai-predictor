@@ -79,12 +79,9 @@ export interface Match {
      */
   minute?: number | null;
   score?: Score;
-  /**
-     * Half-time score (null if not yet reached HT)
-     * @nullable
-     */
+  /** Half-time score (null if not yet reached HT) */
   score_ht?: Score | null;
-  kickoff: Date;
+  kickoff: string;
   odds?: Odds;
 }
 
@@ -105,6 +102,22 @@ export interface DashboardSummary {
   total_matches: number;
   leagues_active: number;
   last_updated: string;
+}
+
+export interface XGPrediction {
+  match_id: number;
+  home_xg: number;
+  away_xg: number;
+  /** 0-100 */
+  home_win: number;
+  /** 0-100 */
+  draw: number;
+  /** 0-100 */
+  away_win: number;
+}
+
+export interface XGPredictionsResponse {
+  predictions: XGPrediction[];
 }
 
 export interface TeamStats {
@@ -134,136 +147,183 @@ export interface TeamStats {
   fouls?: number | null;
 }
 
-export interface MatchStatsResponse {
-  home: TeamStats;
-  away: TeamStats;
-  season: number;
-  has_live_stats: boolean;
-  enhanced?: EnhancedPrediction;
-}
+/**
+ * @nullable
+ */
+export type EnhancedPredictionLiveMomentum = { [key: string]: unknown } | null;
 
-export interface H2HRecord {
-  matches: number;
-  home_wins: number;
-  draws: number;
-  away_wins: number;
-  home_win_rate: number;
-  draw_rate: number;
-  away_win_rate: number;
-}
-
-export interface LineupPlayer {
-  id: number;
-  name: string;
-  number: number;
-  position: string;
-  goals_per_game: number;
-  assists_per_game: number;
-}
-
-export interface LineupInfo {
-  home: LineupPlayer[];
-  away: LineupPlayer[];
-  confirmed: boolean;
-}
-
-export interface AbsentPlayer {
-  name: string;
-  team_id: number;
-  type: string;
-  reason: string;
-}
-
-export interface SubstitutionImpact {
-  minute: number;
-  team: "home" | "away";
-  team_name: string;
-  player_out: string;
-  player_in: string;
-  player_out_rate: number;
-  player_in_rate: number;
-  xg_delta: number;
-  rating: "positive" | "neutral" | "negative";
-}
-
-export interface PlayerSpotlight {
-  name: string;
-  total: number;
-  per_game: number;
-  prob: number;
-}
-
-export interface TeamSpotlights {
-  top_scorer: PlayerSpotlight;
-  top_assister: PlayerSpotlight;
-  top_fouler: PlayerSpotlight;
-}
-
+/**
+ * App-generated statistical prediction. Additional fields describe transparent model adjustments, live momentum and value comparisons.
+ */
 export interface EnhancedPrediction {
   home_win: number;
   draw: number;
   away_win: number;
   home_xg: number;
   away_xg: number;
-  base_home_win: number;
-  base_draw: number;
-  base_away_win: number;
-  h2h?: H2HRecord;
-  home_injuries: AbsentPlayer[];
-  away_injuries: AbsentPlayer[];
-  lineup?: LineupInfo;
-  home_lineup_factor: number;
-  away_lineup_factor: number;
-  home_injury_factor: number;
-  away_injury_factor: number;
-  home_form_factor: number;
-  away_form_factor: number;
-  home_advantage: number;
-  live_score_home?: number;
-  live_score_away?: number;
-  live_adjusted_home_win?: number;
-  live_adjusted_draw?: number;
-  live_adjusted_away_win?: number;
-  substitution_impacts?: SubstitutionImpact[];
-  home_sub_xg_delta?: number;
-  away_sub_xg_delta?: number;
-  sub_adjusted_home_win?: number;
-  sub_adjusted_draw?: number;
-  sub_adjusted_away_win?: number;
-  home_spotlights?: TeamSpotlights;
-  away_spotlights?: TeamSpotlights;
+  confidence_score?: number;
+  /** @nullable */
+  live_momentum?: EnhancedPredictionLiveMomentum;
+  [key: string]: unknown;
+ }
+
+export interface MatchStatsResponse {
+  home: TeamStats;
+  away: TeamStats;
+  season: number;
+  has_live_stats: boolean;
+  enhanced?: EnhancedPrediction | null;
 }
 
-export interface XGPrediction {
+export interface PresentationPlayer {
+  id: number;
+  name: string;
+  /** @nullable */
+  number: number | null;
+  /** @nullable */
+  position: string | null;
+  /** @nullable */
+  photo: string | null;
+  /** @nullable */
+  value?: number | null;
+  appearances?: number;
+}
+
+export interface PresentationTeam {
+  team_id: number;
+  team_name: string;
+  /** @nullable */
+  formation: string | null;
+  /** @nullable */
+  coach: string | null;
+  starting_xi: PresentationPlayer[];
+  substitutes: PresentationPlayer[];
+  star_player: PresentationPlayer | null;
+  in_form: PresentationPlayer[];
+  top_scorer: PresentationPlayer | null;
+  top_assister: PresentationPlayer | null;
+  top_fouler: PresentationPlayer | null;
+}
+
+export interface MatchPresentation {
   match_id: number;
-  home_xg: number;
-  away_xg: number;
-  /** 0-100 */
-  home_win: number;
-  /** 0-100 */
-  draw: number;
-  /** 0-100 */
-  away_win: number;
-  base_home_win?: number;
-  base_draw?: number;
-  base_away_win?: number;
-  h2h?: H2HRecord;
-  home_injuries?: AbsentPlayer[];
-  away_injuries?: AbsentPlayer[];
-  lineup?: LineupInfo;
-  home_lineup_factor?: number;
-  away_lineup_factor?: number;
-  home_injury_factor?: number;
-  away_injury_factor?: number;
+  season: number;
+  lineups_announced: boolean;
+  player_stats_available: boolean;
+  source: string;
+  note: string;
+  home: PresentationTeam;
+  away: PresentationTeam;
 }
 
-export interface XGPredictionsResponse {
-  predictions: XGPrediction[];
+export interface H2HMatch {
+  date: string;
+  competition: string;
+  home_team: string;
+  home_team_id: number;
+  away_team: string;
+  away_team_id: number;
+  home_score: number;
+  away_score: number;
+  /** win | draw | loss from ref_team perspective */
+  result: string;
 }
 
-export type GetMatchesStatus = typeof GetMatchesStatus[keyof typeof GetMatchesStatus];
+export interface H2HSummary {
+  wins: number;
+  draws: number;
+  losses: number;
+  goals_scored: number;
+  goals_conceded: number;
+}
 
-// eslint-disable-next-line @typescript-eslint/no-redeclare
+export interface H2HResponse {
+  ref_team_id: number;
+  ref_team: string;
+  opponent_team: string;
+  matches: H2HMatch[];
+  summary: H2HSummary;
+}
+
+export interface MatchEvent {
+  minute: number;
+  /** @nullable */
+  extra_time?: number | null;
+  /** home or away */
+  team_side: string;
+  team_name: string;
+  /** @nullable */
+  player?: string | null;
+  /** @nullable */
+  assist?: string | null;
+  /** goal | yellow_card | red_card | yellow_red_card | substitution | var | other */
+  type: string;
+  detail: string;
+  /** @nullable */
+  comments?: string | null;
+}
+
+export interface MatchEventsResponse {
+  match_id: number;
+  events: MatchEvent[];
+}
+
+export interface BacktestLeague {
+  id: number;
+  name: string;
+  country: string;
+}
+
+export interface BacktestScenario {
+  halftime_score: string;
+  home_goals_ht: number;
+  away_goals_ht: number;
+  match_count: number;
+  home_win_count: number;
+  draw_count: number;
+  away_win_count: number;
+  home_win_pct: number;
+  draw_pct: number;
+  away_win_pct: number;
+  /** @nullable */
+  lead_held?: boolean | null;
+}
+
+export interface BacktestSummary {
+  most_common_ht_score: string;
+  comeback_rate: number;
+  draw_ht_home_win_pct: number;
+  draw_ht_draw_pct: number;
+  draw_ht_away_win_pct: number;
+  home_leading_ht_win_pct: number;
+  away_leading_ht_win_pct: number;
+}
+
+export interface BacktestResult {
+  total_matches: number;
+  season: number;
+  leagues: BacktestLeague[];
+  scenarios: BacktestScenario[];
+  summary: BacktestSummary;
+  generated_at: string;
+}
+
+export type GetMatchesParams = {
+/**
+ * Filter by league ID
+ * @nullable
+ */
+league_id?: number | null;
+/**
+ * Filter by match status
+ * @nullable
+ */
+status?: GetMatchesStatus;
+};
+
+export type GetMatchesStatus = typeof GetMatchesStatus[keyof typeof GetMatchesStatus] | null;
+
+
 export const GetMatchesStatus = {
   live: 'live',
   upcoming: 'upcoming',
@@ -271,83 +331,15 @@ export const GetMatchesStatus = {
   all: 'all',
 } as const;
 
-export interface GetMatchesParams {
-  /** Filter by league ID */
-  league_id?: number;
-  /** Filter by match status */
-  status?: GetMatchesStatus;
-}
-
-export interface MatchEvent {
-  minute: number;
-  team_id: number;
-  player: string;
-  type: string;
-  detail: string;
-}
-
-export interface MatchEventsResponse {
-  events: MatchEvent[];
-}
-
-export interface H2HMatch {
-  fixture_id: number;
-  date: string;
-  home_team: string;
-  home_team_id: number;
-  away_team: string;
-  away_team_id: number;
-  home_goals: number | null;
-  away_goals: number | null;
-  status: string;
-}
-
-export interface H2HSummary {
-  home_wins: number;
-  draws: number;
-  away_wins: number;
-  total: number;
-}
-
-export interface H2HResponse {
-  home_team_id: number;
-  away_team_id: number;
-  fixtures: H2HMatch[];
-  summary: H2HSummary;
-}
-
 export type GetBacktestParams = {
-  league_id?: number;
+/**
+ * Season year to analyze (defaults to last full season)
+ * @nullable
+ */
+season?: number | null;
+/**
+ * Comma-separated league IDs to include (defaults to top 6 European leagues)
+ * @nullable
+ */
+league_ids?: string | null;
 };
-
-export interface BacktestScenario {
-  halftime_result: string;
-  matches: number;
-  home_wins: number;
-  draws: number;
-  away_wins: number;
-  home_win_pct: number;
-  draw_pct: number;
-  away_win_pct: number;
-}
-
-export interface BacktestLeague {
-  league_id: number;
-  league_name: string;
-  country: string;
-  total_matches: number;
-  scenarios: BacktestScenario[];
-}
-
-export interface BacktestResult {
-  leagues: BacktestLeague[];
-  total_matches_analysed: number;
-}
-
-export interface BacktestSummary {
-  league_id: number;
-  league_name: string;
-  country: string;
-  total_matches: number;
-  scenarios: BacktestScenario[];
-}

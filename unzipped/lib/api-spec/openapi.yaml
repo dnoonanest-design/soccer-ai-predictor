@@ -124,6 +124,32 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /matches/{match_id}/presentation:
+    get:
+      operationId: getMatchPresentation
+      tags: [matches]
+      summary: Get official lineups and season player leaders
+      description: Returns provider-backed starting XIs, substitutes, formations, coaches and season-to-date player leaders. Unannounced or unavailable data is returned explicitly, never inferred.
+      parameters:
+        - name: match_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Match presentation data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatchPresentation"
+        "404":
+          description: Match not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /matches/{match_id}/h2h:
     get:
       operationId: getMatchH2H
@@ -483,11 +509,78 @@ components:
           type: integer
         has_live_stats:
           type: boolean
+        enhanced:
+          oneOf:
+            - $ref: "#/components/schemas/EnhancedPrediction"
+            - type: "null"
       required:
         - home
         - away
         - season
         - has_live_stats
+
+    EnhancedPrediction:
+      type: object
+      description: App-generated statistical prediction. Additional fields describe transparent model adjustments, live momentum and value comparisons.
+      additionalProperties: true
+      properties:
+        home_win: { type: number }
+        draw: { type: number }
+        away_win: { type: number }
+        home_xg: { type: number }
+        away_xg: { type: number }
+        confidence_score: { type: number }
+        live_momentum:
+          type: ["object", "null"]
+          additionalProperties: true
+      required: [home_win, draw, away_win, home_xg, away_xg]
+
+    PresentationPlayer:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        number: { type: ["integer", "null"] }
+        position: { type: ["string", "null"] }
+        photo: { type: ["string", "null"] }
+        value: { type: ["number", "null"] }
+        appearances: { type: integer }
+      required: [id, name, number, position, photo]
+
+    PresentationTeam:
+      type: object
+      properties:
+        team_id: { type: integer }
+        team_name: { type: string }
+        formation: { type: ["string", "null"] }
+        coach: { type: ["string", "null"] }
+        starting_xi:
+          type: array
+          items: { $ref: "#/components/schemas/PresentationPlayer" }
+        substitutes:
+          type: array
+          items: { $ref: "#/components/schemas/PresentationPlayer" }
+        star_player: { oneOf: [{ $ref: "#/components/schemas/PresentationPlayer" }, { type: "null" }] }
+        in_form:
+          type: array
+          items: { $ref: "#/components/schemas/PresentationPlayer" }
+        top_scorer: { oneOf: [{ $ref: "#/components/schemas/PresentationPlayer" }, { type: "null" }] }
+        top_assister: { oneOf: [{ $ref: "#/components/schemas/PresentationPlayer" }, { type: "null" }] }
+        top_fouler: { oneOf: [{ $ref: "#/components/schemas/PresentationPlayer" }, { type: "null" }] }
+      required: [team_id, team_name, formation, coach, starting_xi, substitutes, star_player, in_form, top_scorer, top_assister, top_fouler]
+
+    MatchPresentation:
+      type: object
+      properties:
+        match_id: { type: integer }
+        season: { type: integer }
+        lineups_announced: { type: boolean }
+        player_stats_available: { type: boolean }
+        source: { type: string }
+        note: { type: string }
+        home: { $ref: "#/components/schemas/PresentationTeam" }
+        away: { $ref: "#/components/schemas/PresentationTeam" }
+      required: [match_id, season, lineups_announced, player_stats_available, source, note, home, away]
 
     H2HMatch:
       type: object
