@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pool } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaselineService";
-import { isTrackedLeague } from "../lib/leagueConfig";
+import { getTrackedCompetition, isTrackedLeague } from "../lib/leagueConfig";
 
 const router = Router();
 const DAY_MS = 24 * 60 * 60_000;
@@ -200,13 +200,55 @@ function grouped(fixtures: any[]) {
   }, {});
 }
 
+function setStoredPredictionHeaders(res: any, queryMs?: number) {
+  res.set("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+  res.set("X-Prediction-Source", "stored-model-output");
+  res.set("X-External-Provider-Requests", "0");
+  res.set("X-Prediction-Time-Zone", PREDICTION_TIME_ZONE);
+  if (queryMs != null) res.set("X-Prediction-Query-Ms", String(queryMs));
+}
+
+function compactPrediction(fixture: any) {
+  const leagueId = Number(fixture.league_id);
+  const competition = getTrackedCompetition(leagueId);
+  const generatedAt = fixture.generated_at ? new Date(fixture.generated_at) : null;
+  const ageSeconds = generatedAt && Number.isFinite(generatedAt.getTime())
+    ? Math.max(0, Math.round((Date.now() - generatedAt.getTime()) / 1000))
+    : null;
+
+  return {
+    fixture_id: fixture.fixture_id,
+    kickoff: fixture.kickoff,
+    league: {
+      id: leagueId,
+      name: competition?.name ?? `League ${leagueId}`,
+      country: competition?.country ?? null,
+    },
+    home_team: fixture.home_team,
+    away_team: fixture.away_team,
+    prediction: {
+      predicted_outcome: fixture.prediction.predicted_outcome,
+      home_win: fixture.prediction.home_win,
+      draw: fixture.prediction.draw,
+      away_win: fixture.prediction.away_win,
+      pick_confidence: fixture.prediction.pick_confidence,
+      confidence_band: fixture.prediction.confidence_band,
+    },
+    freshness: {
+      checkpoint: fixture.checkpoint,
+      source: fixture.source,
+      generated_at: fixture.generated_at,
+      age_seconds: ageSeconds,
+    },
+  };
+}
+
 async function sendRange(res: any, start: Date, end: Date, label: string) {
+  const queryStartedAt = Date.now();
   try {
     const fixtures = await readPredictions(start, end);
-    res.set("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
-    res.set("X-Prediction-Source", "stored-model-output");
-    res.set("X-External-Provider-Requests", "0");
-    res.set("X-Prediction-Time-Zone", PREDICTION_TIME_ZONE);
+    const queryMs = Date.now() - queryStartedAt;
+    setStoredPredictionHeaders(res, queryMs);
     return res.json({
       label,
       start: start.toISOString(),
@@ -218,6 +260,7 @@ async function sendRange(res: any, start: Date, end: Date, label: string) {
         source: "stored_model_output",
         external_provider_requests: 0,
         time_zone: PREDICTION_TIME_ZONE,
+        query_ms: queryMs,
         cache_policy: "15s client / 30s shared / 60s stale-while-revalidate",
       },
       baseline_worker: getFuturePredictionBaselineStatus(),
@@ -228,6 +271,38 @@ async function sendRange(res: any, start: Date, end: Date, label: string) {
     return res.status(500).json({ error: "Failed to fetch stored predictions" });
   }
 }
+
+router.get("/predictions/today/quick", async (_req, res) => {
+  const key = dateKey(new Date());
+  const { start, end } = dayRange(key);
+  const queryStartedAt = Date.now();
+
+  try {
+    const fixtures = await readPredictions(start, end);
+    const predictions = fixtures.map(compactPrediction);
+    const strongest = [...predictions]
+      .sort((a, b) => Number(b.prediction.pick_confidence ?? 0) - Number(a.prediction.pick_confidence ?? 0))
+      .slice(0, 5);
+    const queryMs = Date.now() - queryStartedAt;
+
+    setStoredPredictionHeaders(res, queryMs);
+    return res.json({
+      date: key,
+      time_zone: PREDICTION_TIME_ZONE,
+      count: predictions.length,
+      predictions,
+      strongest,
+      delivery: {
+        source: "stored_model_output",
+        external_provider_requests: 0,
+        query_ms: queryMs,
+      },
+    });
+  } catch (err) {
+    logger.error({ err, start, end }, "quick today prediction read failed");
+    return res.status(500).json({ error: "Failed to fetch today's stored predictions" });
+  }
+});
 
 router.get("/predictions/today", async (_req, res) => {
   const key = dateKey(new Date());
