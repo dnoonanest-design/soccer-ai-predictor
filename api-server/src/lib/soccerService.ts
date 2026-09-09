@@ -575,8 +575,30 @@ export async function getAllMatches(
   const todayFixtures = await getTodayFixtures();
   const liveFixtures = await getLiveFixtures();
 
+  // The live endpoint is authoritative for live status. The daily fixture
+  // response is cached separately and can retain an old HT/1H/2H snapshot
+  // after a match resumes or finishes. Never let that stale snapshot create a
+  // false live match after it has disappeared from /fixtures?live=all.
+  const liveIds = new Set(
+    liveFixtures.map((fixture) => fixture.fixture.id),
+  );
   const combined = new Map<number, ApiFootballFixture>();
-  for (const fixture of todayFixtures) combined.set(fixture.fixture.id, fixture);
+  for (const fixture of todayFixtures) {
+    const fixtureId = fixture.fixture.id;
+    const dailyStatus = normaliseStatus(fixture.fixture.status.short);
+    if (dailyStatus === "live" && !liveIds.has(fixtureId)) {
+      logger.warn(
+        {
+          fixtureId,
+          cachedStatus: fixture.fixture.status.short,
+          cachedMinute: fixture.fixture.status.elapsed,
+        },
+        "suppressing stale live fixture from daily cache",
+      );
+      continue;
+    }
+    combined.set(fixtureId, fixture);
+  }
   for (const fixture of liveFixtures) combined.set(fixture.fixture.id, fixture);
   const combinedFixtures = Array.from(combined.values());
 
@@ -596,11 +618,8 @@ export async function getAllMatches(
   }
 
   if (status && status !== "all") {
-    const liveIds = new Set(liveFixtures.map((fixture) => fixture.fixture.id));
     if (status === "live") {
-      matches = matches.filter(
-        (match) => liveIds.has(match.id) || match.status === "live",
-      );
+      matches = matches.filter((match) => liveIds.has(match.id));
     } else {
       matches = matches.filter((match) => match.status === status);
     }
