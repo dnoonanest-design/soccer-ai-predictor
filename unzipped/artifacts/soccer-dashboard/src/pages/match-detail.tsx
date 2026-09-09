@@ -85,7 +85,7 @@ function LineupsAndPlayers({ matchId }: { matchId: number }) {
   const { data, isLoading, isError } = useQuery<MatchPresentation>({
     queryKey: ["match-presentation", matchId],
     queryFn: async () => { const response = await fetch(`/api/matches/${matchId}/presentation`); if (!response.ok) throw new Error("presentation unavailable"); return response.json(); },
-    refetchInterval: 60_000,
+    refetchInterval: 5 * 60_000,
   });
   return <Card className="border-border/50 overflow-hidden"><div className="p-5 space-y-5">
     <div className="flex items-start justify-between gap-4"><div className="flex items-center gap-2"><Users className="w-4 h-4 text-primary"/><div><div className="font-mono text-sm font-bold uppercase tracking-widest text-muted-foreground">Lineups & Player Intelligence</div><p className="text-[10px] text-muted-foreground mt-1">Official lineups plus season-to-date player leaders</p></div></div>{data && <span className="text-[9px] font-mono text-muted-foreground">{data.season}/{String(data.season + 1).slice(2)}</span>}</div>

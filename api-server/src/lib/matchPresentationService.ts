@@ -55,6 +55,8 @@ type ApiPlayerRow = {
 type RatedPlayer = PresentationPlayer & { rating: number; goals: number; assists: number; fouls: number };
 type CacheEntry = { value: MatchPresentation; fetchedAt: number };
 const cache = new Map<number, CacheEntry>();
+const playerCache = new Map<string, { value: ApiPlayerRow[]; fetchedAt: number }>();
+const PLAYER_CACHE_TTL = 6 * 60 * 60_000;
 
 function n(value: unknown): number {
   const parsed = Number(value);
@@ -98,13 +100,15 @@ function publicPlayer(player: RatedPlayer | undefined, metric: keyof Pick<RatedP
 }
 
 function best(players: RatedPlayer[], metric: "rating" | "goals" | "assists" | "fouls") {
-  return [...players].filter((p) => p.appearances && p.appearances > 0).sort((a, b) => b[metric] - a[metric] || b.appearances! - a.appearances!)[0];
+  const minimumAppearances = metric === "rating" ? 3 : 1;
+  const leader = [...players].filter((p) => (p.appearances ?? 0) >= minimumAppearances).sort((a, b) => b[metric] - a[metric] || b.appearances! - a.appearances!)[0];
+  return leader && leader[metric] > 0 ? leader : undefined;
 }
 
 function buildTeam(matchTeam: Match["home_team"], lineup: ApiLineup | undefined, rows: ApiPlayerRow[]): TeamPresentation {
   const players = playerStats(rows);
   const inForm = [...players]
-    .filter((p) => p.appearances && p.appearances > 0 && p.rating > 0)
+    .filter((p) => (p.appearances ?? 0) >= 3 && p.rating > 0)
     .sort((a, b) => b.rating - a.rating)
     .slice(0, 3)
     .map((p) => publicPlayer(p, "rating")!);
@@ -124,6 +128,9 @@ function buildTeam(matchTeam: Match["home_team"], lineup: ApiLineup | undefined,
 }
 
 async function fetchTeamPlayers(teamId: number, leagueId: number, season: number): Promise<ApiPlayerRow[]> {
+  const cacheKey = `${teamId}:${leagueId}:${season}`;
+  const cached = playerCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < PLAYER_CACHE_TTL) return cached.value;
   const rows: ApiPlayerRow[] = [];
   // API-Football paginates squads at 20 rows. Read the full senior squad so
   // leader labels cannot be distorted by whichever players happen to be page 1.
@@ -132,11 +139,12 @@ async function fetchTeamPlayers(teamId: number, leagueId: number, season: number
     rows.push(...batch);
     if (batch.length < 20) break;
   }
+  playerCache.set(cacheKey, { value: rows, fetchedAt: Date.now() });
   return rows;
 }
 
 export async function getMatchPresentation(match: Match): Promise<MatchPresentation> {
-  const ttl = match.status === "live" ? 60_000 : match.status === "upcoming" ? 10 * 60_000 : 60 * 60_000;
+  const ttl = match.status === "live" ? 5 * 60_000 : match.status === "upcoming" ? 10 * 60_000 : 60 * 60_000;
   const existing = cache.get(match.id);
   if (existing && Date.now() - existing.fetchedAt < ttl) return existing.value;
 
