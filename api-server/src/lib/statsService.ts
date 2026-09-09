@@ -1,5 +1,6 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
+import { getDomesticLeagueStrength } from "./leagueConfig";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -65,6 +66,8 @@ export interface TeamStats {
   competition_matches_played?: number;
   recent_matches_used?: number;
   venue_matches_used?: number;
+  domestic_strength_index?: number | null;
+  data_quality_score?: number;
 }
 
 export interface MatchStatsResult {
@@ -141,6 +144,8 @@ function emptyTeamStats(id: number, name: string): TeamStats {
     competition_matches_played: 0,
     recent_matches_used: 0,
     venue_matches_used: 0,
+    domestic_strength_index: null,
+    data_quality_score: 40,
   };
 }
 
@@ -255,6 +260,7 @@ async function fetchRecentTeamStats(
   let wins = 0, draws = 0, losses = 0, cleanSheets = 0;
   let venueMatches = 0;
   let weightedGoalsFor = 0, weightedGoalsAgainst = 0, totalWeight = 0;
+  let weightedDomesticStrength = 0, domesticStrengthWeight = 0;
   const outcomes: string[] = [];
 
   fixtures.forEach((fixture, index) => {
@@ -283,6 +289,12 @@ async function fetchRecentTeamStats(
     weightedGoalsFor += goalsFor * weight;
     weightedGoalsAgainst += goalsAgainst * weight;
     totalWeight += weight;
+
+    const leagueStrength = getDomesticLeagueStrength(Number(fixture.league?.id ?? 0));
+    if (leagueStrength != null) {
+      weightedDomesticStrength += leagueStrength * recencyWeight;
+      domesticStrengthWeight += recencyWeight;
+    }
   });
 
   if (totalWeight <= 0) return null;
@@ -301,6 +313,10 @@ async function fetchRecentTeamStats(
     competition_matches_played: 0,
     recent_matches_used: fixtures.length,
     venue_matches_used: venueMatches,
+    domestic_strength_index: domesticStrengthWeight > 0
+      ? Math.round((weightedDomesticStrength / domesticStrengthWeight) * 1000) / 1000
+      : null,
+    data_quality_score: Math.min(78, Math.round((60 + Math.min(4, fixtures.length * 0.35) + Math.min(4, venueMatches * 0.8)) * 100) / 100),
   };
 }
 
@@ -331,6 +347,8 @@ function blendSparseCompetitionStats(
       competition_matches_played: competition.matches_played,
       recent_matches_used: recent?.matches_played ?? 0,
       venue_matches_used: recent?.venue_matches_used ?? 0,
+      domestic_strength_index: recent?.domestic_strength_index ?? null,
+      data_quality_score: Math.min(100, Math.round((88 + Math.min(6, competition.matches_played * 1.2) + Math.min(4, (recent?.venue_matches_used ?? 0) * 0.8)) * 100) / 100),
     };
   }
 
@@ -357,6 +375,8 @@ function blendSparseCompetitionStats(
     competition_matches_played: competition.matches_played,
     recent_matches_used: recent.matches_played,
     venue_matches_used: recent.venue_matches_used ?? 0,
+    domestic_strength_index: recent.domestic_strength_index ?? null,
+    data_quality_score: Math.min(91, Math.round((75 + Math.min(6, competition.matches_played * 1.2) + Math.min(4, recent.matches_played * 0.35) + Math.min(4, (recent.venue_matches_used ?? 0) * 0.8)) * 100) / 100),
   };
 }
 

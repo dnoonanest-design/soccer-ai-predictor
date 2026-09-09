@@ -93,13 +93,17 @@ export async function captureMarketSnapshots(
   const captureBucket = getCaptureBucket(now);
   const candidates: Array<typeof marketOddsSnapshots.$inferInsert> = [];
   const capturedFixtures = new Set<number>();
+  const unmatchedFixtures: Array<{ fixtureId: number; home: string; away: string }> = [];
 
   for (const match of matches) {
     // Keep the learning signal clean: opening/closing analysis is pre-match.
     if (match.status !== "upcoming") continue;
 
     const event = findOddsEvent(match.home_team.name, match.away_team.name, oddsEvents);
-    if (!event) continue;
+    if (!event) {
+      unmatchedFixtures.push({ fixtureId: match.id, home: match.home_team.name, away: match.away_team.name });
+      continue;
+    }
 
     const bookmakers = selectBookmakers(event.bookmakers);
     for (const bookmaker of bookmakers) {
@@ -140,8 +144,19 @@ export async function captureMarketSnapshots(
     }
   }
 
+  const attemptedFixtures = matches.filter((match) => match.status === "upcoming").length;
+  const mappingRatePct = attemptedFixtures
+    ? Math.round((capturedFixtures.size / attemptedFixtures) * 10_000) / 100
+    : 100;
+  if (attemptedFixtures >= 3 && mappingRatePct < 60) {
+    logger.warn(
+      { attemptedFixtures, matchedFixtures: capturedFixtures.size, mappingRatePct, unmatchedSample: unmatchedFixtures.slice(0, 8) },
+      "market intelligence odds fixture mapping coverage low",
+    );
+  }
+
   if (!candidates.length) {
-    return { enabled: true, observations: 0, fixtures: 0 };
+    return { enabled: true, observations: 0, fixtures: 0, attemptedFixtures, mappingRatePct, unmatchedFixtures: unmatchedFixtures.length };
   }
 
   try {
@@ -174,6 +189,9 @@ export async function captureMarketSnapshots(
       fixtures: capturedFixtures.size,
       bookmakers: Array.from(new Set(candidates.map((c) => c.bookmakerKey))),
       captureBucket,
+      attemptedFixtures,
+      mappingRatePct,
+      unmatchedFixtures: unmatchedFixtures.length,
     };
   } catch (err) {
     // Market intelligence must never take the predictor offline.
@@ -570,8 +588,21 @@ function getCaptureBucket(date: Date) {
   return new Date(Math.floor(date.getTime() / bucketMs) * bucketMs).toISOString();
 }
 
+const TEAM_NAME_ALIASES = new Map<string, string>([
+  ["intermilano", "intermilan"], ["internazionalemilano", "intermilan"],
+  ["realbetisseville", "realbetis"], ["realbetisbalompie", "realbetis"],
+  ["lasklinz", "lask"], ["clubbruggekv", "clubbrugge"],
+  ["sportinglisbon", "sportingcp"],
+]);
+
 function normalizeName(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const compact = value
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\b(football club|futbol club|club de futbol|fc|afc|cf|sc|ac|ssc|fk|sk|sv|osc|kv)\b/g, " ")
+    .replace(/[^a-z0-9]/g, "")
+    .trim();
+  return TEAM_NAME_ALIASES.get(compact) ?? compact;
 }
 
 function asMarketSide(value: unknown): MarketSide | null {

@@ -232,6 +232,7 @@ async function computeBaseline(match: Match): Promise<BaselinePrediction | null>
     stats.home.form,
     stats.away.form,
     { home: stats.home, away: stats.away },
+    { homeStats: stats.home, awayStats: stats.away },
   );
 
   const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);

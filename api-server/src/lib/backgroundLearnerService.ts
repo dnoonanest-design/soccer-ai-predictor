@@ -12,6 +12,7 @@ import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpd
 import { collectPlayerStatsForFixture } from "./playerService.js";
 import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
 import { isTrackedLeague } from "./leagueConfig";
+import { guardThreeWayProbabilities } from "./predictionReliabilityService";
 
 type JobStatus = "idle" | "running" | "disabled";
 
@@ -22,7 +23,7 @@ const SETTLE_INTERVAL_MS  = Math.max(10 * 60_000,      Number(process.env.BACKGR
 const TRAIN_INTERVAL_MS   = Math.max(6 * 60 * 60_000,  Number(process.env.BACKGROUND_TRAIN_MS          ?? 6 * 60 * 60_000));
 const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(14 * 24 * 60 * 60_000, Number(process.env.BACKGROUND_BIWEEKLY_UPDATE_MS ?? 14 * 24 * 60 * 60_000));
 const MAX_LIVE_MATCHES    = Math.max(1,  Number(process.env.BACKGROUND_MAX_LIVE_MATCHES  ?? 12));
-const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(25, Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? 60));
+const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(100, Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? 250));
 
 const processedFinishedFixtures = new Set<number>();
 
@@ -158,6 +159,7 @@ async function computeAndStoreMatch(match: Match) {
     stats.home.form,
     stats.away.form,
     liveStatsPayload(stats),
+    { homeStats: stats.home, awayStats: stats.away },
   );
 
   const factors = await getCalibrationFactors();
@@ -168,7 +170,12 @@ async function computeAndStoreMatch(match: Match) {
     logger.warn({ err, fixtureId: match.id }, "circumstance collection failed");
     return null;
   });
-  const adjusted = await applyCircumstanceCalibration(match, normalized);
+  const circumstanceAdjusted = await applyCircumstanceCalibration(match, normalized);
+  const guardedAdjusted = guardThreeWayProbabilities(
+    circumstanceAdjusted.home, circumstanceAdjusted.draw, circumstanceAdjusted.away,
+    raw.probability_shrink ?? 0.99,
+  );
+  const adjusted = { ...circumstanceAdjusted, ...guardedAdjusted };
   const valueEdges = buildValueEdges(match, adjusted.home, adjusted.draw, adjusted.away);
   const liveMomentum = raw.live_momentum;
 

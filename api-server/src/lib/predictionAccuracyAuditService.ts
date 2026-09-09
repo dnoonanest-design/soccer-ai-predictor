@@ -8,6 +8,7 @@ import {
   collectMatchCircumstances,
 } from "./circumstanceLearningService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
+import { guardThreeWayProbabilities } from "./predictionReliabilityService";
 
 const ENABLED = process.env.PREDICTION_ACCURACY_AUDIT_ENABLED !== "false";
 const SCAN_INTERVAL_MS = Math.max(
@@ -311,6 +312,7 @@ async function computeAuditPrediction(
     stats.home.form,
     stats.away.form,
     liveStatsPayload(stats),
+    { homeStats: stats.home, awayStats: stats.away },
   );
 
   const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);
@@ -329,6 +331,15 @@ async function computeAuditPrediction(
     adjusted = await applyCircumstanceCalibration(match, normalized);
   }
 
+  const reliabilityGuard = guardThreeWayProbabilities(
+    adjusted.home, adjusted.draw, adjusted.away, raw.probability_shrink ?? 0.99,
+  );
+  adjusted = { ...adjusted, ...reliabilityGuard };
+
+  const averageDataQuality = Math.round((
+    (Number(stats.home.data_quality_score ?? 50) + Number(stats.away.data_quality_score ?? 50)) / 2
+  ) * 100) / 100;
+
   return {
     home: adjusted.home,
     draw: adjusted.draw,
@@ -342,7 +353,14 @@ async function computeAuditPrediction(
     circumstanceScoreAway: numberOrNull(circumstances?.circumstanceScoreAway),
     homeFormScore: numberOrNull(circumstances?.homeFormScore),
     awayFormScore: numberOrNull(circumstances?.awayFormScore),
-    dataTier: includeCircumstances ? "stats+circumstances" : "stats",
+    dataTier: [
+      includeCircumstances ? "stats+circumstances" : "stats",
+      `home_source=${stats.home.data_source ?? "unknown"}`,
+      `away_source=${stats.away.data_source ?? "unknown"}`,
+      `quality=${averageDataQuality}`,
+      `reliability=${raw.reliability_label ?? "unknown"}`,
+      `mode=${raw.prediction_mode ?? "standard"}`,
+    ].join(";"),
   };
 }
 

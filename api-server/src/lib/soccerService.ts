@@ -331,12 +331,12 @@ export type OddsApiEvent = {
 };
 
 function normaliseStatus(short: string): string {
-  if (["1H", "2H", "ET", "BT", "P", "LIVE", "HT"].includes(short)) {
-    return "live";
-  }
-  if (["FT", "AET", "PEN", "AWD", "WO"].includes(short)) {
-    return "finished";
-  }
+  if (["1H", "2H", "ET", "BT", "P", "LIVE", "HT"].includes(short)) return "live";
+  if (["FT", "AET", "PEN", "AWD", "WO"].includes(short)) return "finished";
+  if (short === "PST") return "postponed";
+  if (short === "CANC") return "cancelled";
+  if (short === "ABD") return "abandoned";
+  if (["SUSP", "INT"].includes(short)) return "suspended";
   return "upcoming";
 }
 
@@ -345,8 +345,21 @@ function oddsToProb(decimal: number): number {
   return Math.round((1 / decimal) * 100 * 10) / 10;
 }
 
+const TEAM_NAME_ALIASES = new Map<string, string>([
+  ["intermilano", "intermilan"], ["internazionalemilano", "intermilan"],
+  ["realbetisseville", "realbetis"], ["realbetisbalompie", "realbetis"],
+  ["lasklinz", "lask"], ["clubbruggekv", "clubbrugge"],
+  ["sportinglisbon", "sportingcp"],
+]);
+
 function normalizeName(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const compact = value
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\b(football club|futbol club|club de futbol|fc|afc|cf|sc|ac|ssc|fk|sk|sv|osc|kv)\b/g, " ")
+    .replace(/[^a-z0-9]/g, "")
+    .trim();
+  return TEAM_NAME_ALIASES.get(compact) ?? compact;
 }
 
 function stripClubSuffix(value: string) {
@@ -546,7 +559,7 @@ async function getSoccerOdds(
       fixtures
         .filter(
           (fixture) =>
-            normaliseStatus(fixture.fixture.status.short) !== "finished",
+            ["upcoming", "live"].includes(normaliseStatus(fixture.fixture.status.short)),
         )
         .map((fixture) => getOddsSportKeyForLeague(fixture.league.id))
         .filter((key): key is string => Boolean(key)),
@@ -581,7 +594,7 @@ export async function getAllMatches(
   const combinedFixtures = Array.from(combined.values());
 
   const hasActiveMatches = combinedFixtures.some(
-    (fixture) => normaliseStatus(fixture.fixture.status.short) !== "finished",
+    (fixture) => ["upcoming", "live"].includes(normaliseStatus(fixture.fixture.status.short)),
   );
   const oddsEvents = hasActiveMatches
     ? await getSoccerOdds(combinedFixtures)

@@ -135,10 +135,15 @@ describe("poissonProbs", () => {
     const withDC = poissonProbs(1.3, 1.0);
     // Raw Poisson (rho=0) baseline
     let rawDraw = 0;
-    for (let g = 0; g <= MAX_GOALS; g++) {
-      rawDraw += poisson(1.3, g) * poisson(1.0, g); // dcTau=1 when rho=0
+    let rawTotal = 0;
+    for (let h = 0; h <= MAX_GOALS; h++) {
+      for (let a = 0; a <= MAX_GOALS; a++) {
+        const p = poisson(1.3, h) * poisson(1.0, a); // dcTau=1 when rho=0
+        rawTotal += p;
+        if (h === a) rawDraw += p;
+      }
     }
-    rawDraw = (rawDraw / (rawDraw + 0.01)) * 100; // rough normalised
+    rawDraw = (rawDraw / rawTotal) * 100;
     // DC draw should be >= raw (rho correction raises low-score draws)
     expect(withDC.draw).toBeGreaterThanOrEqual(rawDraw * 0.95);
   });

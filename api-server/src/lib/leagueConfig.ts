@@ -74,6 +74,32 @@ const ODDS_SPORT_KEY_BY_LEAGUE_ID = new Map<number, string>(
   ),
 );
 
+// Relative domestic-league strength indices. These are football-data priors,
+// not bookmaker inputs. They are deliberately conservative and are only used
+// to normalise recent performance when clubs from different leagues meet.
+// 1.00 is the reference level; values are capped by the reliability layer.
+const DOMESTIC_LEAGUE_STRENGTH = new Map<number, number>([
+  [39, 1.12], [40, 0.95],
+  [140, 1.09], [141, 0.94],
+  [135, 1.08], [136, 0.93],
+  [78, 1.08], [79, 0.94],
+  [61, 1.05], [62, 0.92],
+  [94, 1.00], [95, 0.89],
+  [88, 1.00], [89, 0.88],
+  // Common European domestic leagues that can appear in UEFA opposition.
+  [144, 0.98], // Belgium First Division A
+  [203, 0.98], // Turkey Super Lig
+  [218, 0.94], // Austria Bundesliga
+  [197, 0.92], // Greece Super League
+  [179, 0.93], // Scotland Premiership
+  [207, 0.93], // Switzerland Super League
+  [119, 0.91], // Denmark Superliga
+  [345, 0.90], // Czech top flight
+  [210, 0.90], // Croatia HNL
+  [103, 0.89], // Norway Eliteserien
+  [113, 0.89], // Sweden Allsvenskan
+]);
+
 export function isTrackedLeague(leagueId: number): boolean {
   return TRACKED_LEAGUE_IDS.has(leagueId);
 }
@@ -84,4 +110,12 @@ export function getOddsSportKeyForLeague(leagueId: number): string | null {
 
 export function getTrackedCompetition(leagueId: number): TrackedCompetition | null {
   return TRACKED_COMPETITIONS.find((competition) => competition.id === leagueId) ?? null;
+}
+
+export function getDomesticLeagueStrength(leagueId: number): number | null {
+  return DOMESTIC_LEAGUE_STRENGTH.get(leagueId) ?? null;
+}
+
+export function getCompetitionKind(leagueId: number): TrackedCompetition["kind"] | "other" {
+  return getTrackedCompetition(leagueId)?.kind ?? "other";
 }

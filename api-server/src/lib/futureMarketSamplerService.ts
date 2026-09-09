@@ -653,6 +653,11 @@ function isFutureStatus(status: string | undefined) {
     "PEN",
     "AWD",
     "WO",
+    "PST",
+    "CANC",
+    "ABD",
+    "SUSP",
+    "INT",
   ].includes(status ?? "");
 }
 
