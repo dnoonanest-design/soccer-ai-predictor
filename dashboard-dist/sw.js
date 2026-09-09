@@ -1,4 +1,4 @@
-const CACHE_NAME = "soccer-dashboard-v1";
+const CACHE_NAME = "soccer-dashboard-v2";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -19,6 +19,16 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/api/")) {
     event.respondWith(fetch(request).catch(() => caches.match(request)));
+    return;
+  }
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request).then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put("/", copy)).catch(() => undefined);
+        return response;
+      }).catch(() => caches.match(request).then((cached) => cached || caches.match("/")))
+    );
     return;
   }
   event.respondWith(
