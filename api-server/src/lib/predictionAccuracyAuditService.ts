@@ -64,6 +64,9 @@ type AuditPrediction = {
   circumstanceScoreAway: number | null;
   homeFormScore: number | null;
   awayFormScore: number | null;
+  strengthRatingGap: number | null;
+  crossLeaguePriorWeight: number | null;
+  strengthModelVersion: string | null;
   dataTier: string;
 };
 
@@ -342,6 +345,9 @@ async function computeAuditPrediction(
     circumstanceScoreAway: numberOrNull(circumstances?.circumstanceScoreAway),
     homeFormScore: numberOrNull(circumstances?.homeFormScore),
     awayFormScore: numberOrNull(circumstances?.awayFormScore),
+    strengthRatingGap: numberOrNull(raw.strength_rating_gap),
+    crossLeaguePriorWeight: numberOrNull(raw.cross_league_prior_weight),
+    strengthModelVersion: raw.strength_model_version ?? null,
     dataTier: includeCircumstances ? "stats+circumstances" : "stats",
   };
 }
@@ -392,9 +398,10 @@ async function insertAuditRecord(
        home_win_prob, draw_prob, away_win_prob, over25_prob, btts_prob,
        home_xg, away_xg, confidence, pick_confidence, confidence_band,
        predicted_outcome, circumstance_score_home, circumstance_score_away,
-       home_form_score, away_form_score, captured_at
+       home_form_score, away_form_score, strength_rating_gap,
+       cross_league_prior_weight, strength_model_version, captured_at
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
      )
      ON CONFLICT (fixture_id, checkpoint, model_version, engine_revision) DO NOTHING`,
     [
@@ -424,6 +431,9 @@ async function insertAuditRecord(
       prediction.circumstanceScoreAway,
       prediction.homeFormScore,
       prediction.awayFormScore,
+      prediction.strengthRatingGap,
+      prediction.crossLeaguePriorWeight,
+      prediction.strengthModelVersion,
       capturedAt,
     ],
   );
@@ -649,7 +659,7 @@ function mapMetricRows(rows: any[]) {
 }
 
 export async function getPredictionAccuracyAuditReport() {
-  const [overall, byLeague, byCheckpoint, byConfidence, byModel, byPredictedOutcome, circumstanceEdge, recent] = await Promise.all([
+  const [overall, byLeague, byCheckpoint, byConfidence, byModel, byPredictedOutcome, circumstanceEdge, crossLeague, recent] = await Promise.all([
     pool.query(`
       SELECT
         COUNT(*)::int AS captured,
@@ -738,11 +748,32 @@ export async function getPredictionAccuracyAuditReport() {
       ORDER BY samples DESC
     `),
     pool.query(`
+      SELECT
+        CASE
+          WHEN strength_rating_gap IS NULL THEN 'unknown'
+          WHEN ABS(strength_rating_gap) >= 300 THEN '300_plus'
+          WHEN ABS(strength_rating_gap) >= 200 THEN '200_299'
+          WHEN ABS(strength_rating_gap) >= 100 THEN '100_199'
+          ELSE 'under_100'
+        END AS rating_gap_band,
+        COUNT(*)::int AS samples,
+        AVG(correct::int) AS accuracy,
+        AVG(brier_score) AS brier_score,
+        AVG(log_loss) AS log_loss,
+        AVG(pick_confidence) AS average_confidence,
+        AVG((predicted_outcome = 'away' AND strength_rating_gap >= 200)::int) AS false_away_favourite_rate
+      FROM prediction_audit_records
+      WHERE settled_at IS NOT NULL AND phase = 'prematch' AND captured_at < kickoff_at
+      GROUP BY rating_gap_band
+      ORDER BY samples DESC
+    `),
+    pool.query(`
       SELECT fixture_id, league_id, home_team, away_team, kickoff_at,
              phase, checkpoint, data_tier, model_version, engine_revision,
              home_win_prob, draw_prob, away_win_prob, predicted_outcome,
              pick_confidence, confidence_band, actual_outcome, score_home, score_away,
              correct, brier_score, log_loss, over25_correct, btts_correct,
+             strength_rating_gap, cross_league_prior_weight, strength_model_version,
              captured_at, settled_at
         FROM prediction_audit_records
        WHERE phase <> 'prematch' OR captured_at < kickoff_at
@@ -793,6 +824,10 @@ export async function getPredictionAccuracyAuditReport() {
     byModel: mapMetricRows(byModel.rows),
     byPredictedOutcome: mapMetricRows(byPredictedOutcome.rows),
     circumstanceEdge: mapMetricRows(circumstanceEdge.rows),
+    crossLeague: mapMetricRows(crossLeague.rows).map((row) => ({
+      ...row,
+      falseAwayFavouriteRate: toMetricNumber(row.false_away_favourite_rate),
+    })),
     recent: recent.rows.map((row) => ({
       ...row,
       fixture_id: Number(row.fixture_id),

@@ -1,5 +1,7 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
+import { buildTeamStrengthProfile, leagueRating, type StrengthFixture, type TeamStrengthProfile } from "./crossLeagueStrength";
+import { loadLatestTeamRatings, saveTeamStrengthProfile } from "./teamStrengthStore";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -66,6 +68,7 @@ export interface TeamStats {
   recent_matches_used?: number;
   venue_matches_used?: number;
   opposition_strength_factor?: number;
+  strength_profile?: TeamStrengthProfile;
 }
 
 export interface MatchStatsResult {
@@ -125,34 +128,19 @@ type ApiRecentFixturesResp = { response?: ApiRecentFixture[] };
 
 type PreferredVenue = "home" | "away";
 
-// Conservative competition-quality priors. These normalize rates earned
-// against different schedules; they never encode a particular club and are
-// deliberately narrow so match evidence still dominates.
-const LEAGUE_STRENGTH: Record<number, number> = {
-  39: 1.15, 40: 1.03, 41: 0.94,
-  140: 1.13, 141: 0.96,
-  135: 1.12, 136: 0.96,
-  78: 1.12, 79: 0.96,
-  61: 1.10, 62: 0.94,
-  88: 1.04, 89: 0.91,
-  94: 1.04, 95: 0.91,
-  // UEFA competition membership alone does not establish opponent quality;
-  // qualifying and league-phase schedules vary widely, so keep these neutral.
-  2: 1.00, 3: 0.98, 848: 0.95,
-};
-
+// Compatibility export used by existing callers/tests. The factor is now
+// derived from the versioned Elo-like league prior rather than a second,
+// independently maintained table of multipliers.
 export function competitionStrengthFactor(
   leagueId?: number,
   country?: string,
   leagueName?: string,
 ): number {
-  if (leagueId && LEAGUE_STRENGTH[leagueId]) return LEAGUE_STRENGTH[leagueId];
   const name = (leagueName ?? "").toLowerCase();
-  if (name.includes("champions league")) return 1.00;
-  if (name.includes("europa league")) return 0.98;
-  if (name.includes("conference league")) return 0.95;
-  const strongCountries = new Set(["England", "Spain", "Italy", "Germany", "France", "Netherlands", "Portugal"]);
-  return strongCountries.has(country ?? "") ? 0.94 : 0.84;
+  if (leagueId === 2 || name.includes("champions league")) return 1;
+  if (leagueId === 3 || name.includes("europa league")) return 1;
+  if (leagueId === 848 || name.includes("conference league")) return 1;
+  return Math.round(Math.max(0.80, Math.min(1.2, Math.pow(10, (leagueRating(leagueId, country) - 1500) / 800))) * 1000) / 1000;
 }
 
 function emptyTeamStats(id: number, name: string): TeamStats {
@@ -287,7 +275,7 @@ async function fetchRecentTeamStats(
   let wins = 0, draws = 0, losses = 0, cleanSheets = 0;
   let venueMatches = 0;
   let weightedGoalsFor = 0, weightedGoalsAgainst = 0, totalWeight = 0;
-  let weightedScheduleStrength = 0;
+  const strengthFixtures: StrengthFixture[] = [];
   const outcomes: string[] = [];
 
   fixtures.forEach((fixture, index) => {
@@ -316,12 +304,32 @@ async function fetchRecentTeamStats(
     weightedGoalsFor += goalsFor * weight;
     weightedGoalsAgainst += goalsAgainst * weight;
     totalWeight += weight;
-    weightedScheduleStrength += competitionStrengthFactor(
-      Number(fixture.league?.id ?? 0), fixture.league?.country, fixture.league?.name,
-    ) * weight;
+    strengthFixtures.push({
+      date: fixture.fixture?.date,
+      leagueId: Number(fixture.league?.id ?? 0),
+      leagueName: fixture.league?.name,
+      country: fixture.league?.country,
+      homeTeamId: homeId,
+      awayTeamId: awayId,
+      homeGoals,
+      awayGoals,
+    });
   });
 
   if (totalWeight <= 0) return null;
+
+  const opponentIds = strengthFixtures.map((fixture) =>
+    fixture.homeTeamId === teamId ? Number(fixture.awayTeamId) : Number(fixture.homeTeamId),
+  );
+  const evidenceThroughMs = Math.max(...strengthFixtures.map((fixture) => Date.parse(fixture.date ?? "")).filter(Number.isFinite));
+  const evidenceThrough = new Date(Number.isFinite(evidenceThroughMs) ? evidenceThroughMs : Date.now());
+  const knownRatings = await loadLatestTeamRatings(opponentIds, new Date());
+  for (const fixture of strengthFixtures) {
+    const opponentId = fixture.homeTeamId === teamId ? Number(fixture.awayTeamId) : Number(fixture.homeTeamId);
+    fixture.opponentRating = knownRatings.get(opponentId);
+  }
+  const strengthProfile = buildTeamStrengthProfile(strengthFixtures, teamId);
+  void saveTeamStrengthProfile(teamId, strengthProfile, evidenceThrough);
 
   return {
     ...emptyTeamStats(teamId, teamName),
@@ -337,7 +345,8 @@ async function fetchRecentTeamStats(
     competition_matches_played: 0,
     recent_matches_used: fixtures.length,
     venue_matches_used: venueMatches,
-    opposition_strength_factor: Math.round((weightedScheduleStrength / totalWeight) * 1000) / 1000,
+    opposition_strength_factor: strengthProfile.scheduleFactor,
+    strength_profile: strengthProfile,
   };
 }
 
@@ -369,6 +378,7 @@ function blendSparseCompetitionStats(
       recent_matches_used: recent?.matches_played ?? 0,
       venue_matches_used: recent?.venue_matches_used ?? 0,
       opposition_strength_factor: recent?.opposition_strength_factor ?? 1,
+      strength_profile: recent?.strength_profile,
     };
   }
 
@@ -396,6 +406,7 @@ function blendSparseCompetitionStats(
     recent_matches_used: recent.matches_played,
     venue_matches_used: recent.venue_matches_used ?? 0,
     opposition_strength_factor: recent.opposition_strength_factor ?? 1,
+    strength_profile: recent.strength_profile,
   };
 }
 

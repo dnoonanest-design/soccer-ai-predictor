@@ -1,5 +1,6 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
+import { blendCrossLeaguePrior, type TeamStrengthProfile } from "./crossLeagueStrength";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -101,6 +102,7 @@ export interface LiveTeamStatsInput {
   recent_matches_used?: number;
   venue_matches_used?: number;
   opposition_strength_factor?: number;
+  strength_profile?: TeamStrengthProfile;
   possession?: string | null;
   shots_total?: number | null;
   shots_on_target?: number | null;
@@ -192,6 +194,9 @@ export interface EnhancedPrediction {
   home_spotlights?: TeamSpotlights;
   away_spotlights?: TeamSpotlights;
   data_quality_prior_weight?: number;
+  cross_league_prior_weight?: number;
+  strength_rating_gap?: number;
+  strength_model_version?: string;
 }
 
 type ApiPlayer = {
@@ -650,6 +655,8 @@ export async function getEnhancedPrediction(
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
   let dataQualityPriorWeight = 0;
+  let crossLeaguePriorWeight = 0;
+  let strengthRatingGap = 0;
   if (!isLive) {
     const guarded = applyDataQualityPrior(
       { home: finalHome, draw: finalDraw, away: finalAway },
@@ -660,10 +667,21 @@ export async function getEnhancedPrediction(
     finalDraw = guarded.draw;
     finalAway = guarded.away;
     dataQualityPriorWeight = guarded.priorWeight;
+
+    const strengthAdjusted = blendCrossLeaguePrior(
+      { home: finalHome, draw: finalDraw, away: finalAway },
+      liveStats?.home?.strength_profile,
+      liveStats?.away?.strength_profile,
+    );
+    finalHome = strengthAdjusted.home;
+    finalDraw = strengthAdjusted.draw;
+    finalAway = strengthAdjusted.away;
+    crossLeaguePriorWeight = strengthAdjusted.priorWeight;
+    strengthRatingGap = strengthAdjusted.ratingGap;
   }
   const markets = extendedPoissonMarkets(adjHomeXG, adjAwayXG);
   const rawConfidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
-  const qualityCeiling = 70 - dataQualityPriorWeight * 80;
+  const qualityCeiling = 70 - dataQualityPriorWeight * 80 - (crossLeaguePriorWeight > 0 ? 3 : 0);
   const confidenceScore = round2(Math.min(rawConfidence.score, qualityCeiling));
   const confidence = {
     score: confidenceScore,
@@ -672,6 +690,9 @@ export async function getEnhancedPrediction(
   const reasons = buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName });
   if (dataQualityPriorWeight >= 0.15) {
     reasons.unshift("Confidence reduced because the teams' available statistical samples are not directly comparable.");
+  }
+  if (crossLeaguePriorWeight > 0) {
+    reasons.unshift(`Cross-league club strength applied (${strengthRatingGap > 0 ? homeTeamName || "home" : awayTeamName || "away"} rating advantage).`);
   }
   const liveMomentum = isLive ? liveMomentumFromEvents(eventsList, homeTeamId, awayTeamId, matchMinute, adjHomeXG, adjAwayXG, liveStats) : undefined;
 
@@ -715,5 +736,8 @@ export async function getEnhancedPrediction(
     sub_adjusted_home_win: subAdjHomeWin, sub_adjusted_draw: subAdjDraw, sub_adjusted_away_win: subAdjAwayWin,
     home_spotlights: buildSpotlights(homeSquadMap), away_spotlights: buildSpotlights(awaySquadMap),
     data_quality_prior_weight: round2(dataQualityPriorWeight),
+    cross_league_prior_weight: round2(crossLeaguePriorWeight),
+    strength_rating_gap: round2(strengthRatingGap),
+    strength_model_version: liveStats?.home?.strength_profile?.version ?? liveStats?.away?.strength_profile?.version,
   };
 }
