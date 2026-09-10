@@ -238,18 +238,27 @@ export async function applyCircumstanceCalibration(match: Match, probs: { home: 
     const c = rows[0];
     if (!c) return { ...probs, adjustment: null };
     const learnedRows = await db.select().from(factorLearningInsights).where(and(eq(factorLearningInsights.active, true), sql`${factorLearningInsights.factorName} IN ('circumstance_score_delta','red_card_delta','injury_delta','star_rating_delta','form_score_delta')`)).orderBy(desc(factorLearningInsights.createdAt)).limit(10);
-    const weights = new Map(learnedRows.map((r) => [r.factorName, Number(r.learnedWeight ?? 0)]));
+    const weights = new Map<string, number>();
+    for (const row of learnedRows) {
+      if (weights.has(row.factorName)) continue;
+      const sample = Number(row.sampleSize ?? 0);
+      const confidence = Math.max(0, Math.min(1, Number(row.confidence ?? 0)));
+      if (sample < 50 || confidence < 0.5) continue;
+      // Shrink learned effects by their evidence quality. The newest reliable
+      // row wins; older duplicate factor rows cannot overwrite it.
+      weights.set(row.factorName, Number(row.learnedWeight ?? 0) * confidence);
+    }
     const scoreDelta = Number(c.circumstanceScoreHome ?? 0) - Number(c.circumstanceScoreAway ?? 0);
     const redDelta = Number(c.awayRedCards ?? 0) - Number(c.homeRedCards ?? 0);
     const injuryDelta = (Number(c.awayMissingPlayers ?? 0) + Number(c.awayInMatchInjuries ?? 0) * 2) - (Number(c.homeMissingPlayers ?? 0) + Number(c.homeInMatchInjuries ?? 0) * 2);
     const starDelta = Number(c.homeStarPlayerRating ?? 0) - Number(c.awayStarPlayerRating ?? 0);
     const formDelta = Number(c.homeFormScore ?? 50) - Number(c.awayFormScore ?? 50);
-    const homeBoost = Math.max(-8, Math.min(8,
-      scoreDelta * (weights.get('circumstance_score_delta') || 0.035) +
-      redDelta * (weights.get('red_card_delta') || 4.0) +
-      injuryDelta * (weights.get('injury_delta') || 0.45) +
-      starDelta * (weights.get('star_rating_delta') || 1.1) +
-      formDelta * (weights.get('form_score_delta') || 0.035)
+    const homeBoost = Math.max(-3, Math.min(3,
+      scoreDelta * (weights.get('circumstance_score_delta') ?? 0) +
+      redDelta * (weights.get('red_card_delta') ?? 0) +
+      injuryDelta * (weights.get('injury_delta') ?? 0) +
+      starDelta * (weights.get('star_rating_delta') ?? 0) +
+      formDelta * (weights.get('form_score_delta') ?? 0)
     ));
     const awayBoost = -homeBoost;
     const drawShift = -Math.abs(homeBoost) * 0.2;

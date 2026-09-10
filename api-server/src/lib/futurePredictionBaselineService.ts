@@ -1,5 +1,6 @@
 import { pool } from "@workspace/db";
 import { logger } from "./logger";
+import { CURRENT_PREDICTION_MODEL_VERSION } from "./predictionModelVersion";
 import { fetchFootball, type Match } from "./soccerService";
 import { getMatchStats } from "./statsService";
 import { getEnhancedPrediction } from "./enhancedStatsService";
@@ -18,7 +19,7 @@ const MAX_CAPTURES_PER_RUN = clamp(
   1,
   30,
 );
-const MODEL_VERSION = process.env.PREDICTION_MODEL_VERSION ?? "calibrated-statistical-v4";
+const MODEL_VERSION = CURRENT_PREDICTION_MODEL_VERSION;
 const ENGINE_REVISION =
   process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
   process.env.GIT_COMMIT_SHA?.slice(0, 12) ??
@@ -248,6 +249,12 @@ async function computeBaseline(match: Match): Promise<BaselinePrediction | null>
 }
 
 async function insertBaselineAudit(match: Match, checkpoint: string, prediction: BaselinePrediction) {
+  const capturedAt = new Date();
+  const kickoffAt = new Date(match.kickoff);
+  if (!Number.isFinite(kickoffAt.getTime()) || capturedAt.getTime() >= kickoffAt.getTime()) {
+    logger.warn({ fixtureId: match.id, kickoffAt }, "future baseline rejected late prematch capture");
+    return false;
+  }
   const predictedOutcome = getPredictedOutcome(prediction.home, prediction.draw, prediction.away);
   const pickConfidence = Math.max(prediction.home, prediction.draw, prediction.away);
   const confidenceBand = getConfidenceBand(pickConfidence);
@@ -258,10 +265,10 @@ async function insertBaselineAudit(match: Match, checkpoint: string, prediction:
        phase, checkpoint, minute, data_tier, model_version, engine_revision,
        home_win_prob, draw_prob, away_win_prob, over25_prob, btts_prob,
        home_xg, away_xg, confidence, pick_confidence, confidence_band,
-       predicted_outcome
+       predicted_outcome, captured_at
      ) VALUES (
        $1,$2,$3,$4,$5,'prematch',$6,NULL,'stats-baseline',$7,$8,
-       $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+       $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
      )
      ON CONFLICT (fixture_id, checkpoint, model_version, engine_revision) DO NOTHING`,
     [
@@ -269,7 +276,7 @@ async function insertBaselineAudit(match: Match, checkpoint: string, prediction:
       match.league_id ?? null,
       match.home_team.name,
       match.away_team.name,
-      new Date(match.kickoff),
+      kickoffAt,
       checkpoint,
       MODEL_VERSION,
       ENGINE_REVISION,
@@ -284,6 +291,7 @@ async function insertBaselineAudit(match: Match, checkpoint: string, prediction:
       pickConfidence,
       confidenceBand,
       predictedOutcome,
+      capturedAt,
     ],
   );
   return (result.rowCount ?? 0) > 0;

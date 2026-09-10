@@ -95,6 +95,12 @@ export interface LiveMomentum {
   data_quality?: "basic" | "enhanced";
 }
 export interface LiveTeamStatsInput {
+  data_source?: "competition" | "recent_all_comp" | "blended";
+  matches_played?: number;
+  competition_matches_played?: number;
+  recent_matches_used?: number;
+  venue_matches_used?: number;
+  opposition_strength_factor?: number;
   possession?: string | null;
   shots_total?: number | null;
   shots_on_target?: number | null;
@@ -185,6 +191,7 @@ export interface EnhancedPrediction {
   sub_adjusted_away_win?: number;
   home_spotlights?: TeamSpotlights;
   away_spotlights?: TeamSpotlights;
+  data_quality_prior_weight?: number;
 }
 
 type ApiPlayer = {
@@ -415,7 +422,7 @@ function injuryFactor(absences: AbsentPlayer[], squad: Map<number, SquadPlayerSt
   }
   return Math.max(0.70, 1 - impact);
 }
-function lineupQualityFactor(starters: LineupPlayer[], squad: Map<number, SquadPlayerStats>): number {
+export function lineupQualityFactor(starters: LineupPlayer[], squad: Map<number, SquadPlayerStats>): number {
   const players = Array.from(squad.values()).filter((p) => p.appearances >= 3);
   if (players.length < 3) return 1;
   const squadAvg = players.reduce((s, p) => s + p.goals_per_game + 0.4 * p.assists_per_game, 0) / players.length;
@@ -423,7 +430,35 @@ function lineupQualityFactor(starters: LineupPlayer[], squad: Map<number, SquadP
   const starterPlayers = starters.map((s) => squad.get(s.id)).filter(Boolean) as SquadPlayerStats[];
   if (starterPlayers.length < 3) return 1;
   const starterAvg = starterPlayers.reduce((s, p) => s + p.goals_per_game + 0.4 * p.assists_per_game, 0) / starterPlayers.length;
-  return Math.min(1.20, Math.max(0.82, starterAvg / squadAvg));
+  // This is a within-team signal, not an absolute comparison between clubs.
+  // Keep it a modest availability adjustment so a strong lineup for a weaker
+  // club cannot masquerade as superior squad quality.
+  return Math.min(1.06, Math.max(0.94, starterAvg / squadAvg));
+}
+
+export function applyDataQualityPrior(
+  probs: { home: number; draw: number; away: number },
+  home?: LiveTeamStatsInput,
+  away?: LiveTeamStatsInput,
+) {
+  const quality = (s?: LiveTeamStatsInput) => {
+    const sample = Math.max(0, Number(s?.matches_played ?? s?.recent_matches_used ?? 0));
+    const sourceWeight = s?.data_source === "competition" ? 0.90 : s?.data_source === "blended" ? 0.78 : 0.65;
+    return Math.min(sourceWeight, sourceWeight * Math.min(1, sample / 12));
+  };
+  const hq = quality(home), aq = quality(away);
+  const sourceMismatch = Boolean(home?.data_source && away?.data_source && home.data_source !== away.data_source);
+  const venueWeak = [home, away].some((s) => s?.data_source === "recent_all_comp" && Number(s.venue_matches_used ?? 0) < 3);
+  const priorWeight = Math.min(0.35,
+    (sourceMismatch ? 0.12 : 0) + (venueWeak ? 0.08 : 0) + (1 - Math.min(hq, aq)) * 0.20,
+  );
+  if (priorWeight <= 0.001) return { ...probs, priorWeight: 0 };
+  const prior = { home: 45, draw: 27, away: 28 };
+  const homeP = probs.home * (1 - priorWeight) + prior.home * priorWeight;
+  const drawP = probs.draw * (1 - priorWeight) + prior.draw * priorWeight;
+  const awayP = probs.away * (1 - priorWeight) + prior.away * priorWeight;
+  const total = homeP + drawP + awayP;
+  return { home: homeP / total * 100, draw: drawP / total * 100, away: awayP / total * 100, priorWeight };
 }
 
 const MAX_GOALS = 8;
@@ -550,8 +585,10 @@ function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, 
   const total = homeWin + draw + awayWin;
   return { homeWin: (homeWin / total) * 100, draw: (draw / total) * 100, awayWin: (awayWin / total) * 100 };
 }
-function blendH2H(poissonHome: number, poissonDraw: number, poissonAway: number, h2h: H2HRecord) {
-  const w = h2h.matches >= 5 ? 0.30 : (h2h.matches / 5) * 0.30;
+export function blendH2H(poissonHome: number, poissonDraw: number, poissonAway: number, h2h: H2HRecord) {
+  // H2H is sparse and often stale. It is supporting evidence, never a primary
+  // driver; twenty meetings are required to reach the 15% ceiling.
+  const w = Math.min(0.15, (h2h.matches / 20) * 0.15);
   const home = (1 - w) * poissonHome + w * h2h.home_win_rate * 100;
   const draw = (1 - w) * poissonDraw + w * h2h.draw_rate * 100;
   const away = (1 - w) * poissonAway + w * h2h.away_win_rate * 100;
@@ -570,8 +607,14 @@ export async function getEnhancedPrediction(
   const homeAdv = getHomeAdvantage(leagueId);
   const homeFormFactor = formFactor(homeForm);
   const awayFormFactor = formFactor(awayForm);
-  const baseHomeXG = ((homeGpg + awayCpg) / 2) * homeAdv;
-  const baseAwayXG = (awayGpg + homeCpg) / 2;
+  const homeScheduleStrength = Math.max(0.80, Math.min(1.20, Number(liveStats?.home?.opposition_strength_factor ?? 1)));
+  const awayScheduleStrength = Math.max(0.80, Math.min(1.20, Number(liveStats?.away?.opposition_strength_factor ?? 1)));
+  const adjustedHomeAttack = homeGpg * homeScheduleStrength;
+  const adjustedAwayAttack = awayGpg * awayScheduleStrength;
+  const adjustedHomeConceded = homeCpg / homeScheduleStrength;
+  const adjustedAwayConceded = awayCpg / awayScheduleStrength;
+  const baseHomeXG = ((adjustedHomeAttack + adjustedAwayConceded) / 2) * homeAdv;
+  const baseAwayXG = (adjustedAwayAttack + adjustedHomeConceded) / 2;
   const base = poissonProbs(baseHomeXG, baseAwayXG);
 
   // Shared rate limiter serializes these API calls even when the promises are scheduled together.
@@ -606,9 +649,30 @@ export async function getEnhancedPrediction(
     const blended = blendH2H(finalHome, finalDraw, finalAway, h2hResult);
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
+  let dataQualityPriorWeight = 0;
+  if (!isLive) {
+    const guarded = applyDataQualityPrior(
+      { home: finalHome, draw: finalDraw, away: finalAway },
+      liveStats?.home,
+      liveStats?.away,
+    );
+    finalHome = guarded.home;
+    finalDraw = guarded.draw;
+    finalAway = guarded.away;
+    dataQualityPriorWeight = guarded.priorWeight;
+  }
   const markets = extendedPoissonMarkets(adjHomeXG, adjAwayXG);
-  const confidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
+  const rawConfidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
+  const qualityCeiling = 70 - dataQualityPriorWeight * 80;
+  const confidenceScore = round2(Math.min(rawConfidence.score, qualityCeiling));
+  const confidence = {
+    score: confidenceScore,
+    label: (confidenceScore >= 72 ? "High" : confidenceScore >= 55 ? "Medium" : "Low") as "Low" | "Medium" | "High",
+  };
   const reasons = buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName });
+  if (dataQualityPriorWeight >= 0.15) {
+    reasons.unshift("Confidence reduced because the teams' available statistical samples are not directly comparable.");
+  }
   const liveMomentum = isLive ? liveMomentumFromEvents(eventsList, homeTeamId, awayTeamId, matchMinute, adjHomeXG, adjAwayXG, liveStats) : undefined;
 
   let liveAdjHomeWin: number | undefined, liveAdjDraw: number | undefined, liveAdjAwayWin: number | undefined;
@@ -650,5 +714,6 @@ export async function getEnhancedPrediction(
     substitution_impacts: substitutionImpacts, home_sub_xg_delta: homeSubXgDelta, away_sub_xg_delta: awaySubXgDelta,
     sub_adjusted_home_win: subAdjHomeWin, sub_adjusted_draw: subAdjDraw, sub_adjusted_away_win: subAdjAwayWin,
     home_spotlights: buildSpotlights(homeSquadMap), away_spotlights: buildSpotlights(awaySquadMap),
+    data_quality_prior_weight: round2(dataQualityPriorWeight),
   };
 }

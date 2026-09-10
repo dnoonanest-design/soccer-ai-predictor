@@ -2,6 +2,7 @@ import { db, predictionSnapshots, betTracker, modelTrainingRuns, liveAlerts, mat
 import { desc, eq, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import { getCalibrationReport } from "./predictionStore";
+import { CURRENT_PREDICTION_MODEL_VERSION } from "./predictionModelVersion";
 
 export interface PredictionSnapshotInput {
   fixtureId: number;
@@ -43,6 +44,7 @@ export async function savePredictionSnapshot(input: PredictionSnapshotInput): Pr
       nextGoalHome: input.nextGoalHome ?? null,
       nextGoalAway: input.nextGoalAway ?? null,
       confidence: input.confidence ?? null,
+      modelVersion: CURRENT_PREDICTION_MODEL_VERSION,
       reasonsJson: input.reasons == null ? null : JSON.stringify(input.reasons),
       valueEdgesJson: input.valueEdges == null ? null : JSON.stringify(input.valueEdges),
     });
@@ -163,7 +165,7 @@ export async function runTrainingPipeline() {
   const calibrationReport = await getCalibrationReport();
 
   const weights = {
-    model: "calibrated-statistical-v4",
+    model: CURRENT_PREDICTION_MODEL_VERSION,
     note: "Bookmaker odds are intentionally excluded from the core predictor. The statistical model is trained and calibrated from football data only; bookmaker movement is evaluated separately by the market-intelligence layer.",
     priors: {
       home: n ? outcomeCounts.home / n : 0.45,
@@ -192,7 +194,7 @@ export async function runTrainingPipeline() {
   const pickAccuracy = n ? Math.round((correct / n) * 1000) / 1000 : 0;
   const brierScore = n ? Math.round((brier / n) * 1000) / 1000 : 0;
   const [created] = await db.insert(modelTrainingRuns).values({
-    modelVersion: "calibrated-statistical-v4",
+    modelVersion: CURRENT_PREDICTION_MODEL_VERSION,
     trainingRows,
     holdoutRows,
     pickAccuracy,

@@ -161,8 +161,9 @@ async function enrollFixtures() {
        SELECT DISTINCT ON (a.fixture_id)
               a.fixture_id, a.league_id, a.home_team, a.away_team,
               a.kickoff_at, a.checkpoint, a.captured_at
-         FROM prediction_audit_records a
+        FROM prediction_audit_records a
         WHERE a.kickoff_at IS NOT NULL
+          AND (a.phase <> 'prematch' OR a.captured_at < a.kickoff_at)
           AND a.kickoff_at >= NOW() - ($1::int * INTERVAL '1 hour')
           AND a.kickoff_at <= NOW() + ($2::int * INTERVAL '1 hour')
         ORDER BY a.fixture_id, a.captured_at ASC
@@ -202,6 +203,7 @@ async function evaluateFixture(row: FixtureRow): Promise<Evaluation> {
               predicted_outcome, pick_confidence, captured_at, settled_at, correct
          FROM prediction_audit_records
         WHERE fixture_id = $1
+          AND (phase <> 'prematch' OR captured_at < kickoff_at)
         ORDER BY captured_at ASC`,
       [fixtureId],
     ),
@@ -677,7 +679,9 @@ export async function getFullMatchLifecycleFixtureReport(fixtureId: number) {
               pick_confidence, captured_at, settled_at, actual_outcome, correct,
               brier_score, log_loss
          FROM prediction_audit_records
-        WHERE fixture_id = $1 ORDER BY captured_at ASC`,
+        WHERE fixture_id = $1
+          AND (phase <> 'prematch' OR captured_at < kickoff_at)
+        ORDER BY captured_at ASC`,
       [fixtureId],
     ),
     pool.query(`SELECT * FROM match_outcomes WHERE fixture_id = $1`, [fixtureId]),

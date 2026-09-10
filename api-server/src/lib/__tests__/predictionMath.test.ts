@@ -49,7 +49,7 @@ function poissonProbs(homeXG: number, awayXG: number) {
   };
 }
 
-const MAX_H2H_WEIGHT    = 0.30;
+const MAX_H2H_WEIGHT    = 0.15;
 const FULL_WEIGHT_THRESHOLD = 20;
 function blendH2H(
   poissonHome: number, poissonDraw: number, poissonAway: number,
@@ -133,12 +133,15 @@ describe("poissonProbs", () => {
   it("Dixon-Coles correction shifts draw upward vs raw Poisson", () => {
     // DC rho < 0 increases P(0-0) and P(1-1), boosting draw probability
     const withDC = poissonProbs(1.3, 1.0);
-    // Raw Poisson (rho=0) baseline
-    let rawDraw = 0;
-    for (let g = 0; g <= MAX_GOALS; g++) {
-      rawDraw += poisson(1.3, g) * poisson(1.0, g); // dcTau=1 when rho=0
+    // Raw Poisson (rho=0) baseline, normalized across all three outcomes.
+    let rawHome = 0, rawDraw = 0, rawAway = 0;
+    for (let h = 0; h <= MAX_GOALS; h++) for (let a = 0; a <= MAX_GOALS; a++) {
+      const joint = poisson(1.3, h) * poisson(1.0, a);
+      if (h > a) rawHome += joint;
+      else if (h === a) rawDraw += joint;
+      else rawAway += joint;
     }
-    rawDraw = (rawDraw / (rawDraw + 0.01)) * 100; // rough normalised
+    rawDraw = rawDraw / (rawHome + rawDraw + rawAway) * 100;
     // DC draw should be >= raw (rho correction raises low-score draws)
     expect(withDC.draw).toBeGreaterThanOrEqual(rawDraw * 0.95);
   });
@@ -160,7 +163,7 @@ describe("blendH2H", () => {
     expect(r20.home).toBeGreaterThan(r10.home);
   });
 
-  it("caps weight at 30% even with 50 meetings", () => {
+  it("caps weight at 15% even with 50 meetings", () => {
     const r20 = blendH2H(50, 25, 25, 20, 0.7, 0.15, 0.15);
     const r50 = blendH2H(50, 25, 25, 50, 0.7, 0.15, 0.15);
     // Weight is capped so 50-match blend == 20-match blend
@@ -174,12 +177,12 @@ describe("blendH2H", () => {
 
   it("old threshold of 5 would give higher H2H weight than new threshold of 20", () => {
     // With old code: w = min(0.30, 5/5 * 0.30) = 0.30 at just 5 matches
-    // With new code: w = min(0.30, 5/20 * 0.30) = 0.075 at 5 matches
+    // With new code: w = min(0.15, 5/20 * 0.15) = 0.0375 at 5 matches
     // This test confirms new code gives a smaller weight for 5-match H2H
     const w_new = Math.min(MAX_H2H_WEIGHT, (5 / FULL_WEIGHT_THRESHOLD) * MAX_H2H_WEIGHT);
     const w_old = 5 >= 5 ? 0.30 : (5 / 5) * 0.30;
     expect(w_new).toBeLessThan(w_old);
-    expect(w_new).toBeCloseTo(0.075, 3);
+    expect(w_new).toBeCloseTo(0.0375, 3);
   });
 });
 

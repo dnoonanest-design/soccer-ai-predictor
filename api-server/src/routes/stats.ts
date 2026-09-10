@@ -14,7 +14,7 @@ const router = Router();
 
 
 function valueEdge(modelPct: number, decimalOdds: number | null) {
-  if (!Number.isFinite(modelPct) || !decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
+  if (!Number.isFinite(modelPct) || !decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0 || decimalOdds <= 1.01 || decimalOdds > 1000) return null;
   const fairOdds = Math.round((100 / modelPct) * 100) / 100;
   const edgePct = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
   return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
@@ -74,7 +74,9 @@ router.get("/matches/:match_id/stats", async (req, res) => {
     );
 
     let enhancedPred = null;
-    if (result.home.matches_played > 0 && result.away.matches_played > 0) {
+    // Finished fixtures are read-only. Never generate a new prediction from
+    // post-match data or create a snapshot after the outcome is known.
+    if (match.status !== "finished" && result.home.matches_played > 0 && result.away.matches_played > 0) {
       try {
         const [rawPred, calibFactors] = await Promise.all([
           getEnhancedPrediction(

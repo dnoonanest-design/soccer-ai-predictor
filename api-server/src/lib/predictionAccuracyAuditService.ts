@@ -8,6 +8,7 @@ import {
   collectMatchCircumstances,
 } from "./circumstanceLearningService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
+import { CURRENT_PREDICTION_MODEL_VERSION } from "./predictionModelVersion";
 
 const ENABLED = process.env.PREDICTION_ACCURACY_AUDIT_ENABLED !== "false";
 const SCAN_INTERVAL_MS = Math.max(
@@ -24,8 +25,7 @@ const MAX_LIVE_CAPTURES_PER_RUN = clamp(
   1,
   20,
 );
-const MODEL_VERSION =
-  process.env.PREDICTION_MODEL_VERSION ?? "calibrated-statistical-v4";
+const MODEL_VERSION = CURRENT_PREDICTION_MODEL_VERSION;
 const ENGINE_REVISION =
   process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
   process.env.GIT_COMMIT_SHA?.slice(0, 12) ??
@@ -367,6 +367,12 @@ async function insertAuditRecord(
   checkpoint: string,
   prediction: AuditPrediction,
 ) {
+  const capturedAt = new Date();
+  const kickoffAt = match.kickoff ? new Date(match.kickoff) : null;
+  if (phase === "prematch" && (!kickoffAt || capturedAt.getTime() >= kickoffAt.getTime())) {
+    logger.warn({ fixtureId: match.id, kickoffAt }, "prediction audit rejected late prematch capture");
+    return false;
+  }
   const predictedOutcome = getPredictedOutcome(
     prediction.home,
     prediction.draw,
@@ -386,9 +392,9 @@ async function insertAuditRecord(
        home_win_prob, draw_prob, away_win_prob, over25_prob, btts_prob,
        home_xg, away_xg, confidence, pick_confidence, confidence_band,
        predicted_outcome, circumstance_score_home, circumstance_score_away,
-       home_form_score, away_form_score
+       home_form_score, away_form_score, captured_at
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
      )
      ON CONFLICT (fixture_id, checkpoint, model_version, engine_revision) DO NOTHING`,
     [
@@ -396,7 +402,7 @@ async function insertAuditRecord(
       match.league_id ?? null,
       match.home_team.name,
       match.away_team.name,
-      match.kickoff ? new Date(match.kickoff) : null,
+      kickoffAt,
       phase,
       checkpoint,
       match.minute ?? null,
@@ -418,6 +424,7 @@ async function insertAuditRecord(
       prediction.circumstanceScoreAway,
       prediction.homeFormScore,
       prediction.awayFormScore,
+      capturedAt,
     ],
   );
   return (result.rowCount ?? 0) > 0;
@@ -504,6 +511,7 @@ export async function settlePredictionAuditRecords() {
        FROM prediction_audit_records a
        JOIN match_outcomes o ON o.fixture_id = a.fixture_id
       WHERE a.settled_at IS NULL
+        AND (a.phase <> 'prematch' OR a.captured_at < a.kickoff_at)
       ORDER BY a.captured_at ASC
       LIMIT 1000`,
   );
@@ -654,6 +662,7 @@ export async function getPredictionAccuracyAuditReport() {
         AVG(over25_correct::int) FILTER (WHERE over25_correct IS NOT NULL) AS over25_accuracy,
         AVG(btts_correct::int) FILTER (WHERE btts_correct IS NOT NULL) AS btts_accuracy
       FROM prediction_audit_records
+      WHERE phase <> 'prematch' OR captured_at < kickoff_at
     `),
     pool.query(`
       SELECT league_id, COUNT(*)::int AS samples,
@@ -662,7 +671,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) AS log_loss,
              AVG(pick_confidence) AS average_confidence
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
        GROUP BY league_id
        ORDER BY samples DESC
     `),
@@ -673,7 +682,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) AS log_loss,
              AVG(pick_confidence) AS average_confidence
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
        GROUP BY phase, checkpoint, data_tier
        ORDER BY phase, checkpoint
     `),
@@ -684,7 +693,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) AS log_loss,
              AVG(pick_confidence) AS average_confidence
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
        GROUP BY confidence_band
        ORDER BY average_confidence DESC
     `),
@@ -695,7 +704,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) AS log_loss,
              AVG(pick_confidence) AS average_confidence
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
        GROUP BY model_version, engine_revision
        ORDER BY samples DESC
     `),
@@ -706,7 +715,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) AS log_loss,
              AVG(pick_confidence) AS average_confidence
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
        GROUP BY predicted_outcome
        ORDER BY predicted_outcome
     `),
@@ -724,7 +733,7 @@ export async function getPredictionAccuracyAuditReport() {
         AVG(log_loss) AS log_loss,
         AVG(pick_confidence) AS average_confidence
       FROM prediction_audit_records
-      WHERE settled_at IS NOT NULL
+      WHERE settled_at IS NOT NULL AND (phase <> 'prematch' OR captured_at < kickoff_at)
       GROUP BY circumstance_edge
       ORDER BY samples DESC
     `),
@@ -736,6 +745,7 @@ export async function getPredictionAccuracyAuditReport() {
              correct, brier_score, log_loss, over25_correct, btts_correct,
              captured_at, settled_at
         FROM prediction_audit_records
+       WHERE phase <> 'prematch' OR captured_at < kickoff_at
        ORDER BY captured_at DESC
        LIMIT 40
     `),

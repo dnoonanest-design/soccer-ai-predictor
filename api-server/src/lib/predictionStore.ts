@@ -1,6 +1,7 @@
-import { db, matchPredictions, matchOutcomes } from "@workspace/db";
+import { db, matchPredictions, matchOutcomes, pool } from "@workspace/db";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { logger } from "./logger";
+import { CURRENT_PREDICTION_MODEL_VERSION } from "./predictionModelVersion";
 
 export async function savePrediction(opts: {
   fixtureId:   number;
@@ -14,6 +15,13 @@ export async function savePrediction(opts: {
   kickoffAt?:  Date | null;
 }): Promise<void> {
   try {
+    // A pre-match row is mutable only before kick-off.  This prevents stale
+    // fixture status, delayed workers, or post-match page views from rewriting
+    // the record later used for evaluation and calibration.
+    if (!opts.isLive && (!opts.kickoffAt || Date.now() >= opts.kickoffAt.getTime())) {
+      logger.warn({ fixtureId: opts.fixtureId, kickoffAt: opts.kickoffAt }, "predictionStore: rejected non-prekickoff prediction");
+      return;
+    }
     await db
       .insert(matchPredictions)
       .values({
@@ -25,6 +33,7 @@ export async function savePrediction(opts: {
         drawProb:    opts.drawProb,
         awayWinProb: opts.awayWinProb,
         isLive:      opts.isLive,
+        modelVersion: CURRENT_PREDICTION_MODEL_VERSION,
         kickoffAt:   opts.kickoffAt ?? null,
         updatedAt:   new Date(),
       })
@@ -34,12 +43,35 @@ export async function savePrediction(opts: {
           homeWinProb: opts.homeWinProb,
           drawProb:    opts.drawProb,
           awayWinProb: opts.awayWinProb,
+          modelVersion: CURRENT_PREDICTION_MODEL_VERSION,
           updatedAt:   new Date(),
         },
       });
   } catch (err) {
     logger.warn({ err, fixtureId: opts.fixtureId }, "predictionStore: failed to save prediction");
   }
+}
+
+type ValidPrematchRow = {
+  fixture_id: number; home_team: string; away_team: string;
+  home_win_prob: number; draw_prob: number; away_win_prob: number; outcome: string;
+  captured_at: Date;
+};
+
+async function getValidSettledPrematchRows(): Promise<ValidPrematchRow[]> {
+  const result = await pool.query<ValidPrematchRow>(
+    `SELECT DISTINCT ON (a.fixture_id)
+       a.fixture_id, a.home_team, a.away_team,
+       a.home_win_prob, a.draw_prob, a.away_win_prob,
+       o.outcome, a.captured_at
+     FROM prediction_audit_records a
+     JOIN match_outcomes o ON o.fixture_id = a.fixture_id
+     WHERE a.phase = 'prematch'
+       AND a.captured_at < a.kickoff_at
+       AND a.actual_outcome IS NOT NULL
+     ORDER BY a.fixture_id, a.captured_at DESC`,
+  );
+  return result.rows;
 }
 
 export async function saveOutcome(opts: {
@@ -102,16 +134,11 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
 
   try {
     // JOIN predictions (pre-match only) with outcomes
-    const rows = await db
-      .select({
-        homeWinProb: matchPredictions.homeWinProb,
-        drawProb:    matchPredictions.drawProb,
-        awayWinProb: matchPredictions.awayWinProb,
-        outcome:     matchOutcomes.outcome,
-      })
-      .from(matchPredictions)
-      .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-      .where(eq(matchPredictions.isLive, false));
+    const validRows = await getValidSettledPrematchRows();
+    const rows = validRows.map((r) => ({
+      homeWinProb: Number(r.home_win_prob), drawProb: Number(r.draw_prob),
+      awayWinProb: Number(r.away_win_prob), outcome: r.outcome,
+    }));
 
     if (rows.length < 10) {
       _calibCache = { factors: EMPTY, fetchedAt: Date.now() };
@@ -203,19 +230,13 @@ export interface AccuracyStats {
 }
 
 export async function getAccuracyStats(): Promise<AccuracyStats> {
-  const rows = await db
-    .select({
-      fixtureId:   matchPredictions.fixtureId,
-      homeTeam:    matchPredictions.homeTeam,
-      awayTeam:    matchPredictions.awayTeam,
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb:    matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      outcome:     matchOutcomes.outcome,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+  const validRows = await getValidSettledPrematchRows();
+  const rows = validRows.map((r) => ({
+    fixtureId: Number(r.fixture_id), homeTeam: r.home_team, awayTeam: r.away_team,
+    homeWinProb: Number(r.home_win_prob), drawProb: Number(r.draw_prob),
+    awayWinProb: Number(r.away_win_prob), outcome: r.outcome,
+    capturedAt: r.captured_at,
+  })).sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
 
   const byOutcome = {
     home: { predicted: 0, actual: 0, correct: 0 },
@@ -307,16 +328,11 @@ function clampUnit(v: number): number {
 }
 
 export async function getCalibrationReport(): Promise<CalibrationReport> {
-  const rows = await db
-    .select({
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb:    matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      outcome:     matchOutcomes.outcome,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+  const validRows = await getValidSettledPrematchRows();
+  const rows = validRows.map((r) => ({
+    homeWinProb: Number(r.home_win_prob), drawProb: Number(r.draw_prob),
+    awayWinProb: Number(r.away_win_prob), outcome: r.outcome,
+  }));
 
   const outcomes = ["home", "draw", "away"] as const;
   type Bucket = { sumPred: number; actual: number; total: number };

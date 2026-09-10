@@ -20,6 +20,12 @@ describe("market intelligence math", () => {
     expect(calculateNoVigProbabilities(2.0, 1, 4.0)).toBeNull();
   });
 
+  it("rejects corrupt or mismatched three-way markets", () => {
+    expect(calculateNoVigProbabilities(1, 75, 100)).toBeNull();
+    expect(calculateNoVigProbabilities(1.02, 1.02, 1.02)).toBeNull();
+    expect(calculateNoVigProbabilities(2, 3.5, 5000)).toBeNull();
+  });
+
   it("measures probability-point movement", () => {
     const movement = calculateProbabilityMovement(
       { home: 40, draw: 30, away: 30 },

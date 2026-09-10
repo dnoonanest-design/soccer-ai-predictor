@@ -11,7 +11,7 @@ export function calculateNoVigProbabilities(
   drawOdds: number,
   awayOdds: number,
 ): ThreeWayProbabilities | null {
-  if (![homeOdds, drawOdds, awayOdds].every((v) => Number.isFinite(v) && v > 1)) {
+  if (![homeOdds, drawOdds, awayOdds].every((v) => Number.isFinite(v) && v > 1.01 && v <= 1000)) {
     return null;
   }
 
@@ -19,7 +19,10 @@ export function calculateNoVigProbabilities(
   const rawDraw = 1 / drawOdds;
   const rawAway = 1 / awayOdds;
   const total = rawHome + rawDraw + rawAway;
-  if (!Number.isFinite(total) || total <= 0) return null;
+  // Reject corrupt/mismatched markets. Normal 1X2 books cluster around 1.0;
+  // this wide band retains exchanges and promotions without accepting feeds
+  // such as 1.00 / 75 / 100.
+  if (!Number.isFinite(total) || total < 0.80 || total > 1.50) return null;
 
   const home = round2((rawHome / total) * 100);
   const draw = round2((rawDraw / total) * 100);
