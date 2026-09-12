@@ -5,9 +5,10 @@
 import { Router } from "express";
 import { logger } from "../lib/logger";
 import { db, predictionSnapshots, matchOutcomes, matchCircumstances, aiLearningMemory } from "@workspace/db";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { statsRateLimit, safeInt, safeFloat, safeString, isSafeUrl } from "../lib/security";
-import { getAllMatches, isLeagueFocused } from "../lib/soccerService";
+import { getAllMatches } from "../lib/soccerService";
+import { isTrackedLeague } from "../lib/leagueConfig";
 import { getMatchStats } from "../lib/statsService";
 import { getEnhancedPrediction } from "../lib/enhancedStatsService";
 import { getCalibrationFactors, applyCalibration } from "../lib/predictionStore";
@@ -172,7 +173,7 @@ router.get("/fixtures/upcoming", async (req, res) => {
       // Apply focus-league filter — same set used by the live dashboard
       // and only override if a specific leagueId is requested
       let list = fixtures.filter((f: any) =>
-        leagueId ? f.league?.id === leagueId : isLeagueFocused(Number(f.league?.id ?? 0))
+        leagueId ? f.league?.id === leagueId : isTrackedLeague(Number(f.league?.id ?? 0))
       );
 
       results[dateStr] = list.map((f: any) => ({
@@ -208,7 +209,7 @@ router.get("/value-centre", statsRateLimit, async (req, res) => {
     const BATCH_SIZE = 6;
     // Only compute value edges for focus leagues — these have the best model accuracy
     const candidateMatches = matches
-      .filter(m => !!m.odds?.home_odds && isLeagueFocused(m.league_id))
+      .filter(m => !!m.odds?.home_odds && isTrackedLeague(m.league_id))
       .slice(0, 25);
 
     async function scoreMatch(match: typeof candidateMatches[0]) {
@@ -222,6 +223,7 @@ router.get("/value-centre", statsRateLimit, async (req, res) => {
         if (!result.home.matches_played || !result.away.matches_played) return null;
         const raw = await getEnhancedPrediction(
           match.id,
+          match.status,
           match.home_team.id, match.away_team.id, match.league_id,
           result.home.goals_per_game, result.home.conceded_per_game,
           result.away.goals_per_game, result.away.conceded_per_game,

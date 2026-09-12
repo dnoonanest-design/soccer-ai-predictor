@@ -1,63 +1,246 @@
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
+import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
+import {
+  isApiFootballProviderError,
+  markApiFootballFailure,
+  markApiFootballSuccess,
+} from "./apiFootballReliability";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
-const SEASON = process.env.FOOTBALL_SEASON ?? "2025";
+const SEASON = process.env.FOOTBALL_SEASON ?? String(new Date().getUTCFullYear());
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
-const CACHE_TTL_MS = 14000;
+// Per-endpoint cache TTLs (ms). The bookmaker cache is intentionally longer
+// than the match cache: market snapshots are stored in 30-minute buckets and
+// there is no value in consuming odds-provider quota on every dashboard poll.
+const CACHE_TTL = {
+  live_fixtures: 30_000,
+  soccer_odds: Math.max(
+    60_000,
+    Number(process.env.ODDS_CACHE_TTL_MS ?? 5 * 60_000),
+  ),
+  today_fixtures: 300_000,
+  fixture_window: 300_000,
+  team_stats: 3_600_000,
+  standings: 3_600_000,
+  h2h: 86_400_000,
+  player_stats: 60_000,
+};
 
-// Serial request queue - one request at a time, 150ms apart
-let requestChain = Promise.resolve();
-function waitForRateLimit(): Promise<void> {
-  const slot = requestChain.then(() => new Promise<void>(r => setTimeout(r, 150)));
-  requestChain = slot;
-  return slot;
-}
+type CacheEntry<T> = { data: T; fetchedAt: number };
 const cache = new Map<string, CacheEntry<unknown>>();
 
-function getCached<T>(key: string): T | null {
+function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
   if (!entry) return null;
-  if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
+  if (Date.now() - entry.fetchedAt > ttl) return null;
   return entry.data;
 }
 
 function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, fetchedAt: Date.now() });
 }
+/**
+ * Resolve the active season for a given league/competition.
+ * Queries API-Football's current season first (most accurate, cached 24h).
+ * Falls back to configured FOOTBALL_SEASON env var if set.
+ * Finally falls back to computing from calendar year (seasons run Sep-Aug).
+ * Results cached for 24 hours per competition ID.
+ */
+export async function resolveSeasonForCompetition(leagueId: number): Promise<number> {
+  const cacheKey = `league_current_season:${leagueId}`;
+  const cached = getCached<number>(cacheKey, 24 * 3600_000);
+  if (cached !== null) return cached;
 
-async function fetchFootball(path: string): Promise<unknown> {
-  if (!API_FOOTBALL_KEY) {
-    logger.warn("API_FOOTBALL_KEY not set");
-    return null;
+  // First: Try to fetch current season from API-Football (most authoritative)
+  try {
+    const leagueData = (await fetchFootball(`/leagues?id=${leagueId}&current=true`)) as Array<{
+      season: number;
+    }> | null;
+
+    if (Array.isArray(leagueData) && leagueData[0]?.season) {
+      const season = leagueData[0].season;
+      setCache(cacheKey, season);
+      logger.debug({ leagueId, season }, "Resolved season from API-Football current");
+      return season;
+    }
+  } catch (err) {
+    // Provider outages/auth failures must not be hidden by a guessed season.
+    if (isApiFootballProviderError(err)) throw err;
+    logger.debug({ err, leagueId }, "Failed to resolve current season from API-Football, trying fallback");
   }
-  const url = `${API_FOOTBALL_BASE}${path}`;
-  await waitForRateLimit();
-  const res = await fetch(url, {
-    headers: { "x-apisports-key": API_FOOTBALL_KEY },
-  });
-  if (!res.ok) {
-    logger.error({ status: res.status, url }, "API-Football request failed");
-    return null;
+
+  // Second: Use configured FOOTBALL_SEASON if explicitly set
+  const configuredSeason = Number(SEASON);
+  if (Number.isInteger(configuredSeason) && configuredSeason > 2000 && configuredSeason.toString() === SEASON) {
+    setCache(cacheKey, configuredSeason);
+    logger.debug({ leagueId, season: configuredSeason }, "Using configured FOOTBALL_SEASON");
+    return configuredSeason;
   }
-  const json = (await res.json()) as { response: unknown };
-  return json.response;
+
+  // Third: Compute from calendar year (seasons run Sep-Aug)
+  const now = new Date();
+  const month = now.getUTCMonth(); // 0=Jan, 11=Dec
+  const year = now.getUTCFullYear();
+  const fallbackSeason = month < 8 ? year - 1 : year;
+  setCache(cacheKey, fallbackSeason);
+  logger.debug({ leagueId, season: fallbackSeason }, "Computed season from calendar year");
+  return fallbackSeason;
 }
 
-async function fetchOdds(path: string): Promise<unknown> {
-  if (!ODDS_API_KEY) {
-    logger.warn("ODDS_API_KEY not set");
-    return null;
+let _liveMatchCount = 0;
+export function hasLiveMatches(): boolean {
+  return _liveMatchCount > 0;
+}
+
+interface ApiFootballEnvelope {
+  get: string;
+  parameters: Record<string, string | number>;
+  errors?: string[] | Record<string, string>;
+  results: number;
+  paging?: { current: number; total: number };
+  response: unknown;
+}
+
+interface ApiFootballDiagnostics {
+  path: string;
+  results: number;
+  errors: string[];
+  rateLimitDaily?: { remaining: number; limit: number };
+  rateLimitMinute?: { remaining: number; limit: number };
+  responseSeconds?: number;
+}
+
+let lastApiFootballDiagnostics: ApiFootballDiagnostics | null = null;
+
+export function getLastApiFootballDiagnostics(): ApiFootballDiagnostics | null {
+  return lastApiFootballDiagnostics;
+}
+
+function normalizeApiErrors(errors: ApiFootballEnvelope["errors"]): string[] {
+  if (Array.isArray(errors)) return errors.map(String).filter(Boolean);
+  if (errors && typeof errors === "object") {
+    return Object.values(errors)
+      .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+      .filter(Boolean);
   }
-  const url = `${ODDS_API_BASE}${path}`;
-  const res = await fetch(url);
+  if (errors) return [String(errors)];
+  return [];
+}
+
+export async function fetchFootball(path: string): Promise<unknown> {
+  if (!API_FOOTBALL_KEY) {
+    throw markApiFootballFailure({
+      path,
+      message: "API_FOOTBALL_KEY not set",
+      kind: "configuration",
+      state: "offline",
+    });
+  }
+
+  const url = `${API_FOOTBALL_BASE}${path}`;
+  const startMs = Date.now();
+  let res: Response;
+
+  try {
+    await waitForRateLimit();
+    res = await fetch(url, {
+      headers: { "x-apisports-key": API_FOOTBALL_KEY },
+    });
+  } catch (err) {
+    if (isApiFootballProviderError(err)) throw err;
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football transport failure: ${err instanceof Error ? err.message : String(err)}`,
+      kind: "transport",
+      state: "degraded",
+    });
+  }
+
+  const responseMs = Date.now() - startMs;
+
   if (!res.ok) {
-    logger.error({ status: res.status, url }, "Odds API request failed");
-    return null;
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football HTTP ${res.status}`,
+      httpStatus: res.status,
+    });
   }
-  return res.json();
+
+  let json: ApiFootballEnvelope;
+  try {
+    json = (await res.json()) as ApiFootballEnvelope;
+  } catch (err) {
+    throw markApiFootballFailure({
+      path,
+      message: `API-Football returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      kind: "malformed_response",
+      state: "degraded",
+    });
+  }
+
+  if (!json || typeof json !== "object" || !("response" in json)) {
+    throw markApiFootballFailure({
+      path,
+      message: "API-Football response envelope is missing the response field",
+      kind: "malformed_response",
+      state: "degraded",
+    });
+  }
+
+  const apiErrors = normalizeApiErrors(json.errors);
+
+  // Extract diagnostics from response headers and envelope
+  const diagnostics: ApiFootballDiagnostics = {
+    path,
+    results: json.results ?? 0,
+    errors: apiErrors,
+    responseSeconds: Math.round(responseMs / 1000),
+  };
+
+  // Parse rate limit headers (API-Football v3 official headers, case-insensitive)
+  // Daily: x-ratelimit-requests-limit / x-ratelimit-requests-remaining
+  const rateLimitDaily = res.headers.get("x-ratelimit-requests-limit");
+  const rateLimitDailyRemaining = res.headers.get("x-ratelimit-requests-remaining");
+  if (rateLimitDaily && rateLimitDailyRemaining) {
+    diagnostics.rateLimitDaily = {
+      limit: Number(rateLimitDaily),
+      remaining: Number(rateLimitDailyRemaining),
+    };
+  }
+
+  // Per-minute: x-ratelimit-limit / x-ratelimit-remaining
+  const rateLimitMinute = res.headers.get("x-ratelimit-limit");
+  const rateLimitMinuteRemaining = res.headers.get("x-ratelimit-remaining");
+  if (rateLimitMinute && rateLimitMinuteRemaining) {
+    diagnostics.rateLimitMinute = {
+      limit: Number(rateLimitMinute),
+      remaining: Number(rateLimitMinuteRemaining),
+    };
+  }
+
+  lastApiFootballDiagnostics = diagnostics;
+
+  // API-Football commonly reports subscription/auth failures inside a HTTP 200
+  // envelope. Treat any envelope error as a provider failure, never as zero data.
+  if (apiErrors.length > 0) {
+    const message = apiErrors.join("; ");
+    throw markApiFootballFailure({
+      path,
+      message,
+    });
+  }
+
+  markApiFootballSuccess(path);
+
+  if (json.results === 0) {
+    logger.debug({ path }, "API-Football returned a valid zero-result response");
+  }
+
+  return json.response;
 }
 
 export interface Team {
@@ -133,10 +316,31 @@ type ApiFootballFixture = {
   };
 };
 
-function normaliseStatus(short: string): string {
-  if (["1H", "2H", "ET", "BT", "P", "LIVE"].includes(short)) return "live";
-  if (["HT"].includes(short)) return "live";
-  if (["FT", "AET", "PEN", "AWD", "WO"].includes(short)) return "finished";
+export type OddsApiEvent = {
+  id: string;
+  sport_key: string;
+  home_team: string;
+  away_team: string;
+  bookmakers: Array<{
+    key: string;
+    title?: string;
+    markets: Array<{
+      key: string;
+      outcomes: Array<{ name: string; price: number }>;
+    }>;
+  }>;
+};
+
+export function normaliseStatus(short: string): string {
+  if (["1H", "2H", "ET", "BT", "P", "LIVE", "HT"].includes(short)) {
+    return "live";
+  }
+  if (["FT", "AET", "PEN", "AWD", "WO"].includes(short)) {
+    return "finished";
+  }
+  if (["PST", "CANC", "ABD", "SUSP", "INT"].includes(short)) {
+    return "cancelled";
+  }
   return "upcoming";
 }
 
@@ -145,24 +349,33 @@ function oddsToProb(decimal: number): number {
   return Math.round((1 / decimal) * 100 * 10) / 10;
 }
 
-type OddsApiEvent = {
-  id: string;
-  sport_key: string;
-  home_team: string;
-  away_team: string;
-  bookmakers: Array<{
-    key: string;
-    markets: Array<{
-      key: string;
-      outcomes: Array<{ name: string; price: number }>;
-    }>;
-  }>;
-};
+function normalizeName(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+}
+
+function stripClubSuffix(value: string) {
+  return value.replace(/(?:footballclub|clubdefutbol|calcio|afc|fc|cf)$/g, "");
+}
+
+function namesMatch(a: string, b: string) {
+  if (!a || !b) return false;
+  const left = stripClubSuffix(a);
+  const right = stripClubSuffix(b);
+  if (left === right) return true;
+
+  // Deliberately conservative. Missing an odds match is safer than attaching
+  // another club's prices to a fixture (for example City vs United).
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length > right.length ? left : right;
+  if (shorter.length < 7) return false;
+  return longer.includes(shorter) && shorter.length / longer.length >= 0.65;
+}
 
 function extractOdds(
   homeTeam: string,
   awayTeam: string,
-  oddsEvents: OddsApiEvent[]
+  oddsEvents: OddsApiEvent[],
+  expectedSportKey: string | null,
 ): Odds {
   const nullOdds: Odds = {
     home_win: null,
@@ -173,44 +386,42 @@ function extractOdds(
     away_odds: null,
   };
 
-  const normalize = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "")
-      .trim();
-  const normHome = normalize(homeTeam);
-  const normAway = normalize(awayTeam);
+  if (!expectedSportKey) return nullOdds;
 
-  const event = oddsEvents.find((e) => {
-    const eHome = normalize(e.home_team);
-    const eAway = normalize(e.away_team);
+  const normHome = normalizeName(homeTeam);
+  const normAway = normalizeName(awayTeam);
+  const event = oddsEvents.find((candidate) => {
+    if (candidate.sport_key !== expectedSportKey) return false;
     return (
-      (eHome.includes(normHome.slice(0, 5)) ||
-        normHome.includes(eHome.slice(0, 5))) &&
-      (eAway.includes(normAway.slice(0, 5)) ||
-        normAway.includes(eAway.slice(0, 5)))
+      namesMatch(normHome, normalizeName(candidate.home_team)) &&
+      namesMatch(normAway, normalizeName(candidate.away_team))
     );
   });
-
   if (!event) return nullOdds;
 
   const bookmaker =
-    event.bookmakers.find((b) => b.key === "pinnacle") ??
-    event.bookmakers.find((b) => b.key === "betfair") ??
+    event.bookmakers.find((book) => book.key === "pinnacle") ??
+    event.bookmakers.find((book) => book.key === "betfair_ex_eu") ??
+    event.bookmakers.find((book) => book.key === "betfair") ??
     event.bookmakers[0];
-
   if (!bookmaker) return nullOdds;
 
-  const h2h = bookmaker.markets.find((m) => m.key === "h2h");
+  const h2h = bookmaker.markets.find((market) => market.key === "h2h");
   if (!h2h) return nullOdds;
 
-  const homeOc = h2h.outcomes.find((o) => normalize(o.name) === normHome || o.name === event.home_team);
-  const awayOc = h2h.outcomes.find((o) => normalize(o.name) === normAway || o.name === event.away_team);
-  const drawOc = h2h.outcomes.find((o) => o.name.toLowerCase() === "draw");
+  const homeOutcome = h2h.outcomes.find((outcome) =>
+    namesMatch(normalizeName(outcome.name), normHome),
+  );
+  const awayOutcome = h2h.outcomes.find((outcome) =>
+    namesMatch(normalizeName(outcome.name), normAway),
+  );
+  const drawOutcome = h2h.outcomes.find(
+    (outcome) => outcome.name.toLowerCase() === "draw",
+  );
 
-  const homeDecimal = homeOc?.price ?? null;
-  const awayDecimal = awayOc?.price ?? null;
-  const drawDecimal = drawOc?.price ?? null;
+  const homeDecimal = homeOutcome?.price ?? null;
+  const awayDecimal = awayOutcome?.price ?? null;
+  const drawDecimal = drawOutcome?.price ?? null;
 
   let homeProb = homeDecimal ? oddsToProb(homeDecimal) : null;
   let drawProb = drawDecimal ? oddsToProb(drawDecimal) : null;
@@ -235,111 +446,233 @@ function extractOdds(
   };
 }
 
+function requireFixtureArray(data: unknown, path: string): ApiFootballFixture[] {
+  if (Array.isArray(data)) return data as ApiFootballFixture[];
+  throw markApiFootballFailure({
+    path,
+    message: "API-Football returned an unexpected fixture payload",
+    kind: "malformed_response",
+    state: "degraded",
+  });
+}
+
 async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
-  const cached = getCached<ApiFootballFixture[]>("today_fixtures");
+  const cached = getCached<ApiFootballFixture[]>(
+    "today_fixtures",
+    CACHE_TTL.today_fixtures,
+  );
   if (cached) return cached;
 
   const today = new Date().toISOString().split("T")[0];
-  const data = (await fetchFootball(
-    `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`
-  )) as ApiFootballFixture[] | null;
+  const primaryPath = `/fixtures?date=${today}&timezone=UTC`;
+  let data = requireFixtureArray(await fetchFootball(primaryPath), primaryPath);
 
-  const fixtures = data ?? [];
+  // Some provider datasets may require a season-qualified request. Use it only
+  // as a fallback so a stale or differently-labelled season cannot hide real
+  // fixtures that exist on today's calendar date. Provider errors are allowed
+  // to propagate; they must never be converted into a legitimate empty list.
+  if (data.length === 0) {
+    const fallbackPath = `/fixtures?date=${today}&season=${SEASON}&timezone=UTC`;
+    const fallbackData = requireFixtureArray(
+      await fetchFootball(fallbackPath),
+      fallbackPath,
+    );
+    if (fallbackData.length > 0) data = fallbackData;
+  }
+
+  const fixtures = data.filter((fixture) =>
+    isTrackedLeague(fixture.league.id),
+  );
   setCache("today_fixtures", fixtures);
   return fixtures;
 }
 
-async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
-  const cached = getCached<ApiFootballFixture[]>("live_fixtures");
+async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
+  const safeDays = Math.max(1, Math.min(14, Math.floor(days)));
+  const cacheKey = `fixture_window:${safeDays}`;
+  const cached = getCached<ApiFootballFixture[]>(cacheKey, CACHE_TTL.fixture_window);
   if (cached) return cached;
 
-  const data = (await fetchFootball(
-    `/fixtures?live=all`
-  )) as ApiFootballFixture[] | null;
+  const start = new Date();
+  const fixtures = new Map<number, ApiFootballFixture>();
+  let firstError: unknown = null;
+  let successfulDays = 0;
+  for (let offset = 0; offset < safeDays; offset++) {
+    const date = new Date(Date.UTC(
+      start.getUTCFullYear(),
+      start.getUTCMonth(),
+      start.getUTCDate() + offset,
+    )).toISOString().slice(0, 10);
+    const path = `/fixtures?date=${date}&timezone=UTC`;
+    try {
+      const rows = requireFixtureArray(await fetchFootball(path), path);
+      successfulDays++;
+      for (const fixture of rows) {
+        if (isTrackedLeague(fixture.league.id)) fixtures.set(fixture.fixture.id, fixture);
+      }
+    } catch (err) {
+      firstError ??= err;
+      logger.warn({ err, date }, "fixture-window day lookup failed");
+    }
+  }
 
-  const fixtures = data ?? [];
+  if (successfulDays === 0 && firstError) throw firstError;
+
+  const result = Array.from(fixtures.values());
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
+  const cached = getCached<ApiFootballFixture[]>(
+    "live_fixtures",
+    CACHE_TTL.live_fixtures,
+  );
+  if (cached) return cached;
+
+  const path = "/fixtures?live=all";
+  const data = requireFixtureArray(await fetchFootball(path), path);
+  const fixtures = data.filter((fixture) =>
+    isTrackedLeague(fixture.league.id),
+  );
+  _liveMatchCount = fixtures.length;
   setCache("live_fixtures", fixtures);
   return fixtures;
 }
 
-async function getSoccerOdds(): Promise<OddsApiEvent[]> {
-  const cached = getCached<OddsApiEvent[]>("soccer_odds");
+async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
+  const cacheKey = `soccer_odds:${sportKey}`;
+  const cached = getCached<OddsApiEvent[]>(cacheKey, CACHE_TTL.soccer_odds);
   if (cached) return cached;
 
-  const data = (await fetchOdds(
-    `/sports/soccer/odds?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`
-  )) as OddsApiEvent[] | null;
+  if (!ODDS_API_KEY) {
+    logger.warn("ODDS_API_KEY not set");
+    setCache(cacheKey, [] as OddsApiEvent[]);
+    return [];
+  }
 
-  const events = Array.isArray(data) ? data : [];
-  setCache("soccer_odds", events);
+  const params = new URLSearchParams({
+    apiKey: ODDS_API_KEY,
+    regions: "eu",
+    markets: "h2h",
+    oddsFormat: "decimal",
+    dateFormat: "iso",
+  });
+  const url = `${ODDS_API_BASE}/sports/${encodeURIComponent(sportKey)}/odds?${params}`;
+
+  await waitForRateLimit();
+  const res = await fetch(url);
+  if (!res.ok) {
+    // Never log the URL because it contains the API key in the query string.
+    logger.error(
+      { status: res.status, sportKey },
+      "Odds API request failed",
+    );
+    setCache(cacheKey, [] as OddsApiEvent[]);
+    return [];
+  }
+
+  const data = (await res.json()) as unknown;
+  const events = Array.isArray(data) ? (data as OddsApiEvent[]) : [];
+  setCache(cacheKey, events);
   return events;
 }
 
-function fixtureToMatch(
-  f: ApiFootballFixture,
-  oddsEvents: OddsApiEvent[]
-): Match {
-  const status = normaliseStatus(f.fixture.status.short);
-  return {
-    id: f.fixture.id,
-    league_id: f.league.id,
-    league_name: f.league.name,
-    league_logo: f.league.logo || null,
-    country: f.league.country,
-    home_team: {
-      id: f.teams.home.id,
-      name: f.teams.home.name,
-      logo: f.teams.home.logo || null,
-    },
-    away_team: {
-      id: f.teams.away.id,
-      name: f.teams.away.name,
-      logo: f.teams.away.logo || null,
-    },
-    status,
-    status_detail: f.fixture.status.short,
-    minute: f.fixture.status.elapsed ?? null,
-    score: {
-      home: f.goals.home,
-      away: f.goals.away,
-    },
-    score_ht: (f.score?.halftime?.home != null && f.score?.halftime?.away != null)
-      ? { home: f.score.halftime.home, away: f.score.halftime.away }
-      : null,
-    kickoff: f.fixture.date,
-    odds: extractOdds(f.teams.home.name, f.teams.away.name, oddsEvents),
-  };
+async function getSoccerOdds(
+  fixtures: ApiFootballFixture[],
+): Promise<OddsApiEvent[]> {
+  const sportKeys = Array.from(
+    new Set(
+      fixtures
+        .filter(
+          (fixture) => {
+            const status = normaliseStatus(fixture.fixture.status.short);
+            return status === "live" || status === "upcoming";
+          },
+        )
+        .map((fixture) => getOddsSportKeyForLeague(fixture.league.id))
+        .filter((key): key is string => Boolean(key)),
+    ),
+  );
+
+  if (!sportKeys.length) return [];
+
+  const events = new Map<string, OddsApiEvent>();
+  // Sequential calls respect the shared limiter and avoid provider bursts.
+  for (const sportKey of sportKeys) {
+    const sportEvents = await fetchOddsForSport(sportKey);
+    for (const event of sportEvents) {
+      events.set(`${event.sport_key}:${event.id}`, event);
+    }
+  }
+
+  return Array.from(events.values());
 }
 
 export async function getAllMatches(
   leagueId?: number | null,
-  status?: string | null
+  status?: string | null,
 ): Promise<Match[]> {
-  const [todayFixtures, liveFixtures, oddsEvents] = await Promise.all([
-    getTodayFixtures(),
-    getLiveFixtures(),
-    getSoccerOdds(),
-  ]);
+  // Keep provider requests sequential to preserve the shared throttle.
+  // Upcoming/all views use the quota optimiser's weekly schedule cache. Live
+  // and finished views remain today-only so their polling stays lightweight.
+  // Refresh the active-fixture bundle first. Besides returning currently live
+  // matches, the quota layer uses this request to replace stale schedule rows
+  // (including matches that have just reached FT). Reading the date/window
+  // cache first can otherwise render an old NS snapshot for the whole request.
+  const liveFixtures = await getLiveFixtures();
+  const todayFixtures = status === "live" || status === "finished"
+    ? await getTodayFixtures()
+    : await getFixtureWindow(8);
 
-  const liveIds = new Set(liveFixtures.map((f) => f.fixture.id));
-
+  // The live endpoint is authoritative for live status. The daily fixture
+  // response is cached separately and can retain an old HT/1H/2H snapshot
+  // after a match resumes or finishes. Never let that stale snapshot create a
+  // false live match after it has disappeared from /fixtures?live=all.
+  const liveIds = new Set(
+    liveFixtures.map((fixture) => fixture.fixture.id),
+  );
   const combined = new Map<number, ApiFootballFixture>();
-  for (const f of todayFixtures) combined.set(f.fixture.id, f);
-  for (const f of liveFixtures) combined.set(f.fixture.id, f);
+  for (const fixture of todayFixtures) {
+    const fixtureId = fixture.fixture.id;
+    const dailyStatus = normaliseStatus(fixture.fixture.status.short);
+    if (dailyStatus === "live" && !liveIds.has(fixtureId)) {
+      logger.warn(
+        {
+          fixtureId,
+          cachedStatus: fixture.fixture.status.short,
+          cachedMinute: fixture.fixture.status.elapsed,
+        },
+        "suppressing stale live fixture from daily cache",
+      );
+      continue;
+    }
+    combined.set(fixtureId, fixture);
+  }
+  for (const fixture of liveFixtures) combined.set(fixture.fixture.id, fixture);
+  const combinedFixtures = Array.from(combined.values());
 
-  let matches = Array.from(combined.values()).map((f) =>
-    fixtureToMatch(f, oddsEvents)
+  const hasActiveMatches = combinedFixtures.some((fixture) => {
+    const fixtureStatus = normaliseStatus(fixture.fixture.status.short);
+    return fixtureStatus === "live" || fixtureStatus === "upcoming";
+  });
+  const oddsEvents = hasActiveMatches
+    ? await getSoccerOdds(combinedFixtures)
+    : [];
+
+  let matches = combinedFixtures.map((fixture) =>
+    fixtureToMatch(fixture, oddsEvents),
   );
 
   if (leagueId != null) {
-    matches = matches.filter((m) => m.league_id === leagueId);
+    matches = matches.filter((match) => match.league_id === leagueId);
   }
 
   if (status && status !== "all") {
     if (status === "live") {
-      matches = matches.filter((m) => liveIds.has(m.id) || m.status === "live");
+      matches = matches.filter((match) => liveIds.has(match.id));
     } else {
-      matches = matches.filter((m) => m.status === status);
+      matches = matches.filter((match) => match.status === status);
     }
   }
 
@@ -348,12 +681,113 @@ export async function getAllMatches(
     return (order[a.status] ?? 3) - (order[b.status] ?? 3);
   });
 
+  // Passive market capture reuses the odds response above. The intelligence
+  // layer makes no additional odds-provider call and cannot alter the model.
+  if (
+    process.env.MARKET_INTELLIGENCE_ENABLED !== "false" &&
+    oddsEvents.length > 0 &&
+    matches.some((match) => match.status === "upcoming")
+  ) {
+    void import("./marketIntelligenceService")
+      .then(({ captureMarketSnapshots }) =>
+        captureMarketSnapshots(matches, oddsEvents),
+      )
+      .catch((err) =>
+        logger.warn({ err }, "market intelligence capture failed"),
+      );
+  }
+
   return matches;
 }
 
+/** Resolve exact fixtures for catch-up jobs without re-fetching whole days. */
+export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
+  const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
+  const matches: Match[] = [];
+
+  // API-Football accepts hyphen-separated fixture IDs; conservative batches
+  // keep URLs small and are also understood by the quota optimisation cache.
+  for (let offset = 0; offset < uniqueIds.length; offset += 20) {
+    const group = uniqueIds.slice(offset, offset + 20);
+    const path = `/fixtures?ids=${group.join("-")}`;
+    const fixtures = requireFixtureArray(await fetchFootball(path), path);
+    for (const fixture of fixtures) {
+      if (isTrackedLeague(fixture.league.id)) {
+        matches.push(fixtureToMatch(fixture, []));
+      }
+    }
+  }
+
+  return matches;
+}
+
+function fixtureToMatch(
+  fixture: ApiFootballFixture,
+  oddsEvents: OddsApiEvent[],
+): Match {
+  const status = normaliseStatus(fixture.fixture.status.short);
+  const expectedSportKey = getOddsSportKeyForLeague(fixture.league.id);
+
+  return {
+    id: fixture.fixture.id,
+    league_id: fixture.league.id,
+    league_name: fixture.league.name,
+    league_logo: fixture.league.logo || null,
+    country: fixture.league.country,
+    home_team: {
+      id: fixture.teams.home.id,
+      name: fixture.teams.home.name,
+      logo: fixture.teams.home.logo || null,
+    },
+    away_team: {
+      id: fixture.teams.away.id,
+      name: fixture.teams.away.name,
+      logo: fixture.teams.away.logo || null,
+    },
+    status,
+    status_detail: fixture.fixture.status.short,
+    minute: fixture.fixture.status.elapsed ?? null,
+    score: { home: fixture.goals.home, away: fixture.goals.away },
+    score_ht:
+      fixture.score?.halftime?.home != null &&
+      fixture.score?.halftime?.away != null
+        ? {
+            home: fixture.score.halftime.home,
+            away: fixture.score.halftime.away,
+          }
+        : null,
+    kickoff: fixture.fixture.date,
+    odds: extractOdds(
+      fixture.teams.home.name,
+      fixture.teams.away.name,
+      oddsEvents,
+      expectedSportKey,
+    ),
+  };
+}
+
 export async function getMatchById(id: number): Promise<Match | null> {
-  const matches = await getAllMatches();
-  return matches.find((m) => m.id === id) ?? null;
+  if (!Number.isInteger(id) || id <= 0) return null;
+
+  const cacheKey = `fixture_by_id:${id}`;
+  const cached = getCached<Match>(cacheKey, CACHE_TTL.live_fixtures);
+  if (cached) return cached;
+
+  // A match-detail request must not depend on the fixture being present in
+  // today's cached list. Direct fixture lookup keeps bookmarked/live detail
+  // pages working across UTC date boundaries and after a schedule refresh.
+  const response = await fetchFootball(`/fixtures?id=${id}`);
+  const fixtures = Array.isArray(response) ? response as ApiFootballFixture[] : [];
+  const fixture = fixtures.find((item) => item.fixture?.id === id);
+  if (!fixture) return null;
+
+  const status = normaliseStatus(fixture.fixture.status.short);
+  const oddsEvents = status === "live" || status === "upcoming"
+    ? await getSoccerOdds([fixture])
+    : [];
+  const match = fixtureToMatch(fixture, oddsEvents);
+  setCache(cacheKey, match);
+  return match;
 }
 
 export async function getLeagues(): Promise<League[]> {
@@ -363,16 +797,16 @@ export async function getLeagues(): Promise<League[]> {
     { name: string; logo: string | null; country: string; matches: Match[] }
   >();
 
-  for (const m of matches) {
-    if (!leagueMap.has(m.league_id)) {
-      leagueMap.set(m.league_id, {
-        name: m.league_name,
-        logo: m.league_logo,
-        country: m.country,
+  for (const match of matches) {
+    if (!leagueMap.has(match.league_id)) {
+      leagueMap.set(match.league_id, {
+        name: match.league_name,
+        logo: match.league_logo,
+        country: match.country,
         matches: [],
       });
     }
-    leagueMap.get(m.league_id)!.matches.push(m);
+    leagueMap.get(match.league_id)!.matches.push(match);
   }
 
   return Array.from(leagueMap.entries()).map(([id, data]) => ({
@@ -381,16 +815,16 @@ export async function getLeagues(): Promise<League[]> {
     logo: data.logo,
     country: data.country,
     match_count: data.matches.length,
-    live_count: data.matches.filter((m) => m.status === "live").length,
+    live_count: data.matches.filter((match) => match.status === "live").length,
   }));
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
   const matches = await getAllMatches();
-  const live = matches.filter((m) => m.status === "live").length;
-  const upcoming = matches.filter((m) => m.status === "upcoming").length;
-  const finished = matches.filter((m) => m.status === "finished").length;
-  const leagueIds = new Set(matches.map((m) => m.league_id));
+  const live = matches.filter((match) => match.status === "live").length;
+  const upcoming = matches.filter((match) => match.status === "upcoming").length;
+  const finished = matches.filter((match) => match.status === "finished").length;
+  const leagueIds = new Set(matches.map((match) => match.league_id));
 
   return {
     live_count: live,

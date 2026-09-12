@@ -134,11 +134,18 @@ describe("poissonProbs", () => {
     // DC rho < 0 increases P(0-0) and P(1-1), boosting draw probability
     const withDC = poissonProbs(1.3, 1.0);
     // Raw Poisson (rho=0) baseline
+    let rawHome = 0;
     let rawDraw = 0;
-    for (let g = 0; g <= MAX_GOALS; g++) {
-      rawDraw += poisson(1.3, g) * poisson(1.0, g); // dcTau=1 when rho=0
+    let rawAway = 0;
+    for (let h = 0; h <= MAX_GOALS; h++) {
+      for (let a = 0; a <= MAX_GOALS; a++) {
+        const probability = poisson(1.3, h) * poisson(1.0, a);
+        if (h > a) rawHome += probability;
+        else if (h === a) rawDraw += probability;
+        else rawAway += probability;
+      }
     }
-    rawDraw = (rawDraw / (rawDraw + 0.01)) * 100; // rough normalised
+    rawDraw = (rawDraw / (rawHome + rawDraw + rawAway)) * 100;
     // DC draw should be >= raw (rho correction raises low-score draws)
     expect(withDC.draw).toBeGreaterThanOrEqual(rawDraw * 0.95);
   });

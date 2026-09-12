@@ -85,6 +85,8 @@ export interface LearnedFactorWeights {
   leagueHomeAdvOverride:  Record<number, number>;
   /** Per-league xG normalisation overrides (leagueId → { home, away }) */
   leagueXgNormOverride:   Record<number, { home: number; away: number }>;
+  /** Outcome priors learned from the training partition only. */
+  globalOutcomePriors?:   { home: number; draw: number; away: number };
   /** When this set was learned */
   learnedAt:              string;
   /** Number of settled matches this was trained on */
@@ -277,7 +279,8 @@ interface TrainingRow {
 
 async function loadTrainingRows(limit = 2000): Promise<TrainingRow[]> {
   const rows = await db.execute(sql`
-    SELECT
+    SELECT * FROM (
+    SELECT DISTINCT ON (ps.fixture_id)
       ps.fixture_id,
       ps.league_id,
       ps.home_win_prob,
@@ -293,21 +296,26 @@ async function loadTrainingRows(limit = 2000): Promise<TrainingRow[]> {
       mo.outcome,
       mo.score_home,
       mo.score_away,
-      mc.home_form_score,
-      mc.away_form_score,
-      mc.home_red_cards,
-      mc.away_red_cards,
-      mc.home_missing_players,
-      mc.away_missing_players,
-      mc.home_star_player_rating,
-      mc.away_star_player_rating,
-      mc.circumstance_score_home,
-      mc.circumstance_score_away
+      NULL::real AS home_form_score,
+      NULL::real AS away_form_score,
+      NULL::integer AS home_red_cards,
+      NULL::integer AS away_red_cards,
+      NULL::integer AS home_missing_players,
+      NULL::integer AS away_missing_players,
+      NULL::real AS home_star_player_rating,
+      NULL::real AS away_star_player_rating,
+      NULL::real AS circumstance_score_home,
+      NULL::real AS circumstance_score_away
     FROM prediction_snapshots ps
     JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
-    LEFT JOIN match_circumstances mc ON mc.fixture_id = ps.fixture_id
-    WHERE ps.status NOT IN ('live')
-    ORDER BY ps.created_at DESC
+    JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
+    WHERE ps.status = 'upcoming'
+      AND ps.minute IS NULL
+      AND mp.kickoff_at IS NOT NULL
+      AND ps.created_at < mp.kickoff_at
+    ORDER BY ps.fixture_id, ps.created_at DESC
+    ) safe_rows
+    ORDER BY created_at ASC
     LIMIT ${limit}
   `) as any;
 
@@ -385,11 +393,24 @@ export async function learnFeatureWeights(): Promise<{
   }
 
   const now = new Date();
+  const splitIndex = Math.max(1, Math.floor(rows.length * 0.8));
+  const trainingRows = rows.slice(0, splitIndex);
+  const holdoutRows = rows.slice(splitIndex);
 
-  // ── Step 1: Compute before-Brier on existing predictions ──────────────────
+  if (holdoutRows.length < 10) {
+    return {
+      weights: getDefaultWeights(),
+      improved: false,
+      beforeBrier: 0,
+      afterBrier: 0,
+      sampleSize: rows.length,
+    };
+  }
+
+  // ── Step 1: Compute before-Brier on the newest chronological holdout ──────
   let beforeBrier = 0;
   let totalWeight = 0;
-  for (const r of rows) {
+  for (const r of holdoutRows) {
     const w = temporalWeight(r.createdAt, now);
     const { h, d, a } = normalise3(r.homeWinProb, r.drawProb, r.awayWinProb);
     beforeBrier += w * (
@@ -403,7 +424,7 @@ export async function learnFeatureWeights(): Promise<{
 
   // ── Step 2: Learn per-league outcome priors ────────────────────────────────
   const leaguePriors: Record<number, { home: number; draw: number; away: number; n: number; w: number }> = {};
-  for (const r of rows) {
+  for (const r of trainingRows) {
     const lid = r.leagueId ?? 0;
     if (!leaguePriors[lid]) leaguePriors[lid] = { home: 0, draw: 0, away: 0, n: 0, w: 0 };
     const w = temporalWeight(r.createdAt, now);
@@ -426,7 +447,7 @@ export async function learnFeatureWeights(): Promise<{
 
   // ── Step 3: Learn per-league xG averages from actual scores ───────────────
   const leagueXg: Record<number, { homeGoals: number; awayGoals: number; n: number; w: number }> = {};
-  for (const r of rows) {
+  for (const r of trainingRows) {
     const lid = r.leagueId ?? 0;
     if (!leagueXg[lid]) leagueXg[lid] = { homeGoals: 0, awayGoals: 0, n: 0, w: 0 };
     const w = temporalWeight(r.createdAt, now);
@@ -458,7 +479,7 @@ export async function learnFeatureWeights(): Promise<{
   const injurySamples: Parameters<typeof learnFactorScale>[0] = [];
   const starSamples: Parameters<typeof learnFactorScale>[0] = [];
 
-  for (const r of rows) {
+  for (const r of trainingRows) {
     const w = temporalWeight(r.createdAt, now);
     const label = r.outcome === "home" ? 1 : 0;
     const finalProb = safeProb(r.homeWinProb);
@@ -494,7 +515,7 @@ export async function learnFeatureWeights(): Promise<{
   // If draws are being under/over-predicted across the dataset, adjust the
   // prior nudge weight accordingly.
   let drawPredicted = 0, drawActual = 0, totalW2 = 0;
-  for (const r of rows) {
+  for (const r of trainingRows) {
     const w = temporalWeight(r.createdAt, now);
     drawPredicted += w * safeProb(r.drawProb);
     drawActual    += w * (r.outcome === "draw" ? 1 : 0);
@@ -509,10 +530,10 @@ export async function learnFeatureWeights(): Promise<{
   let afterBrier = 0;
   let totalWeight2 = 0;
   const globalDrawPrior = totalW2 > 0 ? drawActual / totalW2 : 0.27;
-  const globalHomePrior = rows.reduce((s, r) => s + temporalWeight(r.createdAt, now) * (r.outcome === "home" ? 1 : 0), 0) / Math.max(1, totalW2);
+  const globalHomePrior = trainingRows.reduce((s, r) => s + temporalWeight(r.createdAt, now) * (r.outcome === "home" ? 1 : 0), 0) / Math.max(1, totalW2);
   const globalAwayPrior = 1 - globalDrawPrior - globalHomePrior;
 
-  for (const r of rows) {
+  for (const r of holdoutRows) {
     const w = temporalWeight(r.createdAt, now);
     const { h, d, a } = normalise3(r.homeWinProb, r.drawProb, r.awayWinProb);
     const hN = (1 - drawNudgeWeight) * h + drawNudgeWeight * globalHomePrior;
@@ -539,6 +560,11 @@ export async function learnFeatureWeights(): Promise<{
     drawNudgeWeight:        Math.round(drawNudgeWeight        * 1000) / 1000,
     leagueHomeAdvOverride,
     leagueXgNormOverride,
+    globalOutcomePriors: {
+      home: globalHomePrior,
+      draw: globalDrawPrior,
+      away: globalAwayPrior,
+    },
     learnedAt:    new Date().toISOString(),
     sampleSize:   rows.length,
     holdoutBrierScore: Math.round(afterBrier * 10000) / 10000,
@@ -568,7 +594,7 @@ function getDefaultWeights(): LearnedFactorWeights {
     leagueXgNormOverride:   {},
     learnedAt:    new Date(0).toISOString(),
     sampleSize:   0,
-    holdoutBrierScore: 0.33,
+    holdoutBrierScore: 0.67,
     version:      "default-v1",
   };
 }
@@ -912,7 +938,7 @@ export async function learnCircumstanceResiduals(): Promise<{
  * Unlike the previous system which just stored improvement signals, this
  * function actually resolves them by:
  *   - "low_pick_accuracy"      → triggers full weight relearning
- *   - "draw_underestimation"   → bumps draw nudge weight up by 0.02
+ *   - "draw_underestimation"   → retrains and promotes only after holdout improvement
  *   - "insufficient_training_data" → marks resolved once threshold is met
  *   - "league_calibration"     → re-learns league-specific priors
  */
@@ -928,8 +954,11 @@ export async function resolveImprovementQueue(): Promise<{
 
   const actions: string[] = [];
   let resolved = 0;
+  const attemptedIssueTypes = new Set<string>();
 
   for (const item of openItems as any[]) {
+    if (attemptedIssueTypes.has(item.issueType)) continue;
+    attemptedIssueTypes.add(item.issueType);
     try {
       let action = "";
 
@@ -942,27 +971,35 @@ export async function resolveImprovementQueue(): Promise<{
             await persistLearnedWeights(result.weights, result.beforeBrier);
           } else {
             action = `Retraining attempted but did not improve Brier (${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)}, n=${result.sampleSize}). Queued for review.`;
+            actions.push(action);
+            continue;
           }
           break;
         }
 
         case "draw_underestimation": {
-          // Bump draw nudge weight
-          const current = await getLearnedWeights();
-          const newWeight = Math.min(0.20, current.drawNudgeWeight + 0.02);
-          const updated = { ...current, drawNudgeWeight: newWeight };
-          await persistLearnedWeights(updated, current.holdoutBrierScore);
-          action = `Increased draw nudge weight from ${current.drawNudgeWeight} to ${newWeight}`;
+          const result = await learnFeatureWeights();
+          if (!result.improved) {
+            action = `Draw recalibration rejected by chronological holdout (${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)}).`;
+            actions.push(action);
+            continue;
+          }
+          await persistLearnedWeights(result.weights, result.beforeBrier);
+          action = `Validated draw recalibration (${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)}).`;
           break;
         }
 
         case "insufficient_training_data": {
           // Check if we now have enough data
           const countResult = await db.execute(sql`
-            SELECT COUNT(*)::int AS n
+            SELECT COUNT(DISTINCT ps.fixture_id)::int AS n
             FROM prediction_snapshots ps
             JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
-            WHERE ps.status NOT IN ('live')
+            JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
+            WHERE ps.status = 'upcoming'
+              AND ps.minute IS NULL
+              AND mp.kickoff_at IS NOT NULL
+              AND ps.created_at < mp.kickoff_at
           `) as any;
           const n = Number((countResult.rows ?? countResult)[0]?.n ?? 0);
           if (n >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
@@ -982,16 +1019,21 @@ export async function resolveImprovementQueue(): Promise<{
         }
 
         default:
-          action = `Acknowledged: ${item.description}`;
+          actions.push(`No automatic, validated correction exists for ${item.issueType}; kept open for review.`);
+          continue;
       }
 
       // Mark as resolved
+      const matchingOpenItems = openItems.filter((openItem: any) => openItem.issueType === item.issueType);
       await db.update(selfImprovementQueue)
         .set({ status: "resolved", resolvedAt: new Date() })
-        .where(eq(selfImprovementQueue.id, item.id));
+        .where(and(
+          eq(selfImprovementQueue.issueType, item.issueType),
+          eq(selfImprovementQueue.status, "open"),
+        ));
 
       actions.push(action);
-      resolved++;
+      resolved += matchingOpenItems.length;
 
       // Log in learning memory
       await db.insert(aiLearningMemory).values({
@@ -1041,6 +1083,26 @@ async function persistLearnedWeights(weights: LearnedFactorWeights, beforeBrier:
     weightsJson:  JSON.stringify(merged),
     notes:        `Adaptive learning run. Brier: ${beforeBrier.toFixed(4)} → ${weights.holdoutBrierScore.toFixed(4)}.` +
                   ` drawNudge=${weights.drawNudgeWeight}, formScale=${weights.formFactorScale}, injuryScale=${weights.injuryFactorScale}.`,
+  });
+
+  await db
+    .update(aiModelRegistry)
+    .set({ active: false })
+    .where(eq(aiModelRegistry.modelType, "adaptive-chronological-calibrator"));
+  await db.insert(aiModelRegistry).values({
+    modelVersion: weights.version,
+    modelType: "adaptive-chronological-calibrator",
+    featureSetJson: ["pre_kickoff_probabilities", "league_priors", "draw_calibration"],
+    weightsJson: weights as any,
+    metricsJson: {
+      metricDefinition: "multiclass_brier_sum",
+      beforeBrier,
+      holdoutBrier: weights.holdoutBrierScore,
+      chronologicalHoldout: true,
+    } as any,
+    trainingRows: Math.max(0, weights.sampleSize - Math.floor(weights.sampleSize * 0.2)),
+    active: true,
+    notes: "Applied at prediction time only after improving the newest chronological holdout.",
   });
 
   invalidateWeightsCache();

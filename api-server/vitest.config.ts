@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
 
+// Unit tests import modules that construct the lazy PostgreSQL pool. They do
+// not connect unless a test explicitly exercises persistence, but the package
+// requires a syntactically valid URL during module initialisation.
+process.env.DATABASE_URL ??= "postgresql://test:test@127.0.0.1:5432/test";
+
 export default defineConfig({
   test: {
     // Run tests in Node environment (no DOM needed for pure maths)

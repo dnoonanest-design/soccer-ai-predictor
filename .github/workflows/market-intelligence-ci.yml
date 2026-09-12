@@ -1,0 +1,74 @@
+name: Application CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, feature/market-intelligence-layer, fix/railway-runtime-validation]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build Railway bundle
+        run: pnpm railway:build
+
+      - name: Smoke test production bundle
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          ADMIN_SECRET: ci-admin-secret
+          BACKGROUND_LEARNER_ENABLED: "false"
+          PREDICTION_ACCURACY_AUDIT_ENABLED: "false"
+          FUTURE_PREDICTION_BASELINE_ENABLED: "false"
+          FULL_MATCH_LIFECYCLE_TEST_ENABLED: "false"
+          MARKET_FUTURE_SAMPLER_ENABLED: "false"
+          NODE_ENV: production
+          PORT: "3100"
+        run: |
+          set -euo pipefail
+          pnpm railway:start > /tmp/soccer-api.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3100/api/healthz >/dev/null; then
+              echo "Production bundle health check passed"
+              exit 0
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "Production bundle exited before becoming healthy"
+              cat /tmp/soccer-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "Production bundle did not become healthy in time"
+          cat /tmp/soccer-api.log
+          exit 1
+
+      - name: Build production Docker image
+        run: docker build -t soccer-ai-predictor:ci .

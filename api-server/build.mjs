@@ -2,17 +2,53 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
-import esbuildPluginPino from "esbuild-plugin-pino";
-import { rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 
-// Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
+// Some bundled dependencies may use `require`; keep it available in ESM output.
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+const workspaceRoot = path.resolve(artifactDir, "..");
+
+async function assertCoreAiSourceIsolation() {
+  const libDir = path.resolve(artifactDir, "src/lib");
+  const names = await readdir(libDir);
+  const coreAiFiles = names.filter((name) =>
+    ((name.startsWith("ai") && name.endsWith(".ts")) || name === "adaptiveLearningEngine.ts") &&
+    name !== "aiDataProvenancePolicy.ts"
+  );
+
+  const forbidden = [
+    { label: "direct network fetch", regex: /\bfetch\s*\(/ },
+    { label: "HTTP client", regex: /\b(?:axios|undici|got)\b/i },
+    { label: "Node HTTP client", regex: /(?:node:)?https?\b/ },
+    { label: "external URL", regex: /https?:\/\//i },
+    { label: "market probability feature", regex: /\b(?:home_market_prob|away_market_prob|market_probability|marketOdds|bookmakerOdds|oddsMovement)\b/ },
+    { label: "third-party prediction feature", regex: /\b(?:externalPrediction|onlinePrediction|consensusPrediction|thirdPartyPrediction)\b/ },
+    { label: "public prediction provider", regex: /\b(?:forebet|predictz|bettingexpert)\b/i },
+  ];
+
+  const violations = [];
+  for (const file of coreAiFiles) {
+    const source = await readFile(path.join(libDir, file), "utf8");
+    for (const rule of forbidden) {
+      if (rule.regex.test(source)) violations.push(`${file}: ${rule.label}`);
+    }
+  }
+
+  if (violations.length) {
+    throw new Error(
+      `Core AI data-isolation build check failed. AI learning must use internal app data only. Violations: ${violations.join(", ")}`,
+    );
+  }
+
+  console.log(`Core AI data-isolation check passed (${coreAiFiles.length} learning files scanned)`);
+}
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
+  await assertCoreAiSourceIsolation();
 
   await esbuild({
     entryPoints: [path.resolve(artifactDir, "src/index.ts")],
@@ -22,13 +58,20 @@ async function buildAll() {
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
     logLevel: "info",
-    // Some packages may not be bundleable, so we externalize them, we can add more here as needed.
-    // Some of the packages below may not be imported or installed, but we're adding them in case they are in the future.
-    // Examples of unbundleable packages:
-    // - uses native modules and loads them dynamically (e.g. sharp)
-    // - use path traversal to read files (e.g. @google-cloud/secret-manager loads sibling .proto files)
+    alias: {
+      "@workspace/db": path.resolve(workspaceRoot, "lib/db/src/index.ts"),
+      "@workspace/db/schema": path.resolve(workspaceRoot, "lib/db/src/schema/index.ts"),
+      "@workspace/api-zod": path.resolve(workspaceRoot, "lib/api-zod/src/index.ts"),
+    },
+    // Native/dynamic packages and the pino logging stack are resolved at runtime.
+    // Keeping pino external avoids esbuild-plugin-pino trying to resolve
+    // transitive worker packages such as thread-stream during a clean CI build.
     external: [
       "*.node",
+      "pino",
+      "pino-http",
+      "pino-pretty",
+      "thread-stream",
       "sharp",
       "better-sqlite3",
       "sqlite3",
@@ -102,11 +145,6 @@ async function buildAll() {
       "electron",
     ],
     sourcemap: "linked",
-    plugins: [
-      // pino relies on workers to handle logging, instead of externalizing it we use a plugin to handle it
-      esbuildPluginPino({ transports: ["pino-pretty"] })
-    ],
-    // Make sure packages that are cjs only (e.g. express) but are bundled continue to work in our esm output file
     banner: {
       js: `import { createRequire as __bannerCrReq } from 'node:module';
 import __bannerPath from 'node:path';

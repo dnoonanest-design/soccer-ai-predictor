@@ -1,0 +1,1 @@
+{"version":3,"file":"backtestSummary.d.ts","sourceRoot":"","sources":["../../../src/generated/types/backtestSummary.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,MAAM,WAAW,eAAe;IAC9B,oBAAoB,EAAE,MAAM,CAAC;IAC7B,aAAa,EAAE,MAAM,CAAC;IACtB,oBAAoB,EAAE,MAAM,CAAC;IAC7B,gBAAgB,EAAE,MAAM,CAAC;IACzB,oBAAoB,EAAE,MAAM,CAAC;IAC7B,uBAAuB,EAAE,MAAM,CAAC;IAChC,uBAAuB,EAAE,MAAM,CAAC;CACjC"}

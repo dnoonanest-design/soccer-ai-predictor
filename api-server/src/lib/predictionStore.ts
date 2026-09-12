@@ -46,7 +46,7 @@ export async function saveOutcome(opts: {
   fixtureId: number;
   scoreHome: number;
   scoreAway: number;
-}): Promise<void> {
+}): Promise<boolean> {
   const outcome =
     opts.scoreHome > opts.scoreAway ? "home"
     : opts.scoreAway > opts.scoreHome ? "away"
@@ -59,9 +59,35 @@ export async function saveOutcome(opts: {
         target: matchOutcomes.fixtureId,
         set: { outcome, scoreHome: opts.scoreHome, scoreAway: opts.scoreAway, recordedAt: new Date() },
       });
+    return true;
   } catch (err) {
     logger.warn({ err, fixtureId: opts.fixtureId }, "predictionStore: failed to save outcome");
+    return false;
   }
+}
+
+/**
+ * Return recent pre-match predictions that still need a final result.
+ * Exact pending IDs let settlement catch up after midnight without repeatedly
+ * downloading complete historical match days.
+ */
+export async function getUnsettledPredictionFixtureIds(daysBack = 14): Promise<number[]> {
+  const safeDays = Math.max(1, Math.min(14, Math.floor(daysBack)));
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - safeDays * 24 * 60 * 60_000);
+  const rows = await db
+    .selectDistinct({ fixtureId: matchPredictions.fixtureId })
+    .from(matchPredictions)
+    .leftJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
+    .where(and(
+      eq(matchPredictions.isLive, false),
+      sql`${matchOutcomes.fixtureId} IS NULL`,
+      sql`${matchPredictions.kickoffAt} IS NOT NULL`,
+      sql`${matchPredictions.kickoffAt} <= ${now}`,
+      sql`${matchPredictions.kickoffAt} >= ${cutoff}`,
+    ));
+
+  return rows.map((row) => row.fixtureId);
 }
 
 // ── Calibration ───────────────────────────────────────────────────────────────
@@ -199,6 +225,7 @@ export interface AccuracyStats {
     actual:      string;
     correct:     boolean;
     brierScore:  number;
+    playedAt:    string;
   }>;
 }
 
@@ -211,11 +238,14 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
       homeWinProb: matchPredictions.homeWinProb,
       drawProb:    matchPredictions.drawProb,
       awayWinProb: matchPredictions.awayWinProb,
+      kickoffAt:   matchPredictions.kickoffAt,
       outcome:     matchOutcomes.outcome,
+      recordedAt:  matchOutcomes.recordedAt,
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+    .where(eq(matchPredictions.isLive, false))
+    .orderBy(desc(sql`COALESCE(${matchPredictions.kickoffAt}, ${matchOutcomes.recordedAt})`));
 
   const byOutcome = {
     home: { predicted: 0, actual: 0, correct: 0 },
@@ -226,7 +256,7 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
   let totalBrier = 0;
   let correct = 0;
 
-  const recentResults = rows.slice(-20).reverse().map((r) => {
+  const recentResults = rows.slice(0, 20).map((r) => {
     const probs = { home: r.homeWinProb, draw: r.drawProb, away: r.awayWinProb } as Record<string, number>;
     const predicted = Object.entries(probs).sort((a, b) => b[1] - a[1])[0][0] as "home" | "draw" | "away";
     const actual    = r.outcome as "home" | "draw" | "away";
@@ -249,6 +279,9 @@ export async function getAccuracyStats(): Promise<AccuracyStats> {
       actual,
       correct: isCorrect,
       brierScore: Math.round(brier * 1000) / 1000,
+      // Kickoff is the clearest date for users. recordedAt is a safe fallback
+      // for legacy predictions created before kickoff persistence was added.
+      playedAt: (r.kickoffAt ?? r.recordedAt).toISOString(),
     };
   });
 

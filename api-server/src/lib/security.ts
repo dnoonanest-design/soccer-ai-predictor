@@ -39,10 +39,10 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
     [
       "default-src 'self'",
       "script-src 'self' 'unsafe-inline'",        // inline scripts needed for the SPA
-      "style-src 'self' 'unsafe-inline'",          // inline styles from Tailwind
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", // Tailwind + hosted font CSS
       "img-src 'self' data: https:",               // team/league logos from API
       "connect-src 'self' https://v3.football.api-sports.io https://api.the-odds-api.com",
-      "font-src 'self' data:",
+      "font-src 'self' data: https://fonts.gstatic.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -109,12 +109,13 @@ interface RateLimitEntry { count: number; windowStart: number }
 const rateLimitStore = new Map<string, RateLimitEntry>();
 
 // Prune entries every 5 minutes to prevent unbounded memory growth
-setInterval(() => {
+const pruneRateLimitsTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of rateLimitStore) {
     if (now - entry.windowStart > 5 * 60_000) rateLimitStore.delete(key);
   }
 }, 5 * 60_000);
+pruneRateLimitsTimer.unref();
 
 function getClientId(req: Request): string {
   // Prefer X-Forwarded-For (set by Railway's proxy), fall back to socket address
@@ -127,7 +128,9 @@ function getClientId(req: Request): string {
 
 function createRateLimiter(maxRequests: number, windowMs: number, message: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    const clientId = `${getClientId(req)}:${req.path.split("/")[2] ?? "root"}`;
+    const fullPath = `${req.baseUrl}${req.path}`;
+    const routeBucket = fullPath.split("/").filter(Boolean)[1] ?? "root";
+    const clientId = `${getClientId(req)}:${routeBucket}`;
     const now = Date.now();
     let entry = rateLimitStore.get(clientId);
     if (!entry || now - entry.windowStart > windowMs) {

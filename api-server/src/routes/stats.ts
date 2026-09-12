@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getMatchStats, getAllXGPredictions } from "../lib/statsService";
-import { getEnhancedPrediction } from "../lib/enhancedStatsService";
-import { getAllMatches } from "../lib/soccerService";
+import { getEnhancedPrediction, getLiveMomentumSnapshot } from "../lib/enhancedStatsService";
+import { getAllMatches, getMatchById } from "../lib/soccerService";
 import { logger } from "../lib/logger";
 import {
   savePrediction,
@@ -57,8 +57,7 @@ router.get("/matches/:match_id/stats", async (req, res) => {
   if (isNaN(matchId)) return res.status(400).json({ error: "Invalid match_id" });
 
   try {
-    const matches = await getAllMatches(null, null);
-    const match = matches.find((m) => m.id === matchId);
+    const match = await getMatchById(matchId);
     if (!match) return res.status(404).json({ error: "Match not found" });
 
     const isLiveOrFinished = match.status === "live" || match.status === "finished";
@@ -74,11 +73,15 @@ router.get("/matches/:match_id/stats", async (req, res) => {
     );
 
     let enhancedPred = null;
-    if (result.home.matches_played > 0 && result.away.matches_played > 0) {
+    // A finished fixture is settlement evidence, never a forecasting input.
+    // Do not generate a fresh "prediction" from its final score or final-match
+    // telemetry; historical predictions are evaluated by the settlement jobs.
+    if (match.status !== "finished" && result.home.matches_played > 0 && result.away.matches_played > 0) {
       try {
         const [rawPred, calibFactors] = await Promise.all([
           getEnhancedPrediction(
             matchId,
+            match.status,
             match.home_team.id,
             match.away_team.id,
             match.league_id,
@@ -94,7 +97,7 @@ router.get("/matches/:match_id/stats", async (req, res) => {
             match.score?.away ?? null,
             result.home.form,
             result.away.form,
-            { home: result.home, away: result.away }
+            result.has_live_stats ? { home: result.home, away: result.away } : undefined
           ),
           getCalibrationFactors(),
         ]);
@@ -191,6 +194,19 @@ router.get("/matches/:match_id/stats", async (req, res) => {
       } catch (err) {
         logger.warn({ err, matchId }, "Enhanced prediction failed, falling back to base");
       }
+    }
+
+    // Momentum must remain available from current match telemetry even when a
+    // sparse/new competition cannot yet produce a safe pre-match baseline.
+    if (match.status === "live" && !(enhancedPred as any)?.live_momentum) {
+      const liveMomentum = await getLiveMomentumSnapshot(
+        matchId,
+        match.home_team.id,
+        match.away_team.id,
+        match.minute ?? null,
+        result.has_live_stats ? { home: result.home, away: result.away } : undefined,
+      );
+      if (liveMomentum) enhancedPred = { ...(enhancedPred ?? {}), live_momentum: liveMomentum } as any;
     }
 
     return res.json({ ...result, enhanced: enhancedPred });

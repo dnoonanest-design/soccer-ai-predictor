@@ -28,6 +28,7 @@ BACKGROUND_TRAIN_MS=21600000
 BACKGROUND_BIWEEKLY_UPDATE_MS=1209600000
 BACKGROUND_MAX_LIVE_MATCHES=12
 MIN_AUTO_CALIBRATION_SAMPLE=250
+PREDICTION_AUDIT_SIGNING_KEY=generate_a_random_secret_of_at_least_32_bytes
 ```
 
 Railway PostgreSQL normally provides `DATABASE_URL` automatically. If it does not, copy the PostgreSQL connection string into a variable called `DATABASE_URL`.
@@ -82,3 +83,10 @@ After Railway gives you a public URL:
 - The AI calibration will not activate until enough settled matches are stored.
 - Use the Railway logs to confirm background jobs are running.
 - If API-Football rate limits are reached, increase learner intervals in environment variables.
+- Never commit `PREDICTION_AUDIT_SIGNING_KEY`. It seals prediction snapshots
+  and final settlements with HMAC-SHA256. Without it, the Performance page
+  fails closed and excludes all rows from certified headline figures.
+- Migration `007_tamper_evident_prediction_audit.sql` prevents prediction edits,
+  repeat settlement and deletion at database level. Do not rotate the signing
+  key casually: the current version intentionally treats older signatures as
+  unverified after a rotation.

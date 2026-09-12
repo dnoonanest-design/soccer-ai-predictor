@@ -42,6 +42,371 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// ../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/main.js
+var require_main = __commonJS({
+  "../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/main.js"(exports, module) {
+    var fs2 = __require("fs");
+    var path2 = __require("path");
+    var os = __require("os");
+    var crypto2 = __require("crypto");
+    var TIPS = [
+      "\u25C8 encrypted .env [www.dotenvx.com]",
+      "\u25C8 secrets for agents [www.dotenvx.com]",
+      "\u2301 auth for agents [www.vestauth.com]",
+      "\u2318 custom filepath { path: '/custom/path/.env' }",
+      "\u2318 enable debugging { debug: true }",
+      "\u2318 override existing { override: true }",
+      "\u2318 suppress logs { quiet: true }",
+      "\u2318 multiple files { path: ['.env.local', '.env'] }"
+    ];
+    function _getRandomTip() {
+      return TIPS[Math.floor(Math.random() * TIPS.length)];
+    }
+    function parseBoolean(value) {
+      if (typeof value === "string") {
+        return !["false", "0", "no", "off", ""].includes(value.toLowerCase());
+      }
+      return Boolean(value);
+    }
+    function supportsAnsi() {
+      return process.stdout.isTTY;
+    }
+    function dim(text2) {
+      return supportsAnsi() ? `\x1B[2m${text2}\x1B[0m` : text2;
+    }
+    var LINE = /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mg;
+    function parse3(src) {
+      const obj = {};
+      let lines = src.toString();
+      lines = lines.replace(/\r\n?/mg, "\n");
+      let match;
+      while ((match = LINE.exec(lines)) != null) {
+        const key = match[1];
+        let value = match[2] || "";
+        value = value.trim();
+        const maybeQuote = value[0];
+        value = value.replace(/^(['"`])([\s\S]*)\1$/mg, "$2");
+        if (maybeQuote === '"') {
+          value = value.replace(/\\n/g, "\n");
+          value = value.replace(/\\r/g, "\r");
+        }
+        obj[key] = value;
+      }
+      return obj;
+    }
+    function _parseVault(options) {
+      options = options || {};
+      const vaultPath = _vaultPath(options);
+      options.path = vaultPath;
+      const result = DotenvModule.configDotenv(options);
+      if (!result.parsed) {
+        const err = new Error(`MISSING_DATA: Cannot parse ${vaultPath} for an unknown reason`);
+        err.code = "MISSING_DATA";
+        throw err;
+      }
+      const keys = _dotenvKey(options).split(",");
+      const length = keys.length;
+      let decrypted;
+      for (let i = 0; i < length; i++) {
+        try {
+          const key = keys[i].trim();
+          const attrs = _instructions(result, key);
+          decrypted = DotenvModule.decrypt(attrs.ciphertext, attrs.key);
+          break;
+        } catch (error40) {
+          if (i + 1 >= length) {
+            throw error40;
+          }
+        }
+      }
+      return DotenvModule.parse(decrypted);
+    }
+    function _warn(message) {
+      console.error(`\u26A0 ${message}`);
+    }
+    function _debug(message) {
+      console.log(`\u2506 ${message}`);
+    }
+    function _log(message) {
+      console.log(`\u25C7 ${message}`);
+    }
+    function _dotenvKey(options) {
+      if (options && options.DOTENV_KEY && options.DOTENV_KEY.length > 0) {
+        return options.DOTENV_KEY;
+      }
+      if (process.env.DOTENV_KEY && process.env.DOTENV_KEY.length > 0) {
+        return process.env.DOTENV_KEY;
+      }
+      return "";
+    }
+    function _instructions(result, dotenvKey) {
+      let uri;
+      try {
+        uri = new URL(dotenvKey);
+      } catch (error40) {
+        if (error40.code === "ERR_INVALID_URL") {
+          const err = new Error("INVALID_DOTENV_KEY: Wrong format. Must be in valid uri format like dotenv://:key_1234@dotenvx.com/vault/.env.vault?environment=development");
+          err.code = "INVALID_DOTENV_KEY";
+          throw err;
+        }
+        throw error40;
+      }
+      const key = uri.password;
+      if (!key) {
+        const err = new Error("INVALID_DOTENV_KEY: Missing key part");
+        err.code = "INVALID_DOTENV_KEY";
+        throw err;
+      }
+      const environment = uri.searchParams.get("environment");
+      if (!environment) {
+        const err = new Error("INVALID_DOTENV_KEY: Missing environment part");
+        err.code = "INVALID_DOTENV_KEY";
+        throw err;
+      }
+      const environmentKey = `DOTENV_VAULT_${environment.toUpperCase()}`;
+      const ciphertext = result.parsed[environmentKey];
+      if (!ciphertext) {
+        const err = new Error(`NOT_FOUND_DOTENV_ENVIRONMENT: Cannot locate environment ${environmentKey} in your .env.vault file.`);
+        err.code = "NOT_FOUND_DOTENV_ENVIRONMENT";
+        throw err;
+      }
+      return { ciphertext, key };
+    }
+    function _vaultPath(options) {
+      let possibleVaultPath = null;
+      if (options && options.path && options.path.length > 0) {
+        if (Array.isArray(options.path)) {
+          for (const filepath of options.path) {
+            if (fs2.existsSync(filepath)) {
+              possibleVaultPath = filepath.endsWith(".vault") ? filepath : `${filepath}.vault`;
+            }
+          }
+        } else {
+          possibleVaultPath = options.path.endsWith(".vault") ? options.path : `${options.path}.vault`;
+        }
+      } else {
+        possibleVaultPath = path2.resolve(process.cwd(), ".env.vault");
+      }
+      if (fs2.existsSync(possibleVaultPath)) {
+        return possibleVaultPath;
+      }
+      return null;
+    }
+    function _resolveHome(envPath) {
+      return envPath[0] === "~" ? path2.join(os.homedir(), envPath.slice(1)) : envPath;
+    }
+    function _configVault(options) {
+      const debug = parseBoolean(process.env.DOTENV_CONFIG_DEBUG || options && options.debug);
+      const quiet = parseBoolean(process.env.DOTENV_CONFIG_QUIET || options && options.quiet);
+      if (debug || !quiet) {
+        _log("loading env from encrypted .env.vault");
+      }
+      const parsed = DotenvModule._parseVault(options);
+      let processEnv = process.env;
+      if (options && options.processEnv != null) {
+        processEnv = options.processEnv;
+      }
+      DotenvModule.populate(processEnv, parsed, options);
+      return { parsed };
+    }
+    function configDotenv(options) {
+      const dotenvPath = path2.resolve(process.cwd(), ".env");
+      let encoding = "utf8";
+      let processEnv = process.env;
+      if (options && options.processEnv != null) {
+        processEnv = options.processEnv;
+      }
+      let debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || options && options.debug);
+      let quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || options && options.quiet);
+      if (options && options.encoding) {
+        encoding = options.encoding;
+      } else {
+        if (debug) {
+          _debug("no encoding is specified (UTF-8 is used by default)");
+        }
+      }
+      let optionPaths = [dotenvPath];
+      if (options && options.path) {
+        if (!Array.isArray(options.path)) {
+          optionPaths = [_resolveHome(options.path)];
+        } else {
+          optionPaths = [];
+          for (const filepath of options.path) {
+            optionPaths.push(_resolveHome(filepath));
+          }
+        }
+      }
+      let lastError;
+      const parsedAll = {};
+      for (const path3 of optionPaths) {
+        try {
+          const parsed = DotenvModule.parse(fs2.readFileSync(path3, { encoding }));
+          DotenvModule.populate(parsedAll, parsed, options);
+        } catch (e) {
+          if (debug) {
+            _debug(`failed to load ${path3} ${e.message}`);
+          }
+          lastError = e;
+        }
+      }
+      const populated = DotenvModule.populate(processEnv, parsedAll, options);
+      debug = parseBoolean(processEnv.DOTENV_CONFIG_DEBUG || debug);
+      quiet = parseBoolean(processEnv.DOTENV_CONFIG_QUIET || quiet);
+      if (debug || !quiet) {
+        const keysCount = Object.keys(populated).length;
+        const shortPaths = [];
+        for (const filePath of optionPaths) {
+          try {
+            const relative = path2.relative(process.cwd(), filePath);
+            shortPaths.push(relative);
+          } catch (e) {
+            if (debug) {
+              _debug(`failed to load ${filePath} ${e.message}`);
+            }
+            lastError = e;
+          }
+        }
+        _log(`injected env (${keysCount}) from ${shortPaths.join(",")} ${dim(`// tip: ${_getRandomTip()}`)}`);
+      }
+      if (lastError) {
+        return { parsed: parsedAll, error: lastError };
+      } else {
+        return { parsed: parsedAll };
+      }
+    }
+    function config2(options) {
+      if (_dotenvKey(options).length === 0) {
+        return DotenvModule.configDotenv(options);
+      }
+      const vaultPath = _vaultPath(options);
+      if (!vaultPath) {
+        _warn(`you set DOTENV_KEY but you are missing a .env.vault file at ${vaultPath}`);
+        return DotenvModule.configDotenv(options);
+      }
+      return DotenvModule._configVault(options);
+    }
+    function decrypt(encrypted, keyStr) {
+      const key = Buffer.from(keyStr.slice(-64), "hex");
+      let ciphertext = Buffer.from(encrypted, "base64");
+      const nonce = ciphertext.subarray(0, 12);
+      const authTag = ciphertext.subarray(-16);
+      ciphertext = ciphertext.subarray(12, -16);
+      try {
+        const aesgcm = crypto2.createDecipheriv("aes-256-gcm", key, nonce);
+        aesgcm.setAuthTag(authTag);
+        return `${aesgcm.update(ciphertext)}${aesgcm.final()}`;
+      } catch (error40) {
+        const isRange = error40 instanceof RangeError;
+        const invalidKeyLength = error40.message === "Invalid key length";
+        const decryptionFailed = error40.message === "Unsupported state or unable to authenticate data";
+        if (isRange || invalidKeyLength) {
+          const err = new Error("INVALID_DOTENV_KEY: It must be 64 characters long (or more)");
+          err.code = "INVALID_DOTENV_KEY";
+          throw err;
+        } else if (decryptionFailed) {
+          const err = new Error("DECRYPTION_FAILED: Please check your DOTENV_KEY");
+          err.code = "DECRYPTION_FAILED";
+          throw err;
+        } else {
+          throw error40;
+        }
+      }
+    }
+    function populate(processEnv, parsed, options = {}) {
+      const debug = Boolean(options && options.debug);
+      const override = Boolean(options && options.override);
+      const populated = {};
+      if (typeof parsed !== "object") {
+        const err = new Error("OBJECT_REQUIRED: Please check the processEnv argument being passed to populate");
+        err.code = "OBJECT_REQUIRED";
+        throw err;
+      }
+      for (const key of Object.keys(parsed)) {
+        if (Object.prototype.hasOwnProperty.call(processEnv, key)) {
+          if (override === true) {
+            processEnv[key] = parsed[key];
+            populated[key] = parsed[key];
+          }
+          if (debug) {
+            if (override === true) {
+              _debug(`"${key}" is already defined and WAS overwritten`);
+            } else {
+              _debug(`"${key}" is already defined and was NOT overwritten`);
+            }
+          }
+        } else {
+          processEnv[key] = parsed[key];
+          populated[key] = parsed[key];
+        }
+      }
+      return populated;
+    }
+    var DotenvModule = {
+      configDotenv,
+      _configVault,
+      _parseVault,
+      config: config2,
+      decrypt,
+      parse: parse3,
+      populate
+    };
+    module.exports.configDotenv = DotenvModule.configDotenv;
+    module.exports._configVault = DotenvModule._configVault;
+    module.exports._parseVault = DotenvModule._parseVault;
+    module.exports.config = DotenvModule.config;
+    module.exports.decrypt = DotenvModule.decrypt;
+    module.exports.parse = DotenvModule.parse;
+    module.exports.populate = DotenvModule.populate;
+    module.exports = DotenvModule;
+  }
+});
+
+// ../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/env-options.js
+var require_env_options = __commonJS({
+  "../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/env-options.js"(exports, module) {
+    var options = {};
+    if (process.env.DOTENV_CONFIG_ENCODING != null) {
+      options.encoding = process.env.DOTENV_CONFIG_ENCODING;
+    }
+    if (process.env.DOTENV_CONFIG_PATH != null) {
+      options.path = process.env.DOTENV_CONFIG_PATH;
+    }
+    if (process.env.DOTENV_CONFIG_QUIET != null) {
+      options.quiet = process.env.DOTENV_CONFIG_QUIET;
+    }
+    if (process.env.DOTENV_CONFIG_DEBUG != null) {
+      options.debug = process.env.DOTENV_CONFIG_DEBUG;
+    }
+    if (process.env.DOTENV_CONFIG_OVERRIDE != null) {
+      options.override = process.env.DOTENV_CONFIG_OVERRIDE;
+    }
+    if (process.env.DOTENV_CONFIG_DOTENV_KEY != null) {
+      options.DOTENV_KEY = process.env.DOTENV_CONFIG_DOTENV_KEY;
+    }
+    module.exports = options;
+  }
+});
+
+// ../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/cli-options.js
+var require_cli_options = __commonJS({
+  "../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/lib/cli-options.js"(exports, module) {
+    var re = /^dotenv_config_(encoding|path|quiet|debug|override|DOTENV_KEY)=(.+)$/;
+    module.exports = function optionMatcher(args) {
+      const options = args.reduce(function(acc, cur) {
+        const matches = cur.match(re);
+        if (matches) {
+          acc[matches[1]] = matches[2];
+        }
+        return acc;
+      }, {});
+      if (!("quiet" in options)) {
+        options.quiet = "true";
+      }
+      return options;
+    };
+  }
+});
+
 // ../node_modules/.pnpm/ms@2.1.3/node_modules/ms/index.js
 var require_ms = __commonJS({
   "../node_modules/.pnpm/ms@2.1.3/node_modules/ms/index.js"(exports, module) {
@@ -35933,6 +36298,17 @@ var require_lib5 = __commonJS({
   }
 });
 
+// ../node_modules/.pnpm/dotenv@17.4.2/node_modules/dotenv/config.js
+(function() {
+  require_main().config(
+    Object.assign(
+      {},
+      require_env_options(),
+      require_cli_options()(process.argv)
+    )
+  );
+})();
+
 // src/app.ts
 var import_express15 = __toESM(require_express2(), 1);
 var import_cors = __toESM(require_lib3(), 1);
@@ -41031,10 +41407,10 @@ var PgEnumColumn = class extends PgColumn {
 // ../node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.21.0/node_modules/drizzle-orm/subquery.js
 var Subquery = class {
   static [entityKind] = "Subquery";
-  constructor(sql4, fields, alias, isWith = false, usedTables = []) {
+  constructor(sql5, fields, alias, isWith = false, usedTables = []) {
     this._ = {
       brand: "Subquery",
-      sql: sql4,
+      sql: sql5,
       selectedFields: fields,
       alias,
       isWith,
@@ -46532,10 +46908,10 @@ var PgRelationalQuery = class extends QueryPromise {
 
 // ../node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.21.0/node_modules/drizzle-orm/pg-core/query-builders/raw.js
 var PgRaw = class extends QueryPromise {
-  constructor(execute, sql4, query, mapBatchResult) {
+  constructor(execute, sql5, query, mapBatchResult) {
     super();
     this.execute = execute;
-    this.sql = sql4;
+    this.sql = sql5;
     this.query = query;
     this.mapBatchResult = mapBatchResult;
   }
@@ -46855,8 +47231,8 @@ var NoopCache = class extends Cache {
   async onMutate(_params) {
   }
 };
-async function hashQuery(sql4, params) {
-  const dataToHash = `${sql4}-${JSON.stringify(params)}`;
+async function hashQuery(sql5, params) {
+  const dataToHash = `${sql5}-${JSON.stringify(params)}`;
   const encoder = new TextEncoder();
   const data = encoder.encode(dataToHash);
   const hashBuffer = await crypto.subtle.digest("SHA-256", data);
@@ -47341,7 +47717,10 @@ __export(schema_exports, {
   matchOutcomes: () => matchOutcomes,
   matchPredictions: () => matchPredictions,
   modelTrainingRuns: () => modelTrainingRuns,
+  playerAiSignals: () => playerAiSignals,
   playerMatchFactors: () => playerMatchFactors,
+  playerMatchStats: () => playerMatchStats,
+  playerProfiles: () => playerProfiles,
   predictionSnapshots: () => predictionSnapshots,
   selfImprovementQueue: () => selfImprovementQueue,
   similarMatchMemory: () => similarMatchMemory,
@@ -59063,6 +59442,127 @@ var insertDeepMatchStatsSchema = createInsertSchema(deepMatchStats).omit({ id: t
 var insertMatchCircumstancesSchema = createInsertSchema(matchCircumstances).omit({ id: true, collectedAt: true, updatedAt: true });
 var insertPlayerMatchFactorsSchema = createInsertSchema(playerMatchFactors).omit({ id: true, collectedAt: true });
 var insertFactorLearningInsightsSchema = createInsertSchema(factorLearningInsights).omit({ id: true, createdAt: true });
+var playerProfiles = pgTable("player_profiles", {
+  id: serial("id").primaryKey(),
+  playerId: integer("player_id").notNull().unique(),
+  playerName: text("player_name").notNull(),
+  position: text("position"),
+  nationality: text("nationality"),
+  teamId: integer("team_id"),
+  teamName: text("team_name"),
+  nationalTeamId: integer("national_team_id"),
+  nationalTeamName: text("national_team_name"),
+  totalMatches: integer("total_matches").notNull().default(0),
+  totalStarts: integer("total_starts").notNull().default(0),
+  totalGoals: integer("total_goals").notNull().default(0),
+  totalAssists: integer("total_assists").notNull().default(0),
+  totalShots: integer("total_shots").notNull().default(0),
+  totalShotsOnTarget: integer("total_shots_on_target").notNull().default(0),
+  totalKeyPasses: integer("total_key_passes").notNull().default(0),
+  totalSuccessfulCrosses: integer("total_successful_crosses").notNull().default(0),
+  totalSuccessfulTackles: integer("total_successful_tackles").notNull().default(0),
+  totalYellowCards: integer("total_yellow_cards").notNull().default(0),
+  totalRedCards: integer("total_red_cards").notNull().default(0),
+  totalMinutesPlayed: integer("total_minutes_played").notNull().default(0),
+  avgRating: real("avg_rating"),
+  avgPassAccuracy: real("avg_pass_accuracy"),
+  avgShotsPerMatch: real("avg_shots_per_match"),
+  avgKeyPassesPerMatch: real("avg_key_passes_per_match"),
+  avgTacklesPerMatch: real("avg_tackles_per_match"),
+  avgCrossesPerMatch: real("avg_crosses_per_match"),
+  avgMinutesPerMatch: real("avg_minutes_per_match"),
+  scoringMomentumScore: real("scoring_momentum_score").notNull().default(0),
+  consecutiveMatchesScored: integer("consecutive_matches_scored").notNull().default(0),
+  consecutiveMatchesWithoutGoal: integer("consecutive_matches_without_goal").notNull().default(0),
+  goalsProbabilityNextMatch: real("goals_probability_next_match"),
+  last5MatchesGoals: integer("last5_matches_goals").notNull().default(0),
+  last5MatchesAssists: integer("last5_matches_assists").notNull().default(0),
+  last5MatchesRating: real("last5_matches_rating"),
+  last10MatchesGoals: integer("last10_matches_goals").notNull().default(0),
+  formTrend: text("form_trend"),
+  formScore: real("form_score"),
+  peakRatingEver: real("peak_rating_ever"),
+  careerStage: text("career_stage"),
+  growthRate: real("growth_rate"),
+  confidenceScore: real("confidence_score"),
+  attitudeScore: real("attitude_score"),
+  substitutedEarlyCount: integer("substituted_early_count").notNull().default(0),
+  substitutedLateCount: integer("substituted_late_count").notNull().default(0),
+  teamWinRateWhenStarts: real("team_win_rate_when_starts"),
+  teamWinRateWhenAbsent: real("team_win_rate_when_absent"),
+  teamGoalsScoredWhenStarts: real("team_goals_scored_when_starts"),
+  teamGoalsConcededWhenStarts: real("team_goals_conceded_when_starts"),
+  matchesAsStarter: integer("matches_as_starter").notNull().default(0),
+  winsAsStarter: integer("wins_as_starter").notNull().default(0),
+  clubMatches: integer("club_matches").notNull().default(0),
+  clubGoals: integer("club_goals").notNull().default(0),
+  clubAvgRating: real("club_avg_rating"),
+  internationalMatches: integer("international_matches").notNull().default(0),
+  internationalGoals: integer("international_goals").notNull().default(0),
+  internationalAvgRating: real("international_avg_rating"),
+  daysSinceLastInternational: integer("days_since_last_international"),
+  internationalFatigueScore: real("international_fatigue_score"),
+  aiDiscoveredPatterns: jsonb("ai_discovered_patterns"),
+  aiConfidenceInProfile: real("ai_confidence_in_profile"),
+  aiLastAnalysedAt: timestamp("ai_last_analysed_at"),
+  aiInsightSummary: text("ai_insight_summary"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow()
+});
+var playerAiSignals = pgTable("player_ai_signals", {
+  id: serial("id").primaryKey(),
+  playerId: integer("player_id").notNull(),
+  playerName: text("player_name").notNull(),
+  signalName: text("signal_name").notNull(),
+  signalDescription: text("signal_description"),
+  signalValue: real("signal_value"),
+  predictivePower: real("predictive_power"),
+  sampleSize: integer("sample_size").notNull().default(0),
+  outcomeCorrelation: real("outcome_correlation"),
+  goalCorrelation: real("goal_correlation"),
+  discoveredAt: timestamp("discovered_at").notNull().defaultNow(),
+  lastValidatedAt: timestamp("last_validated_at"),
+  active: boolean("active").notNull().default(true)
+});
+var playerMatchStats = pgTable("player_match_stats", {
+  id: serial("id").primaryKey(),
+  playerId: integer("player_id").notNull(),
+  playerName: text("player_name").notNull(),
+  fixtureId: integer("fixture_id").notNull(),
+  teamId: integer("team_id"),
+  teamSide: text("team_side"),
+  isInternational: boolean("is_international").notNull().default(false),
+  nationalTeamId: integer("national_team_id"),
+  matchDate: timestamp("match_date"),
+  minutesPlayed: integer("minutes_played"),
+  substitutedOn: integer("substituted_on"),
+  substitutedOff: integer("substituted_off"),
+  rating: real("rating"),
+  goals: integer("goals").notNull().default(0),
+  assists: integer("assists").notNull().default(0),
+  shots: integer("shots").notNull().default(0),
+  shotsOnTarget: integer("shots_on_target").notNull().default(0),
+  passAccuracy: real("pass_accuracy"),
+  keyPasses: integer("key_passes").notNull().default(0),
+  successfulCrosses: integer("successful_crosses").notNull().default(0),
+  totalCrosses: integer("total_crosses").notNull().default(0),
+  successfulTackles: integer("successful_tackles").notNull().default(0),
+  totalTackles: integer("total_tackles").notNull().default(0),
+  yellowCards: integer("yellow_cards").notNull().default(0),
+  redCards: integer("red_cards").notNull().default(0),
+  foulsCommitted: integer("fouls_committed").notNull().default(0),
+  foulsDrawn: integer("fouls_drawn").notNull().default(0),
+  dribbles: integer("dribbles").notNull().default(0),
+  dribblesAttempted: integer("dribbles_attempted").notNull().default(0),
+  aerialDuelsWon: integer("aerial_duels_won").notNull().default(0),
+  teamResult: text("team_result"),
+  teamGoalsScored: integer("team_goals_scored"),
+  teamGoalsConceded: integer("team_goals_conceded"),
+  scoringMomentumAtMatch: real("scoring_momentum_at_match"),
+  formScoreAtMatch: real("form_score_at_match"),
+  confidenceAtMatch: real("confidence_at_match"),
+  collectedAt: timestamp("collected_at").notNull().defaultNow()
+}, (t) => [unique("uniq_player_match_stat").on(t.playerId, t.fixtureId)]);
 
 // ../lib/db/src/index.ts
 var { Pool: Pool3 } = esm_default;
@@ -61830,6 +62330,248 @@ async function getAiMemoryUpdateReport() {
   };
 }
 
+// src/lib/playerService.ts
+var INTERNATIONAL_LEAGUE_IDS = /* @__PURE__ */ new Set([
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  // World Cup, Nations League, etc
+  152,
+  153,
+  154,
+  155,
+  156,
+  157,
+  158,
+  159,
+  160
+  // Continental competitions
+]);
+async function collectPlayerStatsForFixture(fixtureId, leagueId, matchDate, homeTeamId, awayTeamId, homeResult, homeGoals, awayGoals) {
+  try {
+    const isInternational = INTERNATIONAL_LEAGUE_IDS.has(leagueId);
+    const data = await fetchFootball(`/fixtures/players?fixture=${fixtureId}`);
+    if (!data?.response?.length) return;
+    for (const teamData of data.response) {
+      const teamId = teamData.team?.id;
+      const teamSide = teamId === homeTeamId ? "home" : "away";
+      const teamResult = teamSide === "home" ? homeResult : homeResult === "win" ? "loss" : homeResult === "loss" ? "win" : "draw";
+      const teamGoalsScored = teamSide === "home" ? homeGoals : awayGoals;
+      const teamGoalsConceded = teamSide === "home" ? awayGoals : homeGoals;
+      for (const playerData of teamData.players || []) {
+        const p = playerData.player;
+        const s = playerData.statistics?.[0];
+        if (!p?.id || !s) continue;
+        const minutesPlayed = s.games?.minutes ?? 0;
+        const rating = s.games?.rating ? parseFloat(s.games.rating) : null;
+        const goals = s.goals?.total ?? 0;
+        const assists = s.goals?.assists ?? 0;
+        const shots = s.shots?.total ?? 0;
+        const shotsOnTarget = s.shots?.on ?? 0;
+        const passAccuracy = s.passes?.accuracy ? parseFloat(s.passes.accuracy) : null;
+        const keyPasses = s.passes?.key ?? 0;
+        const successfulTackles = s.tackles?.total ?? 0;
+        const yellowCards = s.cards?.yellow ?? 0;
+        const redCards = s.cards?.red ?? 0;
+        const foulsCommitted = s.fouls?.committed ?? 0;
+        const foulsDrawn = s.fouls?.drawn ?? 0;
+        const dribbles = s.dribbles?.success ?? 0;
+        const dribblesAttempted = s.dribbles?.attempts ?? 0;
+        const aerialDuelsWon = s.duels?.won ?? 0;
+        await db.insert(playerMatchStats).values({
+          playerId: p.id,
+          playerName: p.name,
+          fixtureId,
+          teamId,
+          teamSide,
+          isInternational,
+          matchDate,
+          minutesPlayed,
+          rating,
+          goals,
+          assists,
+          shots,
+          shotsOnTarget,
+          passAccuracy,
+          keyPasses,
+          successfulTackles,
+          totalTackles: s.tackles?.total ?? 0,
+          yellowCards,
+          redCards,
+          foulsCommitted,
+          foulsDrawn,
+          dribbles,
+          dribblesAttempted,
+          aerialDuelsWon,
+          teamResult,
+          teamGoalsScored,
+          teamGoalsConceded
+        }).onConflictDoNothing();
+        await updatePlayerProfile(p.id, p.name, {
+          isInternational,
+          teamId,
+          minutesPlayed,
+          rating,
+          goals,
+          assists,
+          shots,
+          shotsOnTarget,
+          passAccuracy,
+          keyPasses,
+          successfulTackles,
+          yellowCards,
+          redCards,
+          teamResult,
+          isStarter: !s.games?.substitute,
+          teamGoalsScored,
+          teamGoalsConceded,
+          substitutedOff: minutesPlayed > 0 && minutesPlayed < 90 && !s.games?.substitute ? minutesPlayed : null
+        });
+      }
+    }
+    logger.info({ fixtureId }, "player stats collected");
+  } catch (err) {
+    logger.error({ err, fixtureId }, "failed to collect player stats");
+  }
+}
+async function updatePlayerProfile(playerId, playerName, match) {
+  const existing = await db.query.playerProfiles.findFirst({
+    where: eq(playerProfiles.playerId, playerId)
+  });
+  const recentMatches = await db.select().from(playerMatchStats).where(eq(playerMatchStats.playerId, playerId)).orderBy(desc(playerMatchStats.matchDate)).limit(10);
+  const last5 = recentMatches.slice(0, 5);
+  const last5Goals = last5.reduce((s, m) => s + m.goals, 0);
+  const last5Assists = last5.reduce((s, m) => s + (m.assists ?? 0), 0);
+  const last5Ratings = last5.filter((m) => m.rating).map((m) => m.rating);
+  const last5AvgRating = last5Ratings.length ? last5Ratings.reduce((a, b) => a + b, 0) / last5Ratings.length : null;
+  const last10Goals = recentMatches.reduce((s, m) => s + m.goals, 0);
+  let momentumScore = 0;
+  for (let i = 0; i < last5.length; i++) {
+    const weight = (5 - i) / 5;
+    momentumScore += last5[i].goals * weight;
+    if (last5[i].assists) momentumScore += (last5[i].assists ?? 0) * 0.3 * weight;
+  }
+  let consecutiveScored = 0;
+  let consecutiveWithout = 0;
+  let onStreak = true;
+  for (const m of recentMatches) {
+    if (onStreak) {
+      if (m.goals > 0) consecutiveScored++;
+      else {
+        onStreak = false;
+        consecutiveWithout = 0;
+      }
+    } else {
+      if (m.goals === 0) consecutiveWithout++;
+      else break;
+    }
+  }
+  const goalsProbability = Math.min(0.95, Math.max(
+    0.02,
+    momentumScore * 0.4 + last10Goals / 10 * 0.6
+  ));
+  const resultScores = last5.map(
+    (m) => m.teamResult === "win" ? 1 : m.teamResult === "draw" ? 0 : -1
+  );
+  const formScore2 = resultScores.length ? resultScores.reduce((a, b) => a + b, 0) / resultScores.length : 0;
+  const firstHalf = recentMatches.slice(5).map((m) => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
+  const secondHalf = last5.map((m) => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
+  const growthRate = secondHalf - firstHalf;
+  const formTrend = growthRate > 0.3 ? "improving" : growthRate < -0.3 ? "declining" : Math.abs(growthRate) < 0.1 ? "stable" : "erratic";
+  const avgMins = recentMatches.reduce((s, m) => s + (m.minutesPlayed ?? 0), 0) / Math.max(recentMatches.length, 1);
+  const confidenceScore = Math.min(1, Math.max(
+    0,
+    avgMins / 90 * 0.4 + (formScore2 + 1) / 2 * 0.4 + momentumScore / 5 * 0.2
+  ));
+  const totalCards = (existing?.totalYellowCards ?? 0) + match.yellowCards + ((existing?.totalRedCards ?? 0) + match.redCards) * 3;
+  const attitudeScore = Math.min(1, Math.max(0, 1 - totalCards * 0.02 - (existing?.substitutedEarlyCount ?? 0) * 0.01));
+  const starterMatches = await db.select().from(playerMatchStats).where(and(eq(playerMatchStats.playerId, playerId))).limit(50);
+  const starterWins = starterMatches.filter((m) => m.teamResult === "win").length;
+  const teamWinRate = starterMatches.length ? starterWins / starterMatches.length : null;
+  const base = existing ?? {
+    totalMatches: 0,
+    totalStarts: 0,
+    totalGoals: 0,
+    totalAssists: 0,
+    totalShots: 0,
+    totalShotsOnTarget: 0,
+    totalKeyPasses: 0,
+    totalSuccessfulTackles: 0,
+    totalYellowCards: 0,
+    totalRedCards: 0,
+    totalMinutesPlayed: 0,
+    matchesAsStarter: 0,
+    winsAsStarter: 0,
+    clubMatches: 0,
+    clubGoals: 0,
+    internationalMatches: 0,
+    internationalGoals: 0,
+    substitutedEarlyCount: 0,
+    substitutedLateCount: 0
+  };
+  const newTotalMatches = (base.totalMatches ?? 0) + 1;
+  const newTotalGoals = (base.totalGoals ?? 0) + match.goals;
+  const newTotalMinutes = (base.totalMinutesPlayed ?? 0) + match.minutesPlayed;
+  const values = {
+    playerId,
+    playerName,
+    teamId: match.teamId,
+    totalMatches: newTotalMatches,
+    totalStarts: (base.totalStarts ?? 0) + (match.isStarter ? 1 : 0),
+    totalGoals: newTotalGoals,
+    totalAssists: (base.totalAssists ?? 0) + match.assists,
+    totalShots: (base.totalShots ?? 0) + match.shots,
+    totalShotsOnTarget: (base.totalShotsOnTarget ?? 0) + match.shotsOnTarget,
+    totalKeyPasses: (base.totalKeyPasses ?? 0) + match.keyPasses,
+    totalSuccessfulTackles: (base.totalSuccessfulTackles ?? 0) + match.successfulTackles,
+    totalYellowCards: (base.totalYellowCards ?? 0) + match.yellowCards,
+    totalRedCards: (base.totalRedCards ?? 0) + match.redCards,
+    totalMinutesPlayed: newTotalMinutes,
+    avgRating: last5AvgRating,
+    avgPassAccuracy: match.passAccuracy,
+    avgShotsPerMatch: newTotalGoals / newTotalMatches,
+    avgKeyPassesPerMatch: ((base.totalKeyPasses ?? 0) + match.keyPasses) / newTotalMatches,
+    avgTacklesPerMatch: ((base.totalSuccessfulTackles ?? 0) + match.successfulTackles) / newTotalMatches,
+    avgMinutesPerMatch: newTotalMinutes / newTotalMatches,
+    scoringMomentumScore: momentumScore,
+    consecutiveMatchesScored: consecutiveScored,
+    consecutiveMatchesWithoutGoal: consecutiveWithout,
+    goalsProbabilityNextMatch: goalsProbability,
+    last5MatchesGoals: last5Goals,
+    last5MatchesAssists: last5Assists,
+    last5MatchesRating: last5AvgRating,
+    last10MatchesGoals: last10Goals,
+    formTrend,
+    formScore: formScore2,
+    growthRate,
+    confidenceScore,
+    attitudeScore,
+    substitutedEarlyCount: (base.substitutedEarlyCount ?? 0) + (match.substitutedOff && match.substitutedOff < 60 ? 1 : 0),
+    substitutedLateCount: (base.substitutedLateCount ?? 0) + (match.substitutedOff && match.substitutedOff >= 60 ? 1 : 0),
+    teamWinRateWhenStarts: teamWinRate,
+    teamGoalsScoredWhenStarts: match.teamGoalsScored,
+    teamGoalsConcededWhenStarts: match.teamGoalsConceded,
+    matchesAsStarter: (base.matchesAsStarter ?? 0) + (match.isStarter ? 1 : 0),
+    winsAsStarter: (base.winsAsStarter ?? 0) + (match.isStarter && match.teamResult === "win" ? 1 : 0),
+    clubMatches: (base.clubMatches ?? 0) + (match.isInternational ? 0 : 1),
+    clubGoals: (base.clubGoals ?? 0) + (match.isInternational ? 0 : match.goals),
+    internationalMatches: (base.internationalMatches ?? 0) + (match.isInternational ? 1 : 0),
+    internationalGoals: (base.internationalGoals ?? 0) + (match.isInternational ? match.goals : 0),
+    currentClubId: match.isInternational ? void 0 : match.teamId,
+    nationalTeamId: match.isInternational ? match.teamId : void 0,
+    updatedAt: /* @__PURE__ */ new Date()
+  };
+  if (existing) {
+    await db.update(playerProfiles).set(values).where(eq(playerProfiles.playerId, playerId));
+  } else {
+    await db.insert(playerProfiles).values({ ...values, createdAt: /* @__PURE__ */ new Date() });
+  }
+}
+
 // src/lib/backgroundLearnerService.ts
 var ENABLED = process.env.BACKGROUND_LEARNER_ENABLED !== "false";
 var LIVE_INTERVAL_MS = Math.max(15e3, Number(process.env.BACKGROUND_LIVE_STATS_MS ?? 6e4));
@@ -62014,6 +62756,17 @@ async function computeAndStoreMatch(match) {
   }
   void factors;
   void circumstances;
+  const homeResult = match.score?.home > match.score?.away ? "win" : match.score?.home < match.score?.away ? "loss" : "draw";
+  collectPlayerStatsForFixture(
+    match.id,
+    match.league?.id ?? 0,
+    new Date(match.date ?? Date.now()),
+    match.home_team?.id ?? 0,
+    match.away_team?.id ?? 0,
+    homeResult,
+    match.score?.home ?? 0,
+    match.score?.away ?? 0
+  ).catch((err) => logger.warn({ err, fixtureId: match.id }, "player stats collection failed"));
   return true;
 }
 async function runLiveDeepStatCollection() {

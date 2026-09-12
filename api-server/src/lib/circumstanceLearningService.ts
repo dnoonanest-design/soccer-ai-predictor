@@ -3,6 +3,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import type { Match } from "./soccerService";
 import { getMatchEvents, type MatchEvent } from "./eventsService";
 import { logger } from "./logger";
+import { waitForRateLimit } from "./rateLimiter";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -25,6 +26,7 @@ async function fetchFootball<T>(path: string, fallback: T): Promise<T> {
   if (cached) return cached;
   if (!API_FOOTBALL_KEY) return fallback;
   try {
+    await waitForRateLimit();
     const res = await fetch(`${API_FOOTBALL_BASE}${path}`, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
     if (!res.ok) {
       logger.warn({ status: res.status, path }, "circumstance API-Football request failed");
@@ -145,12 +147,10 @@ async function savePlayerFactors(match: Match, lineups: ApiLineup[], injuries: A
 }
 
 export async function collectMatchCircumstances(match: Match, homeForm?: string | null, awayForm?: string | null) {
-  const [lineups, injuries, playerStats, events] = await Promise.all([
-    fetchFootball<ApiLineup[]>(`/fixtures/lineups?fixture=${match.id}`, []),
-    fetchFootball<ApiInjury[]>(`/injuries?fixture=${match.id}`, []),
-    fetchFootball<ApiPlayerStats[]>(`/fixtures/players?fixture=${match.id}`, []),
-    getMatchEvents(match.id, match.home_team.id).catch(() => [] as MatchEvent[]),
-  ]);
+  const lineups = await fetchFootball<ApiLineup[]>(`/fixtures/lineups?fixture=${match.id}`, []);
+  const injuries = await fetchFootball<ApiInjury[]>(`/injuries?fixture=${match.id}`, []);
+  const playerStats = await fetchFootball<ApiPlayerStats[]>(`/fixtures/players?fixture=${match.id}`, []);
+  const events = await getMatchEvents(match.id, match.home_team.id).catch(() => [] as MatchEvent[]);
 
   const homeLineup = teamLineup(lineups, match.home_team.id, match.home_team.name);
   const awayLineup = teamLineup(lineups, match.away_team.id, match.away_team.name);

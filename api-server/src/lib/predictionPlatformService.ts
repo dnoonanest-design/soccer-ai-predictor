@@ -1,5 +1,5 @@
 import { db, predictionSnapshots, betTracker, modelTrainingRuns, liveAlerts, matchPredictions, matchOutcomes } from "@workspace/db";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import { getCalibrationReport } from "./predictionStore";
 
@@ -134,20 +134,32 @@ export async function runTrainingPipeline() {
       drawProb: matchPredictions.drawProb,
       awayWinProb: matchPredictions.awayWinProb,
       outcome: matchOutcomes.outcome,
+      updatedAt: matchPredictions.updatedAt,
+      kickoffAt: matchPredictions.kickoffAt,
     })
     .from(matchPredictions)
     .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+    .where(and(
+      eq(matchPredictions.isLive, false),
+      sql`${matchPredictions.kickoffAt} IS NOT NULL`,
+      sql`${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`,
+    ))
+    .orderBy(asc(matchPredictions.updatedAt));
 
   const n = rows.length;
-  const holdoutRows = Math.max(0, Math.floor(n * 0.2));
+  const holdoutRows = n >= 10 ? Math.max(1, Math.floor(n * 0.2)) : 0;
   const trainingRows = n - holdoutRows;
+  const trainingSet = rows.slice(0, trainingRows);
+  const holdoutSet = holdoutRows > 0 ? rows.slice(trainingRows) : [];
   let brier = 0;
   let correct = 0;
   const outcomeCounts = { home: 0, draw: 0, away: 0 } as Record<string, number>;
 
-  for (const r of rows) {
+  for (const r of trainingSet) {
     outcomeCounts[r.outcome] = (outcomeCounts[r.outcome] ?? 0) + 1;
+  }
+
+  for (const r of holdoutSet) {
     const probs = normaliseThreeWay({
       home: normaliseProb(r.homeWinProb),
       draw: normaliseProb(r.drawProb),
@@ -163,12 +175,12 @@ export async function runTrainingPipeline() {
   const calibrationReport = await getCalibrationReport();
 
   const weights = {
-    model: "calibrated-statistical-v4",
-    note: "Lightweight training pipeline: learns outcome priors and records holdout-style metrics. Replace with XGBoost/LightGBM when historic feature rows exceed 2,000.",
+    model: "opponent-adjusted-v5",
+    note: "Bookmaker odds are intentionally excluded from the core predictor. The statistical model is trained and calibrated from football data only; bookmaker movement is evaluated separately by the market-intelligence layer.",
     priors: {
-      home: n ? outcomeCounts.home / n : 0.45,
-      draw: n ? outcomeCounts.draw / n : 0.27,
-      away: n ? outcomeCounts.away / n : 0.28,
+      home: trainingRows ? outcomeCounts.home / trainingRows : 0.45,
+      draw: trainingRows ? outcomeCounts.draw / trainingRows : 0.27,
+      away: trainingRows ? outcomeCounts.away / trainingRows : 0.28,
     },
     calibration: {
       expectedCalibrationError: calibrationReport.expectedCalibrationError,
@@ -176,26 +188,31 @@ export async function runTrainingPipeline() {
       buckets: calibrationReport.buckets,
     },
     recommendedFeatureWeights: {
-      marketOdds: 0.22,
-      xg: 0.27,
-      elo: 0.16,
-      form: 0.12,
-      injuriesLineups: 0.11,
-      liveMomentum: 0.12,
+      marketOdds: 0,
+      xg: 0.35,
+      elo: 0.20,
+      form: 0.15,
+      injuriesLineups: 0.15,
+      liveMomentum: 0.15,
+    },
+    marketIntelligence: {
+      mode: "evaluation_only",
+      feedsCorePrediction: false,
     },
   };
 
-  const pickAccuracy = n ? Math.round((correct / n) * 1000) / 1000 : 0;
-  const brierScore = n ? Math.round((brier / n) * 1000) / 1000 : 0;
+  const pickAccuracy = holdoutRows ? Math.round((correct / holdoutRows) * 1000) / 1000 : 0;
+  const brierScore = holdoutRows ? Math.round((brier / holdoutRows) * 1000) / 1000 : 0;
   const [created] = await db.insert(modelTrainingRuns).values({
-    modelVersion: "calibrated-statistical-v4",
+    modelVersion: "opponent-adjusted-v5",
     trainingRows,
     holdoutRows,
     pickAccuracy,
     brierScore,
     roiPct: null,
     weightsJson: JSON.stringify(weights),
-    notes: n < 2000 ? "Small sample; use for calibration only until more historical rows are collected." : "Ready for external ML training export.",
+    notes: `${holdoutRows} newest fixtures evaluated as a chronological holdout. ` +
+      (n < 2000 ? "Small sample; use for calibration only until more historical rows are collected." : "Ready for external ML training export."),
   }).returning();
   return { ...created, weights };
 }

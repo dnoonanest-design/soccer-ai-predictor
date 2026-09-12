@@ -1,6 +1,46 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Response } from "express";
 import { getAllMatches, getMatchById } from "../lib/soccerService";
 import { saveOutcome } from "../lib/predictionStore";
+import { isTrackedLeague } from "../lib/leagueConfig";
+import { getMatchPresentation } from "../lib/matchPresentationService";
+import {
+  getApiFootballProviderHealth,
+  isApiFootballProviderError,
+} from "../lib/apiFootballReliability";
+import { sortFixturesForDisplay } from "../lib/fixtureOrdering";
+
+const BLOCKED_NAME_KEYWORDS = [
+  "reserve", "reserva", " res ", "res.", "u20", "u19", "u18", "u17", "u16", "u15",
+  "u23", "u21", "youth", "amateur", "intermedia", "regional", "segunda b",
+  "tercera", "sub-20", "sub-19", "sub-18", "sub-17", "sub-23", "sub-21",
+  "division b", "women", "club friendly", "4th", "fifth", "lower",
+];
+
+function isBlockedLeague(leagueName: string | null | undefined) {
+  if (!leagueName) return false;
+  const lower = leagueName.toLowerCase();
+  return BLOCKED_NAME_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+function inProductScope(match: { league_id: number; league_name?: string | null }) {
+  return isTrackedLeague(Number(match.league_id)) && !isBlockedLeague(match.league_name);
+}
+
+function handleMatchRouteError(err: unknown, res: Response) {
+  if (isApiFootballProviderError(err)) {
+    const provider = getApiFootballProviderHealth();
+    return res.status(503).json({
+      error: "Live football data is temporarily unavailable",
+      code: "LIVE_DATA_UNAVAILABLE",
+      provider: "api-football",
+      provider_status: provider.state,
+      failure_kind: err.kind,
+      last_checked_at: provider.lastCheckedAt,
+    });
+  }
+
+  return res.status(500).json({ error: "Failed to fetch matches" });
+}
 
 const router: IRouter = Router();
 
@@ -10,27 +50,39 @@ router.get("/matches", async (req, res) => {
       ? parseInt(req.query.league_id as string, 10)
       : null;
     const status = (req.query.status as string) || null;
+
+    if (leagueId != null && (!Number.isInteger(leagueId) || !isTrackedLeague(leagueId))) {
+      return res.json([]);
+    }
+
     const matches = await getAllMatches(leagueId, status);
-    res.json(matches);
+    return res.json(sortFixturesForDisplay(matches.filter(inProductScope)));
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch matches" });
+    return handleMatchRouteError(err, res);
+  }
+});
+
+router.get("/fixtures/upcoming", async (_req, res) => {
+  try {
+    const matches = await getAllMatches(null, "upcoming");
+    return res.json(sortFixturesForDisplay(matches.filter(inProductScope)));
+  } catch (err) {
+    return handleMatchRouteError(err, res);
   }
 });
 
 router.get("/matches/:match_id", async (req, res) => {
   try {
     const id = parseInt(req.params.match_id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ error: "Invalid match ID" });
-      return;
-    }
-    const match = await getMatchById(id);
-    if (!match) {
-      res.status(404).json({ error: "Match not found" });
-      return;
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ error: "Invalid match ID" });
     }
 
-    // Record outcome whenever a finished match is fetched and has a valid score
+    const match = await getMatchById(id);
+    if (!match || !inProductScope(match)) {
+      return res.status(404).json({ error: "Match not found" });
+    }
+
     if (
       match.status === "finished" &&
       match.score?.home != null &&
@@ -43,9 +95,27 @@ router.get("/matches/:match_id", async (req, res) => {
       }).catch(() => {});
     }
 
-    res.json(match);
+    return res.json(match);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch match" });
+    return handleMatchRouteError(err, res);
+  }
+});
+
+router.get("/matches/:match_id/presentation", async (req, res) => {
+  try {
+    const id = parseInt(req.params.match_id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid match ID" });
+      return;
+    }
+    const match = await getMatchById(id);
+    if (!match || !isTrackedLeague(match.league_id) || isBlockedLeague(match.league_name)) {
+      res.status(404).json({ error: "Match not found" });
+      return;
+    }
+    res.json(await getMatchPresentation(match));
+  } catch (err) {
+    res.status(502).json({ error: "Lineup and player data are temporarily unavailable" });
   }
 });
 
