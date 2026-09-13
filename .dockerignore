@@ -11,6 +11,8 @@ dist
 **/dist
 coverage
 **/coverage
+*.tsbuildinfo
+**/*.tsbuildinfo
 
 # Local/editor/cache files.
 .git
