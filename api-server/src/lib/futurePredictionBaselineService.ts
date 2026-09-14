@@ -3,6 +3,7 @@ import { logger } from "./logger";
 import { fetchFootball, type Match } from "./soccerService";
 import { getMatchStats } from "./statsService";
 import { getEnhancedPrediction } from "./enhancedStatsService";
+import { applyDataQualityReliability } from "./predictionDataQuality";
 import { savePrediction } from "./predictionStore";
 import { getConfidenceBand, getPredictedOutcome } from "./predictionAccuracyAuditService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
@@ -56,6 +57,7 @@ type BaselinePrediction = {
   homeXg: number | null;
   awayXg: number | null;
   confidence: number | null;
+  dataTier: string;
 };
 
 type BaselineRunResult = {
@@ -238,15 +240,22 @@ async function computeBaseline(match: Match): Promise<BaselinePrediction | null>
   );
 
   const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);
+  const quality = applyDataQualityReliability(
+    normalized,
+    stats.home,
+    stats.away,
+    numberOrNull(raw.confidence_score),
+  );
   return {
-    home: normalized.home,
-    draw: normalized.draw,
-    away: normalized.away,
+    home: quality.probabilities.home,
+    draw: quality.probabilities.draw,
+    away: quality.probabilities.away,
     over25: numberOrNull(raw.over_25),
     btts: numberOrNull(raw.btts),
     homeXg: numberOrNull(raw.home_xg),
     awayXg: numberOrNull(raw.away_xg),
-    confidence: numberOrNull(raw.confidence_score),
+    confidence: quality.confidence,
+    dataTier: quality.dataTier,
   };
 }
 
@@ -263,7 +272,7 @@ async function insertBaselineAudit(match: Match, checkpoint: string, prediction:
        home_xg, away_xg, confidence, pick_confidence, confidence_band,
        predicted_outcome
      ) VALUES (
-       $1,$2,$3,$4,$5,'prematch',$6,NULL,'stats-baseline',$7,$8,
+       $1,$2,$3,$4,$5,'prematch',$6,NULL,$20,$7,$8,
        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
      )
      ON CONFLICT (fixture_id, checkpoint, model_version, engine_revision) DO NOTHING`,
@@ -287,6 +296,7 @@ async function insertBaselineAudit(match: Match, checkpoint: string, prediction:
       pickConfidence,
       confidenceBand,
       predictedOutcome,
+      prediction.dataTier,
     ],
   );
   return (result.rowCount ?? 0) > 0;
