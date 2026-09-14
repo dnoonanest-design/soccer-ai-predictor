@@ -5,6 +5,7 @@ import {
   getPredictionAccuracyAuditStatus,
   verifyPredictionAuditIntegrity,
 } from "../lib/predictionAccuracyAuditService";
+import { getPerformanceIntelligenceReport } from "../lib/performanceIntelligenceService";
 import { logger } from "../lib/logger";
 
 const router = Router();
@@ -26,6 +27,17 @@ router.get("/accuracy/audit", async (_req, res) => {
   } catch (err) {
     logger.error({ err }, "Failed to fetch prediction accuracy audit");
     return res.status(500).json({ error: "Failed to fetch prediction accuracy audit" });
+  }
+});
+
+router.get("/accuracy/performance", async (req, res) => {
+  try {
+    const days = Number(req.query.days ?? 14);
+    const report = await getPerformanceIntelligenceReport(days);
+    return res.json(report);
+  } catch (err) {
+    logger.error({ err }, "Failed to fetch performance intelligence report");
+    return res.status(500).json({ error: "Failed to fetch performance intelligence report" });
   }
 });
 
