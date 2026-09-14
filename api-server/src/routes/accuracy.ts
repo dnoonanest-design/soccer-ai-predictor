@@ -20,44 +20,67 @@ function disableCaching(res: any) {
 
 async function getBalancedRecentLedger(integrityStatus: string) {
   const result = await pool.query(`
-    WITH recent_settled AS (
+    WITH settled_ranked AS (
       SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
              phase, checkpoint, data_tier, model_version, engine_revision,
              home_win_prob, draw_prob, away_win_prob, predicted_outcome,
              pick_confidence, confidence_band, actual_outcome, score_home, score_away,
              correct, brier_score, log_loss, over25_correct, btts_correct,
              captured_at, settled_at, audit_signature, signature_version,
-             settlement_signature
+             settlement_signature,
+             ROW_NUMBER() OVER (
+               PARTITION BY fixture_id
+               ORDER BY captured_at DESC, id DESC
+             ) AS fixture_rank
         FROM prediction_audit_records
        WHERE settled_at IS NOT NULL
+    ), pending_ranked AS (
+      SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
+             phase, checkpoint, data_tier, model_version, engine_revision,
+             home_win_prob, draw_prob, away_win_prob, predicted_outcome,
+             pick_confidence, confidence_band, actual_outcome, score_home, score_away,
+             correct, brier_score, log_loss, over25_correct, btts_correct,
+             captured_at, settled_at, audit_signature, signature_version,
+             settlement_signature,
+             ROW_NUMBER() OVER (
+               PARTITION BY fixture_id
+               ORDER BY captured_at DESC, id DESC
+             ) AS fixture_rank
+        FROM prediction_audit_records
+       WHERE settled_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM prediction_audit_records settled
+            WHERE settled.fixture_id = prediction_audit_records.fixture_id
+              AND settled.settled_at IS NOT NULL
+         )
+    ), recent_settled AS (
+      SELECT * FROM settled_ranked
+       WHERE fixture_rank = 1
        ORDER BY settled_at DESC, captured_at DESC
        LIMIT 20
     ), recent_pending AS (
-      SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
-             phase, checkpoint, data_tier, model_version, engine_revision,
-             home_win_prob, draw_prob, away_win_prob, predicted_outcome,
-             pick_confidence, confidence_band, actual_outcome, score_home, score_away,
-             correct, brier_score, log_loss, over25_correct, btts_correct,
-             captured_at, settled_at, audit_signature, signature_version,
-             settlement_signature
-        FROM prediction_audit_records
-       WHERE settled_at IS NULL
-       ORDER BY captured_at DESC
+      SELECT * FROM pending_ranked
+       WHERE fixture_rank = 1
+       ORDER BY kickoff_at ASC NULLS LAST, captured_at DESC
        LIMIT 20
     )
-    SELECT * FROM recent_settled
-    UNION ALL
-    SELECT * FROM recent_pending
-    ORDER BY settled_at DESC NULLS LAST, captured_at DESC
+    SELECT * FROM (
+      SELECT * FROM recent_settled
+      UNION ALL
+      SELECT * FROM recent_pending
+    ) ledger
+    ORDER BY (settled_at IS NULL), COALESCE(settled_at, captured_at) DESC
   `);
 
   return result.rows.map((row: any) => {
+    const { fixture_rank: _fixtureRank, ...publicRow } = row;
     const v3Sealed =
       row.signature_version === "hmac-sha256-v3" &&
       Boolean(row.audit_signature) &&
       (row.settled_at == null || Boolean(row.settlement_signature));
     return {
-      ...row,
+      ...publicRow,
       id: Number(row.id),
       fixture_id: Number(row.fixture_id),
       league_id: row.league_id == null ? null : Number(row.league_id),
@@ -94,9 +117,8 @@ router.get("/accuracy/audit", async (_req, res) => {
     await settlePredictionAuditRecords();
     const report = await getPredictionAccuracyAuditReport();
 
-    // A results ledger must not be crowded out by newly captured future rows.
-    // Always return a useful mix of the latest 20 settled results and 20 pending
-    // checkpoints, with completed results first.
+    // The public Performance ledger is fixture-level. The underlying audit keeps
+    // every checkpoint for calibration, but users should see each match once.
     const recent = await getBalancedRecentLedger(report.integrity.status);
     return res.json({ ...report, recent });
   } catch (err) {
