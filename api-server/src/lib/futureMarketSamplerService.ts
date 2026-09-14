@@ -11,6 +11,7 @@ import {
   captureMarketSnapshots,
   type RawOddsEvent,
 } from "./marketIntelligenceService";
+import { getOddsOptimizationStatus } from "./oddsOptimizationService";
 import { waitForRateLimit } from "./rateLimiter";
 import {
   fetchFootball,
@@ -116,7 +117,6 @@ export function startFutureMarketSampler() {
   if (started || !ENABLED) return;
   started = true;
 
-  // Initialize budget from database on startup
   void ensureDailyBudgetInitialized();
 
   timer = setInterval(() => {
@@ -274,9 +274,12 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
     );
 
     for (const group of groups.slice(0, callsAllowed)) {
+      const before = getOddsOptimizationStatus();
       const events = await fetchOddsForSport(group.sportKey);
-      oddsCalls++;
-      oddsCallsToday++;
+      const after = getOddsOptimizationStatus();
+      const providerCalls = countProviderCalls(before, after);
+      oddsCalls += providerCalls;
+      oddsCallsToday += providerCalls;
 
       if (!events.length) {
         emptySportKeyUntil.set(group.sportKey, Date.now() + EMPTY_SPORT_KEY_COOLDOWN_MS);
@@ -287,7 +290,6 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       const matches = group.fixtures.map(toMatch);
       const result = await captureMarketSnapshots(matches, events);
       observations += Number(result.observations ?? 0);
-      // Count only fixtures that actually had market snapshots stored (result.fixtures)
       capturedFixtureCount += Number(result.fixtures ?? 0);
     }
 
@@ -319,6 +321,11 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   }
 }
 
+function countProviderCalls(before: ReturnType<typeof getOddsOptimizationStatus>, after: ReturnType<typeof getOddsOptimizationStatus>) {
+  if (!after.enabled || !after.installed) return 1;
+  return Math.max(0, Number(after.requests.providerRequests ?? 0) - Number(before.requests.providerRequests ?? 0));
+}
+
 async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   if (
     fixtureCacheFetchedAt > 0 &&
@@ -336,10 +343,6 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
   let fallbackCompetitionsQueried = 0;
   let fallbackCompetitionsWithFixtures = 0;
 
-  // Primary path: ask API-Football for each calendar date without a season
-  // filter. This is the most reliable way to discover all matches that are
-  // actually scheduled on those dates, regardless of how a competition's
-  // season is labelled by the provider.
   for (const date of dates) {
     const path = `/fixtures?date=${date}&timezone=UTC`;
     try {
@@ -379,9 +382,6 @@ async function getFutureFixtures(now: Date): Promise<FutureFixture[]> {
 
   trackedFixturesFromDates = deduped.size;
 
-  // Fallback path: if date discovery produces no tracked fixtures at all,
-  // query every tracked competition explicitly. Resolve each competition's
-  // current season so season-label changes cannot hide legitimate fixtures.
   if (deduped.size === 0) {
     for (const competition of TRACKED_COMPETITIONS) {
       fallbackCompetitionsQueried++;
@@ -625,7 +625,6 @@ async function recordSamplerJob(
   try {
     const now = new Date();
 
-    // Record main sampler job
     await db.insert(backgroundJobRuns).values({
       jobName: "future_market_sampler",
       status,
@@ -636,7 +635,6 @@ async function recordSamplerJob(
       finishedAt: now,
     });
 
-    // If odds calls were made, record usage for budget tracking across restarts
     if (oddsCalls && oddsCalls > 0) {
       await db.insert(backgroundJobRuns).values({
         jobName: "future_market_sampler_odds_usage",
@@ -696,11 +694,6 @@ function dateKeysBetween(start: Date, end: Date) {
   return keys;
 }
 
-/**
- * Reconstruct daily odds API call budget from database job records.
- * Queries future_market_sampler_odds_usage rows since midnight UTC.
- * Ensures budget survives process restarts.
- */
 async function reconstructDailyBudgetFromDb(): Promise<number> {
   try {
     const midnightUtc = new Date();
