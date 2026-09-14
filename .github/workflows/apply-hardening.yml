@@ -36,10 +36,8 @@ jobs:
       - name: Regenerate lockfile
         run: pnpm install --lockfile-only --no-frozen-lockfile
 
-      - name: Remove one-time patch helpers
-        run: |
-          rm -f scripts/apply-hardening.mjs
-          rm -f .github/workflows/apply-hardening.yml
+      - name: Keep workflow changes for a separately-authorized update
+        run: git restore .github/workflows/market-intelligence-ci.yml
 
       - name: Commit generated hardening changes
         run: |
