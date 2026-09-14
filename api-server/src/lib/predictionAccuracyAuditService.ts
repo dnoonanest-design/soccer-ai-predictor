@@ -2,6 +2,7 @@ import { pool } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, getAllMatches, type Match } from "./soccerService";
 import { getMatchStats } from "./statsService";
+import { applyDataQualityReliability } from "./predictionDataQuality";
 import {
   getEnhancedPrediction,
   type LiveMatchStatsInput,
@@ -440,8 +441,14 @@ async function computeAuditPrediction(
   );
 
   const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);
+  const quality = applyDataQualityReliability(
+    normalized,
+    stats.home,
+    stats.away,
+    numberOrNull(raw.confidence_score),
+  );
   let circumstances: any = null;
-  let adjusted = normalized;
+  let adjusted = quality.probabilities;
 
   if (includeCircumstances) {
     circumstances = await collectMatchCircumstances(
@@ -455,7 +462,7 @@ async function computeAuditPrediction(
       );
       return null;
     });
-    adjusted = await applyCircumstanceCalibration(match, normalized);
+    adjusted = await applyCircumstanceCalibration(match, adjusted);
   }
 
   return {
@@ -466,12 +473,14 @@ async function computeAuditPrediction(
     btts: numberOrNull(raw.btts),
     homeXg: numberOrNull(raw.home_xg),
     awayXg: numberOrNull(raw.away_xg),
-    confidence: numberOrNull(raw.confidence_score),
+    confidence: quality.confidence,
     circumstanceScoreHome: numberOrNull(circumstances?.circumstanceScoreHome),
     circumstanceScoreAway: numberOrNull(circumstances?.circumstanceScoreAway),
     homeFormScore: numberOrNull(circumstances?.homeFormScore),
     awayFormScore: numberOrNull(circumstances?.awayFormScore),
-    dataTier: includeCircumstances ? "stats+circumstances" : "stats",
+    dataTier: includeCircumstances
+      ? `${quality.dataTier}+circumstances`
+      : quality.dataTier,
   };
 }
 

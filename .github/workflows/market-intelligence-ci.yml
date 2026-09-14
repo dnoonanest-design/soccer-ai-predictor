@@ -6,20 +6,25 @@ on:
   push:
     branches: [main, feature/market-intelligence-layer, fix/railway-runtime-validation]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
+          package-manager-cache: false
 
       - name: Enable pnpm
         run: |
+          npm install --global corepack@0.36.0
           corepack enable
           corepack prepare pnpm@11.19.0 --activate
 
@@ -72,3 +77,60 @@ jobs:
 
       - name: Build production Docker image
         run: docker build -t soccer-ai-predictor:ci .
+
+  macos-compatibility:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Enable pinned pnpm
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+
+      - name: Install dependencies on macOS
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck on macOS
+        run: pnpm typecheck
+
+      - name: Test on macOS
+        run: pnpm test
+
+      - name: Build dashboard and API on macOS
+        run: pnpm railway:build
+
+  release-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
+    needs: [build, macos-compatibility]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Create Railway release marker
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$GITHUB_SHA" > .railway-release
+          git add .railway-release
+          if git diff --cached --quiet; then
+            echo "Validated commit is already marked for production"
+            exit 0
+          fi
+          git diff --cached --check
+          git commit -m "Release validated $GITHUB_SHA [skip ci]"
+          git push origin HEAD:main

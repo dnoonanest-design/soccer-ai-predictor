@@ -1,6 +1,6 @@
 FROM node:22-slim
 WORKDIR /app
-RUN npm i -g corepack@latest && corepack enable && corepack prepare pnpm@11.19.0 --activate
+RUN npm i -g corepack@0.36.0 && corepack enable && corepack prepare pnpm@11.19.0 --activate
 COPY . .
 RUN pnpm install --frozen-lockfile
 RUN pnpm railway:build

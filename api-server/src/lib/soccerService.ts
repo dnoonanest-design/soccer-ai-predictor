@@ -32,6 +32,11 @@ const CACHE_TTL = {
 
 type CacheEntry<T> = { data: T; fetchedAt: number };
 const cache = new Map<string, CacheEntry<unknown>>();
+const STALE_LIVE_RECHECK_MS = 10 * 60_000;
+const STALE_LIVE_OVERRIDE_TTL_MS = 6 * 60 * 60_000;
+const staleLiveRefreshAt = new Map<number, number>();
+const staleLiveOverride = new Map<number, CacheEntry<ApiFootballFixture>>();
+const staleLiveSuppressionLogAt = new Map<number, number>();
 
 function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -456,6 +461,48 @@ function requireFixtureArray(data: unknown, path: string): ApiFootballFixture[] 
   });
 }
 
+function cachedStaleLiveOverride(fixtureId: number): ApiFootballFixture | null {
+  const cached = staleLiveOverride.get(fixtureId);
+  if (!cached) return null;
+  if (Date.now() - cached.fetchedAt > STALE_LIVE_OVERRIDE_TTL_MS) {
+    staleLiveOverride.delete(fixtureId);
+    return null;
+  }
+  return cached.data;
+}
+
+async function reconcileStaleLiveFixture(
+  fixture: ApiFootballFixture,
+): Promise<ApiFootballFixture | null> {
+  const fixtureId = fixture.fixture.id;
+  const cached = cachedStaleLiveOverride(fixtureId);
+  if (cached && normaliseStatus(cached.fixture.status.short) !== "live") return cached;
+
+  const lastAttempt = staleLiveRefreshAt.get(fixtureId) ?? 0;
+  if (Date.now() - lastAttempt < STALE_LIVE_RECHECK_MS) return cached;
+  staleLiveRefreshAt.set(fixtureId, Date.now());
+
+  try {
+    const path = `/fixtures?id=${fixtureId}`;
+    const rows = requireFixtureArray(await fetchFootball(path), path);
+    const refreshed = rows.find((row) => row.fixture.id === fixtureId) ?? null;
+    if (refreshed) {
+      staleLiveOverride.set(fixtureId, { data: refreshed, fetchedAt: Date.now() });
+      const status = normaliseStatus(refreshed.fixture.status.short);
+      if (status !== "live") {
+        logger.info(
+          { fixtureId, refreshedStatus: refreshed.fixture.status.short },
+          "stale live fixture reconciled with exact provider status",
+        );
+      }
+    }
+    return refreshed ?? cached;
+  } catch (err) {
+    logger.warn({ err, fixtureId }, "stale live fixture reconciliation failed");
+    return cached;
+  }
+}
+
 async function getTodayFixtures(): Promise<ApiFootballFixture[]> {
   const cached = getCached<ApiFootballFixture[]>(
     "today_fixtures",
@@ -637,17 +684,27 @@ export async function getAllMatches(
     const fixtureId = fixture.fixture.id;
     const dailyStatus = normaliseStatus(fixture.fixture.status.short);
     if (dailyStatus === "live" && !liveIds.has(fixtureId)) {
-      logger.warn(
-        {
-          fixtureId,
-          cachedStatus: fixture.fixture.status.short,
-          cachedMinute: fixture.fixture.status.elapsed,
-        },
-        "suppressing stale live fixture from daily cache",
-      );
+      const refreshed = await reconcileStaleLiveFixture(fixture);
+      if (refreshed && normaliseStatus(refreshed.fixture.status.short) !== "live") {
+        combined.set(fixtureId, refreshed);
+        continue;
+      }
+
+      const lastLogged = staleLiveSuppressionLogAt.get(fixtureId) ?? 0;
+      if (Date.now() - lastLogged >= STALE_LIVE_RECHECK_MS) {
+        staleLiveSuppressionLogAt.set(fixtureId, Date.now());
+        logger.warn(
+          {
+            fixtureId,
+            cachedStatus: fixture.fixture.status.short,
+            cachedMinute: fixture.fixture.status.elapsed,
+          },
+          "suppressing stale live fixture while exact status is unresolved",
+        );
+      }
       continue;
     }
-    combined.set(fixtureId, fixture);
+    combined.set(fixtureId, cachedStaleLiveOverride(fixtureId) ?? fixture);
   }
   for (const fixture of liveFixtures) combined.set(fixture.fixture.id, fixture);
   const combinedFixtures = Array.from(combined.values());

@@ -10,13 +10,13 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   },
   "dependencies": {
     "@workspace/db": "workspace:*",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
-    "esbuild": "0.25.8",
+    "esbuild": "0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
     "express": "^5.2.1",
     "pino": "^10.0.0",
@@ -25,7 +25,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/node": "^25.3.3",
+    "@types/node": "^22.0.0",
     "vitest": "^3.2.4"
   }
 }
