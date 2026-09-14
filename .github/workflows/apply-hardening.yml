@@ -1,0 +1,51 @@
+name: Apply hardening patch
+
+on:
+  push:
+    branches:
+      - fix/compatibility-reliability-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hardening branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/compatibility-reliability-hardening
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pinned pnpm
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+
+      - name: Apply source updates
+        run: node scripts/apply-hardening.mjs
+
+      - name: Regenerate lockfile
+        run: pnpm install --lockfile-only --no-frozen-lockfile
+
+      - name: Remove one-time patch helpers
+        run: |
+          rm -f scripts/apply-hardening.mjs
+          rm -f .github/workflows/apply-hardening.yml
+
+      - name: Commit generated hardening changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Harden compatibility, live reconciliation and prediction confidence"
+          git push origin HEAD:fix/compatibility-reliability-hardening
