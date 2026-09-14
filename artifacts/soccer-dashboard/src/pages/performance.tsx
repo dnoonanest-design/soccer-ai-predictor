@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle2, Database, Fingerprint, LockKeyhole, Refres
 
 type MetricRow = { phase?: string; checkpoint?: string; confidence_band?: string; model_version?: string; engine_revision?: string; group_name?: string; samples: number; accuracy: number | null; brierScore: number | null; logLoss: number | null; averageConfidence: number | null };
 type Totals = { captured: number; fixtures: number; settled: number; pending: number; accuracy: number | null; brierScore: number | null; logLoss: number | null; over25Accuracy: number | null; bttsAccuracy: number | null };
+type LedgerRow = { id: number; fixture_id: number; home_team: string; away_team: string; phase: string; checkpoint: string; predicted_outcome: string; actual_outcome: string | null; pick_confidence: number; correct: boolean | null; brier_score: number | null; score_home: number | null; score_away: number | null; captured_at: string; settled_at: string | null; integrity_status: "verified" | "invalid" | "legacy-signed" | "legacy-unsigned" };
 type AuditReport = {
   generatedAt: string;
   dataMaturity: "collecting" | "developing" | "mature";
@@ -16,7 +17,7 @@ type AuditReport = {
   byCheckpoint: MetricRow[];
   byConfidence: MetricRow[];
   byModel: MetricRow[];
-  recent: Array<{ id: number; fixture_id: number; home_team: string; away_team: string; phase: string; checkpoint: string; predicted_outcome: string; actual_outcome: string | null; pick_confidence: number; correct: boolean | null; brier_score: number | null; captured_at: string; integrity_status: "verified" | "invalid" | "legacy-unsigned" }>;
+  recent: LedgerRow[];
 };
 
 type PerformanceReport = {
@@ -36,7 +37,7 @@ type PerformanceReport = {
 };
 
 async function api<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -44,6 +45,8 @@ async function api<T>(url: string): Promise<T> {
 const pct = (value: number | null | undefined) => value == null ? "—" : `${(value * 100).toFixed(1)}%`;
 const score = (value: number | null | undefined) => value == null ? "—" : value.toFixed(3);
 const outcome = (value: string | null) => !value ? "Pending" : value === "home" ? "Home" : value === "away" ? "Away" : "Draw";
+const resultText = (row: LedgerRow) => row.correct == null ? "PENDING" : row.correct ? "WIN" : "MISS";
+const resultClass = (row: LedgerRow) => row.correct == null ? "text-muted-foreground" : row.correct ? "text-emerald-500" : "text-destructive";
 
 function Metric({ label, value, note }: { label: string; value: string | number; note: string }) {
   return <Card className="p-4 border-border/60 bg-card/70"><div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground font-mono">{label}</div><div className="text-2xl font-black font-mono mt-1">{value}</div><div className="text-[11px] text-muted-foreground mt-1">{note}</div></Card>;
@@ -98,9 +101,22 @@ export default function Performance() {
     <div className="grid lg:grid-cols-2 gap-4"><BreakdownTable title="Pre-match vs In-play" rows={data.byPhase} label={(row) => row.phase === "live" ? "In-play" : "Pre-match"} /><BreakdownTable title="Checkpoint Accuracy" rows={data.byCheckpoint} label={(row) => `${row.phase === "live" ? "Live" : "Pre-match"} · ${(row.checkpoint ?? "").replaceAll("_", " ")}`} /></div>
     <div className="grid lg:grid-cols-2 gap-4"><BreakdownTable title="Confidence Calibration" rows={data.byConfidence} label={(row) => row.confidence_band ?? "Unknown"} /><BreakdownTable title="Model Revisions" rows={data.byModel} label={(row) => `${row.model_version ?? "Unknown"} · ${row.engine_revision ?? "unknown"}`} /></div>
 
-    <Card className="p-4 border-border/60"><div className="flex items-start justify-between gap-3 mb-3"><div><h2 className="font-bold">Prediction Ledger</h2><p className="text-xs text-muted-foreground mt-1">Original checkpoint, timestamp and result. Entries cannot be edited or removed through the application.</p></div><Badge variant="secondary" className="font-mono">{data.dataMaturity.toUpperCase()}</Badge></div>
-      <div className="overflow-x-auto"><table className="w-full text-xs min-w-[900px]"><thead className="text-muted-foreground uppercase font-mono"><tr><th className="text-left py-2">Match</th><th>Captured</th><th>Checkpoint</th><th>Pick</th><th>Confidence</th><th>Actual</th><th>Result</th><th>Brier</th><th>Seal</th></tr></thead><tbody>
-        {data.recent.map((row) => <tr key={row.id} className="border-t border-border/40"><td className="py-2"><div className="font-medium">{row.home_team} v {row.away_team}</div><div className="text-[10px] text-muted-foreground font-mono">FIXTURE {row.fixture_id}</div></td><td className="text-center font-mono">{format(new Date(row.captured_at), "dd MMM HH:mm")}</td><td className="text-center font-mono">{row.checkpoint.replaceAll("_", " ")}</td><td className="text-center font-medium">{outcome(row.predicted_outcome)}</td><td className="text-center font-mono">{row.pick_confidence.toFixed(1)}%</td><td className="text-center">{outcome(row.actual_outcome)}</td><td className={`text-center font-bold ${row.correct == null ? "text-muted-foreground" : row.correct ? "text-emerald-500" : "text-destructive"}`}>{row.correct == null ? "PENDING" : row.correct ? "WIN" : "MISS"}</td><td className="text-center font-mono">{score(row.brier_score)}</td><td className="text-center">{row.integrity_status === "verified" ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" aria-label="Verified" /> : <AlertTriangle className="h-4 w-4 text-amber-500 mx-auto" aria-label={row.integrity_status} />}</td></tr>)}
+    <Card className="p-4 border-border/60"><div className="flex items-start justify-between gap-3 mb-3"><div><h2 className="font-bold">Prediction Ledger</h2><p className="text-xs text-muted-foreground mt-1">One row per match using its latest audited checkpoint. Full checkpoint history still feeds the calibration statistics above.</p></div><Badge variant="secondary" className="font-mono">{data.dataMaturity.toUpperCase()}</Badge></div>
+      <div className="md:hidden space-y-3">
+        {data.recent.map((row) => <div key={row.fixture_id} className="rounded-lg border border-border/50 p-3 bg-muted/10">
+          <div className="flex items-start justify-between gap-3"><div><div className="font-semibold text-sm">{row.home_team} v {row.away_team}</div><div className="text-[10px] text-muted-foreground font-mono mt-0.5">FIXTURE {row.fixture_id}</div></div><Badge variant="outline" className={`font-mono ${resultClass(row)}`}>{resultText(row)}</Badge></div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3 mt-3 text-xs">
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Prediction</div><div className="font-semibold mt-0.5">{outcome(row.predicted_outcome)} · {row.pick_confidence.toFixed(1)}%</div></div>
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Actual</div><div className="font-semibold mt-0.5">{row.actual_outcome ? `${outcome(row.actual_outcome)} · ${row.score_home ?? "—"}-${row.score_away ?? "—"}` : "Pending"}</div></div>
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Checkpoint</div><div className="font-mono mt-0.5">{row.checkpoint.replaceAll("_", " ")}</div></div>
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Captured</div><div className="font-mono mt-0.5">{format(new Date(row.captured_at), "dd MMM HH:mm")}</div></div>
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Brier</div><div className="font-mono mt-0.5">{score(row.brier_score)}</div></div>
+            <div><div className="text-[10px] uppercase text-muted-foreground font-mono">Seal</div><div className="mt-0.5 flex items-center gap-1">{row.integrity_status === "verified" ? <><CheckCircle2 className="h-4 w-4 text-emerald-500" /><span>Verified</span></> : <><AlertTriangle className="h-4 w-4 text-amber-500" /><span>{row.integrity_status}</span></>}</div></div>
+          </div>
+        </div>)}
+      </div>
+      <div className="hidden md:block overflow-x-auto"><table className="w-full text-xs min-w-[900px]"><thead className="text-muted-foreground uppercase font-mono"><tr><th className="text-left py-2">Match</th><th>Captured</th><th>Checkpoint</th><th>Pick</th><th>Confidence</th><th>Actual</th><th>Score</th><th>Result</th><th>Brier</th><th>Seal</th></tr></thead><tbody>
+        {data.recent.map((row) => <tr key={row.fixture_id} className="border-t border-border/40"><td className="py-2"><div className="font-medium">{row.home_team} v {row.away_team}</div><div className="text-[10px] text-muted-foreground font-mono">FIXTURE {row.fixture_id}</div></td><td className="text-center font-mono">{format(new Date(row.captured_at), "dd MMM HH:mm")}</td><td className="text-center font-mono">{row.checkpoint.replaceAll("_", " ")}</td><td className="text-center font-medium">{outcome(row.predicted_outcome)}</td><td className="text-center font-mono">{row.pick_confidence.toFixed(1)}%</td><td className="text-center">{outcome(row.actual_outcome)}</td><td className="text-center font-mono">{row.actual_outcome ? `${row.score_home ?? "—"}-${row.score_away ?? "—"}` : "—"}</td><td className={`text-center font-bold ${resultClass(row)}`}>{resultText(row)}</td><td className="text-center font-mono">{score(row.brier_score)}</td><td className="text-center">{row.integrity_status === "verified" ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" aria-label="Verified" /> : <AlertTriangle className="h-4 w-4 text-amber-500 mx-auto" aria-label={row.integrity_status} />}</td></tr>)}
       </tbody></table></div>
     </Card>
 
