@@ -224,7 +224,21 @@ export async function runFinishedSettlement() {
     // The normal match window starts today. Resolve outstanding prediction IDs
     // directly so a late result missed before midnight is caught automatically.
     const pendingFixtureIds = await getUnsettledPredictionFixtureIds(14);
-    const matches = await getMatchesByIds(pendingFixtureIds);
+    // A result may already be settled while its player feed was temporarily
+    // incomplete. Persistently recover those fixtures instead of relying on an
+    // in-memory retry set which disappears on restart.
+    const incompletePlayerRows = await pool.query<{ fixture_id: number }>(`
+      SELECT mo.fixture_id
+      FROM match_outcomes mo
+      LEFT JOIN player_match_stats pms ON pms.fixture_id = mo.fixture_id
+      WHERE mo.recorded_at >= NOW() - INTERVAL '14 days'
+      GROUP BY mo.fixture_id
+      HAVING COUNT(pms.id) < 14 OR COUNT(DISTINCT pms.team_id) < 2
+      ORDER BY MAX(mo.recorded_at) DESC
+      LIMIT 50
+    `);
+    const fixtureIds = [...new Set([...pendingFixtureIds, ...incompletePlayerRows.rows.map((row) => row.fixture_id)])];
+    const matches = await getMatchesByIds(fixtureIds);
 
     for (const match of matches) {
       if (match.status !== "finished") continue;
@@ -242,8 +256,9 @@ export async function runFinishedSettlement() {
       if (!outcomeSaved) continue;
 
       const homeResult: "win" | "draw" | "loss" = home > away ? "win" : home < away ? "loss" : "draw";
+      let playerStatsComplete = false;
       try {
-        await collectPlayerStatsForFixture(
+        playerStatsComplete = await collectPlayerStatsForFixture(
           match.id,
           match.league_id ?? 0,
           new Date(match.kickoff ?? Date.now()),
@@ -275,7 +290,9 @@ export async function runFinishedSettlement() {
         await settleTrackedBet(bet.id, won ? "won" : "lost");
       }
 
-      processedFinishedFixtures.add(match.id);
+      // Incomplete player feeds remain eligible for the persistent recovery
+      // query on the next pass. Inserts/profile updates are idempotent.
+      if (playerStatsComplete) processedFinishedFixtures.add(match.id);
       settled++;
     }
 

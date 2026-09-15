@@ -10,7 +10,7 @@ import { getOfflineFallbackModel, MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiv
 import { collectMatchCircumstances } from "./circumstanceLearningService";
 import { logger } from "./logger";
 
-export const CANONICAL_PREDICTION_PIPELINE_VERSION = "canonical-v1";
+export const CANONICAL_PREDICTION_PIPELINE_VERSION = "canonical-v2-player-participation";
 
 type ThreeWay = { home: number; draw: number; away: number };
 
@@ -89,9 +89,15 @@ function featureUsage(stats: MatchStatsResult, raw: EnhancedPrediction, live: bo
   const unavailable: string[] = [];
   if (raw.h2h?.matches) used.push("limited head-to-head history"); else unavailable.push("head-to-head history");
   if (raw.home_injuries.length || raw.away_injuries.length) used.push("injuries and suspensions"); else unavailable.push("confirmed injuries/suspensions");
-  if (raw.lineup?.confirmed) used.push("confirmed lineups and player contribution rates"); else unavailable.push("confirmed lineups");
+  if (raw.player_influence) {
+    used.push("confirmed participants: position-aware player form, ratings, scoring runs, creativity, defending and discipline");
+  } else if (raw.lineup?.confirmed) {
+    used.push("confirmed lineups and season player contribution fallback");
+    unavailable.push("stored player-form profile coverage");
+  } else unavailable.push("confirmed lineups and participant-gated player influence");
   if (live && stats.has_live_stats) {
     used.push("score and match time", "shots and shots on target", "live expected goals", "possession", "corners", "cards", "dangerous attacks", "substitutions and match events");
+    if (raw.live_player_performance) used.push("active-player live ratings versus pre-match player baselines");
   } else if (live) {
     unavailable.push("detailed live match telemetry");
   }

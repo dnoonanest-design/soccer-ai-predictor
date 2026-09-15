@@ -1,6 +1,6 @@
 import { db } from "@workspace/db";
-import { playerMatchStats, playerProfiles, playerAiSignals } from "@workspace/db/schema";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { playerMatchStats, playerProfiles } from "@workspace/db/schema";
+import { eq, desc } from "drizzle-orm";
 import { fetchFootball } from "./soccerService.js";
 import { logger } from "./logger.js";
 
@@ -12,7 +12,7 @@ const INTERNATIONAL_LEAGUE_IDS = new Set([
 interface ApiPlayerStat {
   player: { id: number; name: string; photo?: string };
   statistics: Array<{
-    games: { minutes: number | null; rating: string | null; captain: boolean; substitute: boolean; number: number };
+    games: { minutes: number | null; rating: string | null; captain: boolean; substitute: boolean; number: number; position?: string | null };
     goals: { total: number | null; assists: number | null };
     shots: { total: number | null; on: number | null };
     passes: { total: number | null; key: number | null; accuracy: string | null };
@@ -35,17 +35,8 @@ export async function collectPlayerStatsForFixture(
   homeResult: "win" | "draw" | "loss",
   homeGoals: number,
   awayGoals: number
-): Promise<void> {
+): Promise<boolean> {
   try {
-    // Check if already collected for this fixture
-    const existing = await db.select().from(playerMatchStats)
-      .where(eq(playerMatchStats.fixtureId, fixtureId))
-      .limit(1);
-    if (existing.length > 0) {
-      logger.info({ fixtureId }, "player stats already collected, skipping");
-      return;
-    }
-
     const isInternational = INTERNATIONAL_LEAGUE_IDS.has(leagueId);
     // soccerService.fetchFootball already unwraps API-Football's `response`
     // envelope, so this is the array of team/player rows directly.
@@ -53,9 +44,10 @@ export async function collectPlayerStatsForFixture(
     const teamRows = Array.isArray(payload) ? payload : [];
     if (!teamRows.length) {
       logger.debug({ fixtureId }, "no finished player stats returned");
-      return;
+      return false;
     }
 
+    const observedByTeam = new Map<number, number>();
     for (const teamData of teamRows as any[]) {
       const teamId = teamData.team?.id;
       if (teamId !== homeTeamId && teamId !== awayTeamId) {
@@ -67,11 +59,13 @@ export async function collectPlayerStatsForFixture(
         homeResult === "win" ? "loss" : homeResult === "loss" ? "win" : "draw";
       const teamGoalsScored = teamSide === "home" ? homeGoals : awayGoals;
       const teamGoalsConceded = teamSide === "home" ? awayGoals : homeGoals;
+      let observed = 0;
 
       for (const playerData of (teamData.players || []) as ApiPlayerStat[]) {
         const p = playerData.player;
         const s = playerData.statistics?.[0];
         if (!p?.id || !s) continue;
+        observed++;
 
         const minutesPlayed = s.games?.minutes ?? 0;
         const rating = s.games?.rating ? parseFloat(s.games.rating) : null;
@@ -90,7 +84,13 @@ export async function collectPlayerStatsForFixture(
         const dribblesAttempted = s.dribbles?.attempts ?? 0;
         const aerialDuelsWon = s.duels?.won ?? 0;
 
-        await db.insert(playerMatchStats).values({
+        // Snapshot the profile before this result is added. These fields can be
+        // used later for chronological learning without leaking the match being
+        // predicted into its own feature values.
+        const existingProfile = await db.query.playerProfiles.findFirst({
+          where: eq(playerProfiles.playerId, p.id),
+        });
+        const inserted = await db.insert(playerMatchStats).values({
           playerId: p.id,
           playerName: p.name,
           fixtureId,
@@ -118,8 +118,14 @@ export async function collectPlayerStatsForFixture(
           teamResult,
           teamGoalsScored,
           teamGoalsConceded,
-        }).onConflictDoNothing();
+          scoringMomentumAtMatch: existingProfile?.scoringMomentumScore ?? 0,
+          formScoreAtMatch: existingProfile?.formScore ?? 0,
+          confidenceAtMatch: existingProfile?.confidenceScore ?? 0,
+        }).onConflictDoNothing().returning({ id: playerMatchStats.id });
 
+        // A partial fixture import can be retried safely. Only the process that
+        // inserted this player-match row is allowed to advance the profile.
+        if (inserted.length === 0) continue;
         await updatePlayerProfile(p.id, p.name, {
           isInternational, teamId, minutesPlayed, rating, goals, assists,
           shots, shotsOnTarget, passAccuracy, keyPasses, successfulTackles,
@@ -127,12 +133,17 @@ export async function collectPlayerStatsForFixture(
           isStarter: !s.games?.substitute,
           teamGoalsScored, teamGoalsConceded,
           substitutedOff: minutesPlayed > 0 && minutesPlayed < 90 && !s.games?.substitute ? minutesPlayed : null,
-        });
+          position: s.games?.position ?? null,
+        }, existingProfile);
       }
+      observedByTeam.set(teamId, observed);
     }
-    logger.info({ fixtureId }, "player stats collected");
+    const complete = (observedByTeam.get(homeTeamId) ?? 0) >= 7 && (observedByTeam.get(awayTeamId) ?? 0) >= 7;
+    logger.info({ fixtureId, complete, observed: Object.fromEntries(observedByTeam) }, "player stats collected");
+    return complete;
   } catch (err) {
     logger.error({ err, fixtureId }, "failed to collect player stats");
+    return false;
   }
 }
 
@@ -145,12 +156,11 @@ async function updatePlayerProfile(
     shotsOnTarget: number; passAccuracy: number | null; keyPasses: number;
     successfulTackles: number; yellowCards: number; redCards: number;
     teamResult: string; isStarter: boolean; teamGoalsScored: number;
-    teamGoalsConceded: number; substitutedOff: number | null;
-  }
+    teamGoalsConceded: number; substitutedOff: number | null; position: string | null;
+  },
+  existingProfile?: typeof playerProfiles.$inferSelect,
 ): Promise<void> {
-  const existing = await db.query.playerProfiles.findFirst({
-    where: eq(playerProfiles.playerId, playerId)
-  });
+  const existing = existingProfile ?? await db.query.playerProfiles.findFirst({ where: eq(playerProfiles.playerId, playerId) });
 
   const recentMatches = await db.select().from(playerMatchStats)
     .where(eq(playerMatchStats.playerId, playerId))
@@ -165,6 +175,7 @@ async function updatePlayerProfile(
     ? last5Ratings.reduce((a, b) => a + b, 0) / last5Ratings.length
     : null;
   const last10Goals = recentMatches.reduce((s, m) => s + m.goals, 0);
+  const recentPassAccuracy = recentMatches.map((m) => m.passAccuracy).filter((v): v is number => v != null);
 
   let momentumScore = 0;
   for (let i = 0; i < last5.length; i++) {
@@ -173,22 +184,12 @@ async function updatePlayerProfile(
     if (last5[i].assists) momentumScore += (last5[i].assists ?? 0) * 0.3 * weight;
   }
 
-  let consecutiveScored = 0;
-  let consecutiveWithout = 0;
-  let onStreak = true;
-  for (const m of recentMatches) {
-    if (onStreak) {
-      if (m.goals > 0) consecutiveScored++;
-      else { onStreak = false; consecutiveWithout = 0; }
-    } else {
-      if (m.goals === 0) consecutiveWithout++;
-      else break;
-    }
+  let consecutiveScored = 0, consecutiveWithout = 0;
+  if ((recentMatches[0]?.goals ?? 0) > 0) {
+    for (const m of recentMatches) { if (m.goals > 0) consecutiveScored++; else break; }
+  } else {
+    for (const m of recentMatches) { if (m.goals === 0) consecutiveWithout++; else break; }
   }
-
-  const goalsProbability = Math.min(0.95, Math.max(0.02,
-    (momentumScore * 0.4) + (last10Goals / 10 * 0.6)
-  ));
 
   const resultScores = last5.map(m =>
     m.teamResult === "win" ? 1 : m.teamResult === "draw" ? 0 : -1
@@ -197,8 +198,10 @@ async function updatePlayerProfile(
     ? resultScores.reduce((a, b) => a + b, 0) / resultScores.length
     : 0;
 
-  const firstHalf = recentMatches.slice(5).map(m => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
-  const secondHalf = last5.map(m => m.rating ?? 6).reduce((a, b) => a + b, 0) / 5;
+  const olderRatings = recentMatches.slice(5).map(m => m.rating).filter((v): v is number => v != null);
+  const newerRatings = last5.map(m => m.rating).filter((v): v is number => v != null);
+  const firstHalf = olderRatings.length ? olderRatings.reduce((a, b) => a + b, 0) / olderRatings.length : 6.7;
+  const secondHalf = newerRatings.length ? newerRatings.reduce((a, b) => a + b, 0) / newerRatings.length : firstHalf;
   const growthRate = secondHalf - firstHalf;
   const formTrend = growthRate > 0.3 ? "improving"
     : growthRate < -0.3 ? "declining"
@@ -217,12 +220,6 @@ async function updatePlayerProfile(
     1 - (totalCards * 0.02) - ((existing?.substitutedEarlyCount ?? 0) * 0.01)
   ));
 
-  const starterMatches = await db.select().from(playerMatchStats)
-    .where(and(eq(playerMatchStats.playerId, playerId)))
-    .limit(50);
-  const starterWins = starterMatches.filter(m => m.teamResult === "win").length;
-  const teamWinRate = starterMatches.length ? starterWins / starterMatches.length : null;
-
   const base = existing ?? {
     totalMatches: 0, totalStarts: 0, totalGoals: 0, totalAssists: 0,
     totalShots: 0, totalShotsOnTarget: 0, totalKeyPasses: 0,
@@ -230,20 +227,35 @@ async function updatePlayerProfile(
     totalMinutesPlayed: 0, matchesAsStarter: 0, winsAsStarter: 0,
     clubMatches: 0, clubGoals: 0, internationalMatches: 0, internationalGoals: 0,
     substitutedEarlyCount: 0, substitutedLateCount: 0,
+    avgPassAccuracy: null,
+    teamGoalsScoredWhenStarts: null,
+    teamGoalsConcededWhenStarts: null,
   };
 
   const newTotalMatches = (base.totalMatches ?? 0) + 1;
   const newTotalGoals = (base.totalGoals ?? 0) + match.goals;
+  const newTotalShots = (base.totalShots ?? 0) + match.shots;
   const newTotalMinutes = (base.totalMinutesPlayed ?? 0) + match.minutesPlayed;
+  const priorStarts = base.matchesAsStarter ?? 0;
+  const newStarts = priorStarts + (match.isStarter ? 1 : 0);
+  const newStarterWins = (base.winsAsStarter ?? 0) + (match.isStarter && match.teamResult === "win" ? 1 : 0);
+  const expectedMinutes = Math.max(15, Math.min(90, newTotalMinutes / Math.max(1, newTotalMatches)));
+  // Empirical-Bayes goal rate: five-match 0.25 goals/90 prior prevents short
+  // scoring streaks and substitute samples creating extreme probabilities.
+  const goalsPer90 = (newTotalGoals + 1.25) / Math.max(5, newTotalMinutes / 90 + 5);
+  const goalsProbability = Math.max(0.01, Math.min(0.80, 1 - Math.exp(-goalsPer90 * expectedMinutes / 90)));
+  const priorScoredWhenStarts = Number(base.teamGoalsScoredWhenStarts ?? 0) * priorStarts;
+  const priorConcededWhenStarts = Number(base.teamGoalsConcededWhenStarts ?? 0) * priorStarts;
 
   const values = {
     playerId, playerName,
+    position: match.position ?? existing?.position,
     teamId: match.teamId,
     totalMatches: newTotalMatches,
     totalStarts: (base.totalStarts ?? 0) + (match.isStarter ? 1 : 0),
     totalGoals: newTotalGoals,
     totalAssists: (base.totalAssists ?? 0) + match.assists,
-    totalShots: (base.totalShots ?? 0) + match.shots,
+    totalShots: newTotalShots,
     totalShotsOnTarget: (base.totalShotsOnTarget ?? 0) + match.shotsOnTarget,
     totalKeyPasses: (base.totalKeyPasses ?? 0) + match.keyPasses,
     totalSuccessfulTackles: (base.totalSuccessfulTackles ?? 0) + match.successfulTackles,
@@ -251,8 +263,10 @@ async function updatePlayerProfile(
     totalRedCards: (base.totalRedCards ?? 0) + match.redCards,
     totalMinutesPlayed: newTotalMinutes,
     avgRating: last5AvgRating,
-    avgPassAccuracy: match.passAccuracy,
-    avgShotsPerMatch: newTotalGoals / newTotalMatches,
+    avgPassAccuracy: recentPassAccuracy.length
+      ? recentPassAccuracy.reduce((sum, value) => sum + value, 0) / recentPassAccuracy.length
+      : base.avgPassAccuracy,
+    avgShotsPerMatch: newTotalShots / newTotalMatches,
     avgKeyPassesPerMatch: ((base.totalKeyPasses ?? 0) + match.keyPasses) / newTotalMatches,
     avgTacklesPerMatch: ((base.totalSuccessfulTackles ?? 0) + match.successfulTackles) / newTotalMatches,
     avgMinutesPerMatch: newTotalMinutes / newTotalMatches,
@@ -270,11 +284,11 @@ async function updatePlayerProfile(
       (match.substitutedOff && match.substitutedOff < 60 ? 1 : 0),
     substitutedLateCount: (base.substitutedLateCount ?? 0) +
       (match.substitutedOff && match.substitutedOff >= 60 ? 1 : 0),
-    teamWinRateWhenStarts: teamWinRate,
-    teamGoalsScoredWhenStarts: match.teamGoalsScored,
-    teamGoalsConcededWhenStarts: match.teamGoalsConceded,
-    matchesAsStarter: (base.matchesAsStarter ?? 0) + (match.isStarter ? 1 : 0),
-    winsAsStarter: (base.winsAsStarter ?? 0) + (match.isStarter && match.teamResult === "win" ? 1 : 0),
+    teamWinRateWhenStarts: newStarts ? newStarterWins / newStarts : null,
+    teamGoalsScoredWhenStarts: newStarts ? (priorScoredWhenStarts + (match.isStarter ? match.teamGoalsScored : 0)) / newStarts : null,
+    teamGoalsConcededWhenStarts: newStarts ? (priorConcededWhenStarts + (match.isStarter ? match.teamGoalsConceded : 0)) / newStarts : null,
+    matchesAsStarter: newStarts,
+    winsAsStarter: newStarterWins,
     clubMatches: (base.clubMatches ?? 0) + (match.isInternational ? 0 : 1),
     clubGoals: (base.clubGoals ?? 0) + (match.isInternational ? 0 : match.goals),
     internationalMatches: (base.internationalMatches ?? 0) + (match.isInternational ? 1 : 0),

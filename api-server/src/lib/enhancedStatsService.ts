@@ -3,6 +3,12 @@ import { waitForRateLimit } from "./rateLimiter";
 import { relativeStrengthAdjustment } from "./competitionStrength";
 import { getLearnedWeights } from "./adaptiveLearningEngine";
 import { configuredFootballSeason } from "./season";
+import {
+  getMatchPlayerInfluence,
+  type MatchParticipant,
+  type MatchPlayerInfluence,
+  type PlayerInfluenceRecord,
+} from "./playerInfluenceService";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -16,6 +22,7 @@ const SQUAD_TTL           = 6  * 60 * 60 * 1000;
 // event cache left goals and cards out of the momentum bar for far too long.
 const EVENTS_LIVE_TTL     = 12 * 1000;
 const EVENTS_FINISHED_TTL = 60 * 60 * 1000;
+const LIVE_PLAYERS_TTL     = 12 * 1000;
 
 interface CacheEntry<T> { data: T; fetchedAt: number }
 const cache = new Map<string, CacheEntry<unknown>>();
@@ -160,6 +167,25 @@ export interface TeamSpotlights {
   top_assister: PlayerSpotlight;
   top_fouler: PlayerSpotlight;
 }
+export interface LivePlayerPerformanceRecord {
+  player_id: number;
+  name: string;
+  minutes: number;
+  rating: number | null;
+  goals: number;
+  assists: number;
+  shots: number;
+  shots_on_target: number;
+  key_passes: number;
+  tackles: number;
+}
+export interface LivePlayerPerformance {
+  active_players_only: true;
+  home_factor: number;
+  away_factor: number;
+  home: LivePlayerPerformanceRecord[];
+  away: LivePlayerPerformanceRecord[];
+}
 export interface EnhancedPrediction {
   home_win: number;
   draw: number;
@@ -205,6 +231,8 @@ export interface EnhancedPrediction {
   sub_adjusted_away_win?: number;
   home_spotlights?: TeamSpotlights;
   away_spotlights?: TeamSpotlights;
+  player_influence?: MatchPlayerInfluence;
+  live_player_performance?: LivePlayerPerformance;
 }
 
 type ApiPlayer = {
@@ -213,6 +241,20 @@ type ApiPlayer = {
     games: { appearences: number | null; position: string | null };
     goals: { total: number | null; assists: number | null };
     fouls: { committed: number | null; drawn: number | null } | null;
+  }>;
+};
+
+type ApiFixturePlayerRow = {
+  team: { id: number };
+  players: Array<{
+    player: { id: number; name: string };
+    statistics: Array<{
+      games: { minutes: number | null; rating: string | null };
+      goals: { total: number | null; assists: number | null };
+      shots: { total: number | null; on: number | null };
+      passes: { key: number | null };
+      tackles: { total: number | null };
+    }>;
   }>;
 };
 export interface SquadPlayerStats {
@@ -320,6 +362,72 @@ async function fetchMatchEvents(fixtureId: number, isLive: boolean): Promise<Api
   return result;
 }
 
+async function fetchLiveFixturePlayers(fixtureId: number): Promise<ApiFixturePlayerRow[]> {
+  const key = `liveplayers:${fixtureId}`;
+  const cached = getCached<ApiFixturePlayerRow[]>(key, LIVE_PLAYERS_TTL);
+  if (cached) return cached;
+  const data = await apiFetch(`/fixtures/players?fixture=${fixtureId}`) as ApiFixturePlayerRow[] | null;
+  const result = Array.isArray(data) ? data : [];
+  setCache(key, result);
+  return result;
+}
+
+function livePlayerPerformance(
+  rows: ApiFixturePlayerRow[],
+  homeTeamId: number,
+  awayTeamId: number,
+  homeActive: MatchParticipant[],
+  awayActive: MatchParticipant[],
+  historical: MatchPlayerInfluence | null,
+): LivePlayerPerformance | undefined {
+  const convert = (teamId: number, activePlayers: MatchParticipant[]): LivePlayerPerformanceRecord[] => {
+    const active = new Set(activePlayers.map((p) => p.id));
+    const row = rows.find((r) => r.team.id === teamId);
+    return (row?.players ?? []).flatMap((entry) => {
+      if (!active.has(entry.player.id)) return [];
+      const s = entry.statistics?.[0];
+      if (!s || (s.games.minutes ?? 0) <= 0) return [];
+      const parsedRating = s.games.rating == null ? null : Number.parseFloat(s.games.rating);
+      return [{
+        player_id: entry.player.id,
+        name: entry.player.name,
+        minutes: s.games.minutes ?? 0,
+        rating: Number.isFinite(parsedRating) ? parsedRating : null,
+        goals: s.goals.total ?? 0,
+        assists: s.goals.assists ?? 0,
+        shots: s.shots.total ?? 0,
+        shots_on_target: s.shots.on ?? 0,
+        key_passes: s.passes.key ?? 0,
+        tackles: s.tackles.total ?? 0,
+      }];
+    });
+  };
+  const home = convert(homeTeamId, homeActive);
+  const away = convert(awayTeamId, awayActive);
+  if (home.length === 0 && away.length === 0) return undefined;
+  const factor = (current: LivePlayerPerformanceRecord[], prior: PlayerInfluenceRecord[] | undefined) => {
+    const priorById = new Map((prior ?? []).map((p) => [p.player_id, p]));
+    const rated = current.filter((p) => p.rating != null && priorById.has(p.player_id));
+    // Provider ratings summarize actions not represented in team telemetry;
+    // compare against each player's pre-match baseline to avoid counting raw
+    // shots/goals twice. Require broad active-player coverage and cap at 3%.
+    if (rated.length < 5) return 1;
+    const residual = rated.reduce((sum, p) => {
+      const priorPlayer = priorById.get(p.player_id)!;
+      const minutesWeight = Math.max(0.25, Math.min(1, p.minutes / 60));
+      return sum + ((p.rating ?? priorPlayer.rating) - priorPlayer.rating) * minutesWeight;
+    }, 0) / rated.length;
+    return Number(Math.max(0.97, Math.min(1.03, 1 + residual * 0.018)).toFixed(4));
+  };
+  return {
+    active_players_only: true,
+    home_factor: factor(home, historical?.home.involved_players),
+    away_factor: factor(away, historical?.away.involved_players),
+    home,
+    away,
+  };
+}
+
 function computeSubstitutionImpacts(
   events: ApiEvent[],
   homeTeamId: number, awayTeamId: number,
@@ -335,8 +443,9 @@ function computeSubstitutionImpacts(
     const isHome = sub.team.id === homeTeamId;
     const isAway = sub.team.id === awayTeamId;
     if (!isHome && !isAway) continue;
-    const playerIn = sub.player.name ?? "";
-    const playerOut = sub.assist.name ?? "";
+    // API-Football represents substitutions as player=out, assist=in.
+    const playerOut = sub.player.name ?? "";
+    const playerIn = sub.assist.name ?? "";
     const lookup = isHome ? homeLookup : awayLookup;
     const statsIn = lookupByName(playerIn, lookup);
     const statsOut = lookupByName(playerOut, lookup);
@@ -357,6 +466,43 @@ function computeSubstitutionImpacts(
   }
   impacts.sort((a, b) => a.minute - b.minute);
   return impacts;
+}
+
+/** Apply only substitutions which have actually occurred by the forecast time. */
+export function activeParticipantsFromEvents(
+  starters: LineupPlayer[],
+  events: ApiEvent[],
+  teamId: number,
+  matchMinute: number | null,
+  squad: Map<number, SquadPlayerStats>,
+): MatchParticipant[] {
+  const active = new Map<number, MatchParticipant>(starters.map((p) => [p.id, {
+    id: p.id,
+    name: p.name,
+    position: p.position,
+  }]));
+  const nameLookup = buildNameLookup(squad);
+  const substitutions = events
+    .filter((event) => event.type === "subst" && event.team.id === teamId && (matchMinute == null || event.time.elapsed <= matchMinute))
+    .sort((a, b) => a.time.elapsed - b.time.elapsed);
+  for (const event of substitutions) {
+    const outgoingId = event.player.id;
+    if (outgoingId) active.delete(outgoingId);
+    else {
+      const outgoing = lookupByName(event.player.name ?? "", nameLookup);
+      if (outgoing) active.delete(outgoing.id);
+    }
+    const incomingId = event.assist.id ?? 0;
+    if (incomingId > 0) {
+      const stats = squad.get(incomingId) ?? lookupByName(event.assist.name ?? "", nameLookup);
+      active.set(incomingId, {
+        id: incomingId,
+        name: event.assist.name ?? stats?.name ?? "Unknown",
+        position: stats?.position ?? "M",
+      });
+    }
+  }
+  return [...active.values()];
 }
 
 type ApiLineupEntry = {
@@ -678,13 +824,14 @@ export async function getEnhancedPrediction(
   const base = poissonProbs(baseHomeXG, baseAwayXG);
 
   // Shared rate limiter serializes these API calls even when the promises are scheduled together.
-  const [h2h, injuries, lineup, events, homeSquad, awaySquad] = await Promise.allSettled([
+  const [h2h, injuries, lineup, events, homeSquad, awaySquad, livePlayers] = await Promise.allSettled([
     fetchH2H(homeTeamId, awayTeamId),
     fetchInjuries(fixtureId, homeTeamId, awayTeamId),
     fetchLineup(fixtureId, homeTeamId, awayTeamId, leagueId),
     isLive || matchMinute != null ? fetchMatchEvents(fixtureId, isLive) : Promise.resolve([] as ApiEvent[]),
     fetchSquadStats(homeTeamId, leagueId),
     fetchSquadStats(awayTeamId, leagueId),
+    isLive ? fetchLiveFixturePlayers(fixtureId) : Promise.resolve([] as ApiFixturePlayerRow[]),
   ]);
   const h2hResult = h2h.status === "fulfilled" ? h2h.value : null;
   const allInjuries = injuries.status === "fulfilled" ? injuries.value : [] as AbsentPlayer[];
@@ -692,14 +839,44 @@ export async function getEnhancedPrediction(
   const eventsList = events.status === "fulfilled" ? events.value : [] as ApiEvent[];
   const homeSquadMap = homeSquad.status === "fulfilled" ? homeSquad.value : new Map<number, SquadPlayerStats>();
   const awaySquadMap = awaySquad.status === "fulfilled" ? awaySquad.value : new Map<number, SquadPlayerStats>();
+  const livePlayerRows = livePlayers.status === "fulfilled" ? livePlayers.value : [] as ApiFixturePlayerRow[];
   const homeInjuries = allInjuries.filter((i) => i.team_id === homeTeamId);
   const awayInjuries = allInjuries.filter((i) => i.team_id === awayTeamId);
-  const homeInjuryFactor = scaleMultiplicativeFactor(injuryFactor(homeInjuries, homeSquadMap, homeGpg), learnedWeights.injuryFactorScale);
-  const awayInjuryFactor = scaleMultiplicativeFactor(injuryFactor(awayInjuries, awaySquadMap, awayGpg), learnedWeights.injuryFactorScale);
+  // Before official XIs, absences proxy the likely team weakening. Once both
+  // XIs are confirmed the actual participants replace that proxy, preventing
+  // the same missing player being penalised twice.
+  const homeInjuryFactor = lineupResult ? 1 : scaleMultiplicativeFactor(injuryFactor(homeInjuries, homeSquadMap, homeGpg), learnedWeights.injuryFactorScale);
+  const awayInjuryFactor = lineupResult ? 1 : scaleMultiplicativeFactor(injuryFactor(awayInjuries, awaySquadMap, awayGpg), learnedWeights.injuryFactorScale);
   let homeLineupFactor = 1, awayLineupFactor = 1;
+  let playerInfluence: MatchPlayerInfluence | null = null;
+  let homeParticipants: MatchParticipant[] = [];
+  let awayParticipants: MatchParticipant[] = [];
   if (lineupResult) {
-    homeLineupFactor = scaleMultiplicativeFactor(lineupQualityFactor(lineupResult.home, homeSquadMap), learnedWeights.lineupFactorScale);
-    awayLineupFactor = scaleMultiplicativeFactor(lineupQualityFactor(lineupResult.away, awaySquadMap), learnedWeights.lineupFactorScale);
+    homeParticipants = isLive
+      ? activeParticipantsFromEvents(lineupResult.home, eventsList, homeTeamId, matchMinute, homeSquadMap)
+      : lineupResult.home;
+    awayParticipants = isLive
+      ? activeParticipantsFromEvents(lineupResult.away, eventsList, awayTeamId, matchMinute, awaySquadMap)
+      : lineupResult.away;
+    playerInfluence = await getMatchPlayerInfluence(homeParticipants, awayParticipants).catch((err) => {
+      logger.warn({ err, fixtureId }, "player influence unavailable; using season lineup fallback");
+      return null;
+    });
+    const legacyHome = lineupQualityFactor(lineupResult.home, homeSquadMap);
+    const legacyAway = lineupQualityFactor(lineupResult.away, awaySquadMap);
+    if (playerInfluence) {
+      // Stored profiles replace the goals/assists-only fallback in proportion
+      // to reliable profile coverage. Missing player histories remain neutral.
+      const hCoverage = playerInfluence.home.coverage;
+      const aCoverage = playerInfluence.away.coverage;
+      const rawHome = 1 + (playerInfluence.home_xg_factor - 1) + (legacyHome - 1) * (1 - hCoverage);
+      const rawAway = 1 + (playerInfluence.away_xg_factor - 1) + (legacyAway - 1) * (1 - aCoverage);
+      homeLineupFactor = scaleMultiplicativeFactor(Math.max(0.90, Math.min(1.10, rawHome)), learnedWeights.lineupFactorScale);
+      awayLineupFactor = scaleMultiplicativeFactor(Math.max(0.90, Math.min(1.10, rawAway)), learnedWeights.lineupFactorScale);
+    } else {
+      homeLineupFactor = scaleMultiplicativeFactor(legacyHome, learnedWeights.lineupFactorScale);
+      awayLineupFactor = scaleMultiplicativeFactor(legacyAway, learnedWeights.lineupFactorScale);
+    }
   }
   const adjHomeXG = baseHomeXG * homeFormFactor * homeLineupFactor * homeInjuryFactor;
   const adjAwayXG = baseAwayXG * awayFormFactor * awayLineupFactor * awayInjuryFactor;
@@ -723,16 +900,27 @@ export async function getEnhancedPrediction(
   const markets = extendedPoissonMarkets(adjHomeXG, adjAwayXG);
   const confidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
   const reasons = buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName });
+  if (playerInfluence) {
+    const homeNames = playerInfluence.home.star_players.slice(0, 2).map((p) => p.name);
+    const awayNames = playerInfluence.away.star_players.slice(0, 2).map((p) => p.name);
+    if (homeNames.length) reasons.unshift(`${homeTeamName || "Home"} confirmed stars included: ${homeNames.join(", ")}.`);
+    if (awayNames.length) reasons.unshift(`${awayTeamName || "Away"} confirmed stars included: ${awayNames.join(", ")}.`);
+  }
   if (!isLive && learnedWeights.sampleSize >= 250 && learnedPriors) {
     reasons.push(`Adaptive calibration ${learnedWeights.version} applied after chronological holdout validation.`);
   }
   if (strength.home >= 1.08) reasons.unshift(`Manchester Rule: ${homeTeamName || "Home"}'s results carry greater competition-strength weight.`);
   else if (strength.away >= 1.08) reasons.unshift(`Manchester Rule: ${awayTeamName || "Away"}'s results carry greater competition-strength weight.`);
   const liveMomentum = isLive ? liveMomentumFromEvents(eventsList, homeTeamId, awayTeamId, matchMinute, adjHomeXG, adjAwayXG, liveStats) : undefined;
+  const currentPlayerPerformance = isLive && lineupResult
+    ? livePlayerPerformance(livePlayerRows, homeTeamId, awayTeamId, homeParticipants, awayParticipants, playerInfluence)
+    : undefined;
+  const liveModelHomeXg = adjHomeXG * (currentPlayerPerformance?.home_factor ?? 1);
+  const liveModelAwayXg = adjAwayXG * (currentPlayerPerformance?.away_factor ?? 1);
 
   let liveAdjHomeWin: number | undefined, liveAdjDraw: number | undefined, liveAdjAwayWin: number | undefined;
   if (isLive && liveScoreHome != null && liveScoreAway != null && matchMinute != null) {
-    const p = liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, adjHomeXG, adjAwayXG, liveStats);
+    const p = liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, liveModelHomeXg, liveModelAwayXg, liveStats);
     liveAdjHomeWin = round2(p.homeWin); liveAdjDraw = round2(p.draw); liveAdjAwayWin = round2(p.awayWin);
   }
   let substitutionImpacts: SubstitutionImpact[] | undefined;
@@ -743,8 +931,8 @@ export async function getEnhancedPrediction(
     if (substitutionImpacts.length > 0) {
       homeSubXgDelta = round2(substitutionImpacts.filter((s) => s.team === "home").reduce((sum, s) => sum + s.xg_delta, 0));
       awaySubXgDelta = round2(substitutionImpacts.filter((s) => s.team === "away").reduce((sum, s) => sum + s.xg_delta, 0));
-      const substitutionHomeXg = Math.max(0.01, adjHomeXG + homeSubXgDelta);
-      const substitutionAwayXg = Math.max(0.01, adjAwayXG + awaySubXgDelta);
+      const substitutionHomeXg = Math.max(0.01, liveModelHomeXg + homeSubXgDelta);
+      const substitutionAwayXg = Math.max(0.01, liveModelAwayXg + awaySubXgDelta);
       const p = isLive && liveScoreHome != null && liveScoreAway != null && matchMinute != null
         ? liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, substitutionHomeXg, substitutionAwayXg, liveStats)
         : poissonProbs(substitutionHomeXg, substitutionAwayXg);
@@ -775,5 +963,7 @@ export async function getEnhancedPrediction(
     substitution_impacts: substitutionImpacts, home_sub_xg_delta: homeSubXgDelta, away_sub_xg_delta: awaySubXgDelta,
     sub_adjusted_home_win: subAdjHomeWin, sub_adjusted_draw: subAdjDraw, sub_adjusted_away_win: subAdjAwayWin,
     home_spotlights: buildSpotlights(homeSquadMap), away_spotlights: buildSpotlights(awaySquadMap),
+    player_influence: playerInfluence ?? undefined,
+    live_player_performance: currentPlayerPerformance,
   };
 }
