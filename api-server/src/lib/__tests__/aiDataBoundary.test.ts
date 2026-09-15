@@ -27,7 +27,7 @@ describe("AI temporal data boundary", () => {
   it("connects only persisted adaptive calibration to pre-match inference", async () => {
     const code = await source("../enhancedStatsService.ts");
     expect(code).toContain("const learnedWeights = await getLearnedWeights()");
-    expect(code).toContain("!isLive && learnedWeights.sampleSize >= 60");
+    expect(code).toContain("!isLive && learnedWeights.sampleSize >= 250");
     expect(code).toContain("globalOutcomePriors");
   });
 });

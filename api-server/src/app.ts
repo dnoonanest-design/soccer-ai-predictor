@@ -60,6 +60,9 @@ const adminMutationPaths = [
   /^\/push\/test$/,
   /^\/tracker$/,
   /^\/tracker\/\d+\/settle$/,
+  /^\/live\/alerts$/,
+  /^\/watchlist$/,
+  /^\/watchlist\/\d+$/,
 ];
 
 app.use("/api", (req, res, next) => {

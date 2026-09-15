@@ -12,6 +12,7 @@ import { isTrackedLeague } from "../lib/leagueConfig";
 import { getMatchStats } from "../lib/statsService";
 import { getEnhancedPrediction } from "../lib/enhancedStatsService";
 import { getCalibrationFactors, applyCalibration } from "../lib/predictionStore";
+import { configuredFootballSeason } from "../lib/season";
 
 const router = Router();
 
@@ -130,7 +131,7 @@ router.get("/teams/:team_id/profile", async (req, res) => {
 router.get("/fixtures/upcoming", async (req, res) => {
   const days = safeInt(req.query.days ?? 3, 1, 7) ?? 3;
   const leagueId = req.query.league_id ? safeInt(req.query.league_id, 1, 99_999) : null;
-  const SEASON = process.env.FOOTBALL_SEASON ?? "2025";
+  const SEASON = String(configuredFootballSeason());
   const API_KEY = process.env.API_FOOTBALL_KEY ?? "";
   if (!API_KEY) return res.json({ fixtures: [], note: "API key required for multi-day fixtures" });
 
@@ -287,9 +288,10 @@ router.get("/value-centre", statsRateLimit, async (req, res) => {
 });
 
 // ─── 5. Watchlist endpoints ───────────────────────────────────────────────────
-router.get("/watchlist", async (_req, res) => {
+router.get("/watchlist", async (req, res) => {
+  const userId = safeInt(req.headers["x-user-id"], 1, 999_999_999) ?? 1;
   try {
-    const rows = await db.execute(sql`SELECT id, fixture_id, alert_rules, created_at FROM user_watchlist ORDER BY created_at DESC LIMIT 100`) as any;
+    const rows = await db.execute(sql`SELECT id, fixture_id, alert_rules, created_at FROM user_watchlist WHERE user_id = ${userId} ORDER BY created_at DESC LIMIT 100`) as any;
     return res.json({ items: rows.rows ?? [] });
   } catch (err) {
     logger.error({ err }, "watchlist fetch failed");
@@ -322,8 +324,10 @@ router.post("/watchlist", async (req, res) => {
 
 router.delete("/watchlist/:fixture_id", async (req, res) => {
   const fixtureId = Number(req.params.fixture_id);
+  const userId = safeInt(req.headers["x-user-id"], 1, 999_999_999) ?? 1;
+  if (!Number.isInteger(fixtureId) || fixtureId <= 0) return res.status(400).json({ error: "valid fixture_id required" });
   try {
-    await db.execute(sql`DELETE FROM user_watchlist WHERE fixture_id = ${fixtureId}`);
+    await db.execute(sql`DELETE FROM user_watchlist WHERE fixture_id = ${fixtureId} AND user_id = ${userId}`);
     return res.json({ ok: true });
   } catch (err) {
     logger.error({ err }, "watchlist delete failed");
@@ -335,27 +339,25 @@ router.delete("/watchlist/:fixture_id", async (req, res) => {
 router.get("/track-record", async (_req, res) => {
   try {
     const rows = await db.execute(sql`
+      WITH final_prematch AS (
+        SELECT DISTINCT ON (fixture_id)
+          fixture_id, predicted_outcome, actual_outcome, brier_score
+        FROM prediction_audit_records
+        WHERE phase = 'prematch'
+          AND settled_at IS NOT NULL
+          AND actual_outcome IS NOT NULL
+          AND kickoff_at IS NOT NULL
+          AND captured_at < kickoff_at
+        ORDER BY fixture_id, captured_at DESC
+      )
       SELECT
         COUNT(*)::int AS total,
-        SUM(CASE WHEN
-          (mp.home_win_prob >= mp.draw_prob AND mp.home_win_prob >= mp.away_win_prob AND mo.outcome = 'home') OR
-          (mp.draw_prob > mp.home_win_prob AND mp.draw_prob >= mp.away_win_prob AND mo.outcome = 'draw') OR
-          (mp.away_win_prob > mp.home_win_prob AND mp.away_win_prob > mp.draw_prob AND mo.outcome = 'away')
-          THEN 1 ELSE 0 END)::int AS correct,
-        AVG(
-          POWER(CASE WHEN mp.home_win_prob > 1 THEN mp.home_win_prob/100 ELSE mp.home_win_prob END
-                - CASE WHEN mo.outcome='home' THEN 1 ELSE 0 END, 2) +
-          POWER(CASE WHEN mp.draw_prob > 1 THEN mp.draw_prob/100 ELSE mp.draw_prob END
-                - CASE WHEN mo.outcome='draw' THEN 1 ELSE 0 END, 2) +
-          POWER(CASE WHEN mp.away_win_prob > 1 THEN mp.away_win_prob/100 ELSE mp.away_win_prob END
-                - CASE WHEN mo.outcome='away' THEN 1 ELSE 0 END, 2)
-        )::float AS brier_score,
-        SUM(CASE WHEN mo.outcome='home' THEN 1 ELSE 0 END)::int AS home_wins,
-        SUM(CASE WHEN mo.outcome='draw' THEN 1 ELSE 0 END)::int AS draws,
-        SUM(CASE WHEN mo.outcome='away' THEN 1 ELSE 0 END)::int AS away_wins
-      FROM match_predictions mp
-      JOIN match_outcomes mo ON mo.fixture_id = mp.fixture_id
-      WHERE mp.is_live = false
+        SUM(CASE WHEN predicted_outcome = actual_outcome THEN 1 ELSE 0 END)::int AS correct,
+        AVG(brier_score)::float AS brier_score,
+        SUM(CASE WHEN actual_outcome='home' THEN 1 ELSE 0 END)::int AS home_wins,
+        SUM(CASE WHEN actual_outcome='draw' THEN 1 ELSE 0 END)::int AS draws,
+        SUM(CASE WHEN actual_outcome='away' THEN 1 ELSE 0 END)::int AS away_wins
+      FROM final_prematch
     `) as any;
 
     const r = (rows.rows ?? rows)[0] ?? {};

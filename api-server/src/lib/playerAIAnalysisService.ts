@@ -25,7 +25,7 @@ export async function analysePlayerWithAI(playerId: number): Promise<void> {
 
     if (recentMatches.length < 5) return;
 
-    const prompt = `You are a football analytics AI. Analyse this player profile and their recent match data to discover predictive signals that correlate with their performance and team results.
+    const prompt = `You are a football analytics explanation assistant. Describe cautious, testable patterns in this player's recent data. Do not calculate or invent probabilities, correlations, predictive power, causal effects or numerical signal strength. The application calculates all trusted statistics separately.
 
 PLAYER PROFILE:
 Name: ${profile.playerName}
@@ -51,26 +51,19 @@ LAST 20 MATCHES (most recent first):
 ${recentMatches.map((m, i) => `Match ${i+1}: ${m.matchDate?.toISOString().split("T")[0]} | ${m.isInternational ? "INT" : "CLUB"} | ${m.minutesPlayed}mins | Rating: ${m.rating ?? "N/A"} | Goals: ${m.goals} | Assists: ${m.assists} | Shots: ${m.shots} | PassAcc: ${m.passAccuracy ?? "N/A"}% | Tackles: ${m.successfulTackles} | YC: ${m.yellowCards} | Result: ${m.teamResult}`).join("\n")}
 
 Your task:
-1. Identify 3-5 unique predictive signals specific to THIS player
-2. For each signal, estimate its predictive power (0-1) for goals/performance
-3. Note any patterns like: "scores after international duty", "performs better at home", "loses form after yellow card", "scoring streaks last X matches on average", etc
-4. Calculate a goal scoring probability for their next match
-5. Write a 2-3 sentence insight summary
+1. Identify up to 5 candidate patterns specific to this player.
+2. Describe the observations behind each pattern without claiming causation.
+3. State clearly that small samples are uncertain.
+4. Write a 2-3 sentence insight summary.
 
 Respond in JSON only:
 {
   "signals": [
     {
       "signalName": "string",
-      "signalDescription": "string", 
-      "signalValue": number,
-      "predictivePower": number (0-1),
-      "goalCorrelation": number (-1 to 1),
-      "outcomeCorrelation": number (-1 to 1)
+      "signalDescription": "string"
     }
   ],
-  "goalsProbabilityNextMatch": number (0-1),
-  "careerStage": "emerging|prime|declining|veteran",
   "insightSummary": "string"
 }`;
 
@@ -95,36 +88,33 @@ Respond in JSON only:
     const data = await response.json() as any;
     const text = data.content?.[0]?.text ?? "";
     const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-
-    // Save AI-discovered signals
-    for (const signal of parsed.signals ?? []) {
-      await db.insert(playerAiSignals).values({
-        playerId,
-        playerName: profile.playerName,
-        signalName: signal.signalName,
-        signalDescription: signal.signalDescription,
-        signalValue: signal.signalValue,
-        predictivePower: signal.predictivePower,
-        goalCorrelation: signal.goalCorrelation,
-        outcomeCorrelation: signal.outcomeCorrelation,
-        sampleSize: recentMatches.length,
-        lastValidatedAt: new Date(),
-      }).onConflictDoNothing();
-    }
+    const parsed = JSON.parse(clean) as Record<string, unknown>;
+    // Generative AI is an explanation layer only. It is forbidden from
+    // originating trusted probabilities, correlations or predictive power.
+    const descriptions = Array.isArray(parsed.signals)
+      ? parsed.signals.slice(0, 5).map((signal: any) => ({
+          signalName: String(signal?.signalName ?? "Observed pattern").slice(0, 80),
+          signalDescription: String(signal?.signalDescription ?? "").slice(0, 500),
+        }))
+      : [];
+    const totalMinutes = recentMatches.reduce((sum, match) => sum + Math.max(0, Number(match.minutesPlayed ?? 0)), 0);
+    const totalGoals = recentMatches.reduce((sum, match) => sum + Math.max(0, Number(match.goals ?? 0)), 0);
+    // Empirical-Bayes scoring rate: player evidence plus a conservative
+    // 0.25 goals/90 prior over the equivalent of five full matches.
+    const ratePer90 = (totalGoals + 1.25) / Math.max(5, totalMinutes / 90 + 5);
+    const computedGoalProbability = Math.max(0.01, Math.min(0.85, 1 - Math.exp(-ratePer90)));
 
     // Update profile with AI insights
     await db.update(playerProfiles).set({
-      goalsProbabilityNextMatch: parsed.goalsProbabilityNextMatch,
-      careerStage: parsed.careerStage,
-      aiInsightSummary: parsed.insightSummary,
-      aiDiscoveredPatterns: parsed.signals,
-      aiConfidenceInProfile: recentMatches.length / 20,
+      goalsProbabilityNextMatch: computedGoalProbability,
+      aiInsightSummary: String(parsed.insightSummary ?? "").slice(0, 1000),
+      aiDiscoveredPatterns: descriptions,
+      aiConfidenceInProfile: Math.min(1, recentMatches.length / 20),
       aiLastAnalysedAt: new Date(),
       updatedAt: new Date(),
     }).where(eq(playerProfiles.playerId, playerId));
 
-    logger.info({ playerId, playerName: profile.playerName, signalsFound: parsed.signals?.length }, "AI player analysis complete");
+    logger.info({ playerId, playerName: profile.playerName, signalsFound: descriptions.length }, "AI player explanation complete");
   } catch (err) {
     logger.error({ err, playerId }, "AI player analysis failed");
   }

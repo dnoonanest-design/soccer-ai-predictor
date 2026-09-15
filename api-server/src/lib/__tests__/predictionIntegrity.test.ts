@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getEnhancedPrediction, liveMomentumFromEvents } from "../enhancedStatsService";
+import { getEnhancedPrediction, liveMomentumFromEvents, liveScoreAdjustedProbs, scaleMultiplicativeFactor } from "../enhancedStatsService";
+import { currentFootballSeason } from "../season";
 import { normaliseStatus } from "../soccerService";
 
 describe("prediction integrity firewall", () => {
@@ -63,5 +64,29 @@ describe("live momentum integrity", () => {
       away: { possession: "50%", shots_total: 3 },
     });
     expect(carded!.home_momentum_pct!).toBeLessThan(base!.home_momentum_pct!);
+  });
+});
+
+describe("critical prediction-process safeguards", () => {
+  it("applies a promoted learned scale to multiplicative statistics", () => {
+    expect(scaleMultiplicativeFactor(1.1, 1.25)).toBeCloseTo(1.125);
+    expect(scaleMultiplicativeFactor(0.9, 0.5)).toBeCloseTo(0.95);
+  });
+
+  it("makes live result probabilities react to telemetry and dismissals", () => {
+    const neutral = liveScoreAdjustedProbs(0, 0, 55, 1.5, 1.5, {
+      home: { shots_total: 4 }, away: { shots_total: 4 },
+    });
+    const homeDominant = liveScoreAdjustedProbs(0, 0, 55, 1.5, 1.5, {
+      home: { expected_goals_live: 1.7, shots_total: 13, shots_on_target: 6 },
+      away: { expected_goals_live: 0.2, shots_total: 2, shots_on_target: 0, red_cards: 1 },
+    });
+    expect(homeDominant.homeWin).toBeGreaterThan(neutral.homeWin);
+    expect(homeDominant.awayWin).toBeLessThan(neutral.awayWin);
+  });
+
+  it("resolves the European season centrally", () => {
+    expect(currentFootballSeason(new Date("2026-09-15T00:00:00Z"))).toBe(2026);
+    expect(currentFootballSeason(new Date("2026-02-15T00:00:00Z"))).toBe(2025);
   });
 });

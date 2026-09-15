@@ -2,10 +2,11 @@ import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
 import { relativeStrengthAdjustment } from "./competitionStrength";
 import { getLearnedWeights } from "./adaptiveLearningEngine";
+import { configuredFootballSeason } from "./season";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
-const SEASON = parseInt(process.env.FOOTBALL_SEASON ?? "2025", 10);
+const SEASON = configuredFootballSeason();
 
 const LINEUP_TTL         = 30 * 60 * 1000;
 const INJURIES_TTL       = 30 * 60 * 1000;
@@ -45,8 +46,12 @@ const LEAGUE_HOME_ADV: Record<number, number> = {
   39: 1.07, 140: 1.08, 135: 1.09, 78: 1.06, 61: 1.07,
   2: 1.06, 3: 1.05, 848: 1.05, 94: 1.08, 88: 1.07, 203: 1.09,
 };
-function getHomeAdvantage(leagueId: number): number {
-  return LEAGUE_HOME_ADV[leagueId] ?? 1.08;
+function getHomeAdvantage(leagueId: number, learned?: Record<number, number>): number {
+  return learned?.[leagueId] ?? LEAGUE_HOME_ADV[leagueId] ?? 1.08;
+}
+
+export function scaleMultiplicativeFactor(factor: number, scale: number): number {
+  return Math.max(0.65, Math.min(1.35, 1 + (factor - 1) * scale));
 }
 
 export interface H2HRecord {
@@ -579,13 +584,27 @@ export async function getLiveMomentumSnapshot(
   const events = await fetchMatchEvents(fixtureId, true).catch(() => [] as ApiEvent[]);
   return liveMomentumFromEvents(events, homeTeamId, awayTeamId, minute, 0, 0, liveStats);
 }
-function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, adjHomeXG: number, adjAwayXG: number) {
+export function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, adjHomeXG: number, adjAwayXG: number, liveStats?: LiveMatchStatsInput) {
   const effectiveMax = minute >= 90 ? minute + 5 : 90;
   const remainFrac = Math.max(0, (effectiveMax - minute) / effectiveMax);
   if (remainFrac <= 0.01) return { homeWin: hGoals > aGoals ? 100 : 0, draw: hGoals === aGoals ? 100 : 0, awayWin: aGoals > hGoals ? 100 : 0 };
   const scoreDiff = hGoals - aGoals;
-  const remHomeXG = Math.max(0.01, adjHomeXG * remainFrac * (scoreDiff < 0 ? 1.18 : scoreDiff > 0 ? 0.85 : 1));
-  const remAwayXG = Math.max(0.01, adjAwayXG * remainFrac * (scoreDiff > 0 ? 1.18 : scoreDiff < 0 ? 0.85 : 1));
+  const homeIndex = attackingIndex(liveStats?.home);
+  const awayIndex = attackingIndex(liveStats?.away);
+  const telemetryTotal = homeIndex + awayIndex;
+  const telemetryHomeShare = telemetryTotal > 0 ? homeIndex / telemetryTotal : 0.5;
+  const homeLiveXg = Math.max(0, liveStats?.home?.expected_goals_live ?? 0);
+  const awayLiveXg = Math.max(0, liveStats?.away?.expected_goals_live ?? 0);
+  const homeRed = Math.max(0, liveStats?.home?.red_cards ?? 0);
+  const awayRed = Math.max(0, liveStats?.away?.red_cards ?? 0);
+  const homeTelemetry = 0.7 + 0.6 * telemetryHomeShare;
+  const awayTelemetry = 0.7 + 0.6 * (1 - telemetryHomeShare);
+  const liveXgHomeFactor = Math.max(0.75, Math.min(1.3, 1 + (homeLiveXg - awayLiveXg) * 0.12));
+  const liveXgAwayFactor = Math.max(0.75, Math.min(1.3, 1 + (awayLiveXg - homeLiveXg) * 0.12));
+  const cardHomeFactor = Math.pow(0.68, homeRed) * Math.pow(1.12, awayRed);
+  const cardAwayFactor = Math.pow(0.68, awayRed) * Math.pow(1.12, homeRed);
+  const remHomeXG = Math.max(0.01, adjHomeXG * remainFrac * (scoreDiff < 0 ? 1.18 : scoreDiff > 0 ? 0.85 : 1) * homeTelemetry * liveXgHomeFactor * cardHomeFactor);
+  const remAwayXG = Math.max(0.01, adjAwayXG * remainFrac * (scoreDiff > 0 ? 1.18 : scoreDiff < 0 ? 0.85 : 1) * awayTelemetry * liveXgAwayFactor * cardAwayFactor);
   let homeWin = 0, draw = 0, awayWin = 0;
   for (let rh = 0; rh <= MAX_GOALS; rh++) for (let ra = 0; ra <= MAX_GOALS; ra++) {
     const joint = poisson(remHomeXG, rh) * poisson(remAwayXG, ra);
@@ -595,8 +614,9 @@ function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, 
   const total = homeWin + draw + awayWin;
   return { homeWin: (homeWin / total) * 100, draw: (draw / total) * 100, awayWin: (awayWin / total) * 100 };
 }
-function blendH2H(poissonHome: number, poissonDraw: number, poissonAway: number, h2h: H2HRecord) {
-  const w = h2h.matches >= 5 ? 0.30 : (h2h.matches / 5) * 0.30;
+function blendH2H(poissonHome: number, poissonDraw: number, poissonAway: number, h2h: H2HRecord, cap = 0.06) {
+  const safeCap = Math.max(0, Math.min(0.08, cap));
+  const w = h2h.matches >= 8 ? safeCap : (h2h.matches / 8) * safeCap;
   const home = (1 - w) * poissonHome + w * h2h.home_win_rate * 100;
   const draw = (1 - w) * poissonDraw + w * h2h.draw_rate * 100;
   const away = (1 - w) * poissonAway + w * h2h.away_win_rate * 100;
@@ -619,17 +639,26 @@ export async function getEnhancedPrediction(
   // Only parameter sets that improved the newest chronological holdout are
   // persisted by the adaptive learner and therefore available here.
   const learnedWeights = await getLearnedWeights();
-  const homeAdv = getHomeAdvantage(leagueId);
-  const homeFormFactor = formFactor(homeForm);
-  const awayFormFactor = formFactor(awayForm);
-  const strength = relativeStrengthAdjustment(
+  const homeAdv = getHomeAdvantage(leagueId, learnedWeights.leagueHomeAdvOverride);
+  const homeFormFactor = scaleMultiplicativeFactor(formFactor(homeForm), learnedWeights.formFactorScale);
+  const awayFormFactor = scaleMultiplicativeFactor(formFactor(awayForm), learnedWeights.formFactorScale);
+  const rawStrength = relativeStrengthAdjustment(
     liveStats?.home?.strength_index ?? 1,
     liveStats?.away?.strength_index ?? 1,
     liveStats?.home?.strength_sample_size ?? 0,
     liveStats?.away?.strength_sample_size ?? 0,
   );
-  const baseHomeXG = ((homeGpg + awayCpg) / 2) * homeAdv * strength.home;
-  const baseAwayXG = ((awayGpg + homeCpg) / 2) * strength.away;
+  const strength = {
+    home: Math.pow(rawStrength.home, learnedWeights.competitionFactorScale),
+    away: Math.pow(rawStrength.away, learnedWeights.competitionFactorScale),
+  };
+  const learnedLeagueXg = learnedWeights.leagueXgNormOverride[leagueId];
+  const rawHomeXg = ((homeGpg + awayCpg) / 2) * homeAdv * strength.home;
+  const rawAwayXg = ((awayGpg + homeCpg) / 2) * strength.away;
+  // League scoring environments are a conservative prior, never a replacement
+  // for the two teams' opponent-adjusted statistics.
+  const baseHomeXG = learnedLeagueXg ? rawHomeXg * 0.9 + learnedLeagueXg.home * 0.1 : rawHomeXg;
+  const baseAwayXG = learnedLeagueXg ? rawAwayXg * 0.9 + learnedLeagueXg.away * 0.1 : rawAwayXg;
   const base = poissonProbs(baseHomeXG, baseAwayXG);
 
   // Shared rate limiter serializes these API calls even when the promises are scheduled together.
@@ -649,23 +678,23 @@ export async function getEnhancedPrediction(
   const awaySquadMap = awaySquad.status === "fulfilled" ? awaySquad.value : new Map<number, SquadPlayerStats>();
   const homeInjuries = allInjuries.filter((i) => i.team_id === homeTeamId);
   const awayInjuries = allInjuries.filter((i) => i.team_id === awayTeamId);
-  const homeInjuryFactor = injuryFactor(homeInjuries, homeSquadMap, homeGpg);
-  const awayInjuryFactor = injuryFactor(awayInjuries, awaySquadMap, awayGpg);
+  const homeInjuryFactor = scaleMultiplicativeFactor(injuryFactor(homeInjuries, homeSquadMap, homeGpg), learnedWeights.injuryFactorScale);
+  const awayInjuryFactor = scaleMultiplicativeFactor(injuryFactor(awayInjuries, awaySquadMap, awayGpg), learnedWeights.injuryFactorScale);
   let homeLineupFactor = 1, awayLineupFactor = 1;
   if (lineupResult) {
-    homeLineupFactor = lineupQualityFactor(lineupResult.home, homeSquadMap);
-    awayLineupFactor = lineupQualityFactor(lineupResult.away, awaySquadMap);
+    homeLineupFactor = scaleMultiplicativeFactor(lineupQualityFactor(lineupResult.home, homeSquadMap), learnedWeights.lineupFactorScale);
+    awayLineupFactor = scaleMultiplicativeFactor(lineupQualityFactor(lineupResult.away, awaySquadMap), learnedWeights.lineupFactorScale);
   }
   const adjHomeXG = baseHomeXG * homeFormFactor * homeLineupFactor * homeInjuryFactor;
   const adjAwayXG = baseAwayXG * awayFormFactor * awayLineupFactor * awayInjuryFactor;
   const adjusted = poissonProbs(adjHomeXG, adjAwayXG);
   let finalHome = adjusted.homeWin, finalDraw = adjusted.draw, finalAway = adjusted.awayWin;
   if (h2hResult && h2hResult.matches > 0) {
-    const blended = blendH2H(finalHome, finalDraw, finalAway, h2hResult);
+    const blended = blendH2H(finalHome, finalDraw, finalAway, h2hResult, learnedWeights.h2hWeightCap);
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
   const learnedPriors = learnedWeights.globalOutcomePriors;
-  if (!isLive && learnedWeights.sampleSize >= 60 && learnedPriors) {
+  if (!isLive && learnedWeights.sampleSize >= 250 && learnedPriors) {
     const w = Math.max(0.05, Math.min(0.20, learnedWeights.drawNudgeWeight));
     finalHome = (1 - w) * finalHome + w * learnedPriors.home * 100;
     finalDraw = (1 - w) * finalDraw + w * learnedPriors.draw * 100;
@@ -678,7 +707,7 @@ export async function getEnhancedPrediction(
   const markets = extendedPoissonMarkets(adjHomeXG, adjAwayXG);
   const confidence = confidenceFromModel(finalHome, finalDraw, finalAway, (lineupResult ? 3 : 0) + homeInjuries.length + awayInjuries.length + (h2hResult?.matches ?? 0));
   const reasons = buildReasons({ homeFormFactor, awayFormFactor, homeInjuryFactor, awayInjuryFactor, homeLineupFactor, awayLineupFactor, homeXG: adjHomeXG, awayXG: adjAwayXG, h2h: h2hResult, homeName: homeTeamName, awayName: awayTeamName });
-  if (!isLive && learnedWeights.sampleSize >= 60 && learnedPriors) {
+  if (!isLive && learnedWeights.sampleSize >= 250 && learnedPriors) {
     reasons.push(`Adaptive calibration ${learnedWeights.version} applied after chronological holdout validation.`);
   }
   if (strength.home >= 1.08) reasons.unshift(`Manchester Rule: ${homeTeamName || "Home"}'s results carry greater competition-strength weight.`);
@@ -687,7 +716,7 @@ export async function getEnhancedPrediction(
 
   let liveAdjHomeWin: number | undefined, liveAdjDraw: number | undefined, liveAdjAwayWin: number | undefined;
   if (isLive && liveScoreHome != null && liveScoreAway != null && matchMinute != null) {
-    const p = liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, adjHomeXG, adjAwayXG);
+    const p = liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, adjHomeXG, adjAwayXG, liveStats);
     liveAdjHomeWin = round2(p.homeWin); liveAdjDraw = round2(p.draw); liveAdjAwayWin = round2(p.awayWin);
   }
   let substitutionImpacts: SubstitutionImpact[] | undefined;
@@ -698,9 +727,15 @@ export async function getEnhancedPrediction(
     if (substitutionImpacts.length > 0) {
       homeSubXgDelta = round2(substitutionImpacts.filter((s) => s.team === "home").reduce((sum, s) => sum + s.xg_delta, 0));
       awaySubXgDelta = round2(substitutionImpacts.filter((s) => s.team === "away").reduce((sum, s) => sum + s.xg_delta, 0));
-      const p = poissonProbs(Math.max(0.01, adjHomeXG + homeSubXgDelta), Math.max(0.01, adjAwayXG + awaySubXgDelta));
-      if (h2hResult && h2hResult.matches > 0) {
-        const b = blendH2H(p.homeWin, p.draw, p.awayWin, h2hResult);
+      const substitutionHomeXg = Math.max(0.01, adjHomeXG + homeSubXgDelta);
+      const substitutionAwayXg = Math.max(0.01, adjAwayXG + awaySubXgDelta);
+      const p = isLive && liveScoreHome != null && liveScoreAway != null && matchMinute != null
+        ? liveScoreAdjustedProbs(liveScoreHome, liveScoreAway, matchMinute, substitutionHomeXg, substitutionAwayXg, liveStats)
+        : poissonProbs(substitutionHomeXg, substitutionAwayXg);
+      // Historical H2H is a pre-match prior and must not be reintroduced after
+      // current score/time/live telemetry have taken over the forecast.
+      if (!isLive && h2hResult && h2hResult.matches > 0) {
+        const b = blendH2H(p.homeWin, p.draw, p.awayWin, h2hResult, learnedWeights.h2hWeightCap);
         subAdjHomeWin = round2(b.home); subAdjDraw = round2(b.draw); subAdjAwayWin = round2(b.away);
       } else {
         subAdjHomeWin = round2(p.homeWin); subAdjDraw = round2(p.draw); subAdjAwayWin = round2(p.awayWin);

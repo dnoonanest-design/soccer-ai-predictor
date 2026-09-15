@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { configuredFootballSeason } from "./season";
 import { waitForRateLimit } from "./rateLimiter";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
 import {
@@ -9,7 +10,7 @@ import {
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
-const SEASON = process.env.FOOTBALL_SEASON ?? String(new Date().getUTCFullYear());
+const SEASON = String(configuredFootballSeason());
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 

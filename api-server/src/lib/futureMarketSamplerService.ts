@@ -7,6 +7,7 @@ import {
   isTrackedLeague,
 } from "./leagueConfig";
 import { logger } from "./logger";
+import { configuredFootballSeason } from "./season";
 import {
   captureMarketSnapshots,
   type RawOddsEvent,
@@ -26,7 +27,7 @@ import {
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
-const SEASON = process.env.FOOTBALL_SEASON ?? String(new Date().getUTCFullYear());
+const SEASON = String(configuredFootballSeason());
 
 const ENABLED = process.env.MARKET_FUTURE_SAMPLER_ENABLED === "true";
 const WINDOW_HOURS = clampNumber(

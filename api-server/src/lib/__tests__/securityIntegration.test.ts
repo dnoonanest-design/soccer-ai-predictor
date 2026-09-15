@@ -45,11 +45,18 @@ describe("application security boundary", () => {
   });
 
   it("blocks privileged mutations without the configured admin key", async () => {
-    const response = await fetch(`${baseUrl}/api/ai/run-learning-cycle`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    expect(response.status).toBe(401);
+    for (const path of [
+      "/api/ai/run-learning-cycle",
+      "/api/background/run/circumstance-analysis",
+      "/api/live/alerts",
+      "/api/watchlist",
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status, path).toBe(401);
+    }
   });
 });

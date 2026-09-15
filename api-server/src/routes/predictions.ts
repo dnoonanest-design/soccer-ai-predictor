@@ -134,6 +134,7 @@ async function readPredictions(start: Date, end: Date) {
          model_version, updated_at
        FROM match_predictions
        WHERE is_live = FALSE
+         AND updated_at < kickoff_at
          AND kickoff_at >= $1
          AND kickoff_at < $2
        ORDER BY fixture_id, updated_at DESC

@@ -145,7 +145,9 @@ const MAX_ITERATIONS = 200;
 const L2_LAMBDA = 0.005;    // regularisation
 
 // Minimum samples before updating any learned weights
-const MIN_SAMPLE_FOR_WEIGHT_UPDATE = 60;
+export const MIN_SAMPLE_FOR_WEIGHT_UPDATE = 250;
+const MIN_HOLDOUT_SAMPLE = 50;
+const MIN_BRIER_IMPROVEMENT = 0.002;
 
 // Cache key for the offline fallback model in calibrationParameters table
 const OFFLINE_MODEL_VERSION = "adaptive-offline-fallback-v1";
@@ -296,19 +298,23 @@ async function loadTrainingRows(limit = 2000): Promise<TrainingRow[]> {
       mo.outcome,
       mo.score_home,
       mo.score_away,
-      NULL::real AS home_form_score,
-      NULL::real AS away_form_score,
-      NULL::integer AS home_red_cards,
-      NULL::integer AS away_red_cards,
-      NULL::integer AS home_missing_players,
-      NULL::integer AS away_missing_players,
-      NULL::real AS home_star_player_rating,
-      NULL::real AS away_star_player_rating,
-      NULL::real AS circumstance_score_home,
-      NULL::real AS circumstance_score_away
+      mc.home_form_score,
+      mc.away_form_score,
+      mc.home_red_cards,
+      mc.away_red_cards,
+      mc.home_missing_players,
+      mc.away_missing_players,
+      mc.home_star_player_rating,
+      mc.away_star_player_rating,
+      mc.circumstance_score_home,
+      mc.circumstance_score_away
     FROM prediction_snapshots ps
     JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
     JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
+    LEFT JOIN match_circumstances mc
+      ON mc.fixture_id = ps.fixture_id
+     AND mc.status = 'upcoming'
+     AND mc.updated_at < mp.kickoff_at
     WHERE ps.status = 'upcoming'
       AND ps.minute IS NULL
       AND mp.kickoff_at IS NOT NULL
@@ -397,7 +403,7 @@ export async function learnFeatureWeights(): Promise<{
   const trainingRows = rows.slice(0, splitIndex);
   const holdoutRows = rows.slice(splitIndex);
 
-  if (holdoutRows.length < 10) {
+  if (holdoutRows.length < MIN_HOLDOUT_SAMPLE) {
     return {
       weights: getDefaultWeights(),
       improved: false,
@@ -549,17 +555,21 @@ export async function learnFeatureWeights(): Promise<{
   }
   afterBrier = totalWeight2 > 0 ? afterBrier / totalWeight2 : beforeBrier;
 
-  const improved = afterBrier < beforeBrier - 0.0001;
+  const improved = afterBrier <= beforeBrier - MIN_BRIER_IMPROVEMENT;
 
+  // The holdout calculation above validates the outcome-prior calibration.
+  // Feature scales and league overrides require an exact point-in-time feature
+  // replay before they may be promoted. Keep them neutral until that replay is
+  // available; calculated candidates remain diagnostic only.
   const weights: LearnedFactorWeights = {
-    formFactorScale:        Math.round(formFactorScale        * 1000) / 1000,
-    injuryFactorScale:      Math.round(injuryFactorScale      * 1000) / 1000,
+    formFactorScale:        1.0,
+    injuryFactorScale:      1.0,
     lineupFactorScale:      1.0,   // learned separately when lineup accuracy data is available
-    competitionFactorScale: Math.round(competitionFactorScale * 1000) / 1000,
-    h2hWeightCap:           0.30,  // keep at default unless H2H analysis shows otherwise
+    competitionFactorScale: 1.0,
+    h2hWeightCap:           0.06,
     drawNudgeWeight:        Math.round(drawNudgeWeight        * 1000) / 1000,
-    leagueHomeAdvOverride,
-    leagueXgNormOverride,
+    leagueHomeAdvOverride:  {},
+    leagueXgNormOverride:   {},
     globalOutcomePriors: {
       home: globalHomePrior,
       draw: globalDrawPrior,
@@ -588,7 +598,7 @@ function getDefaultWeights(): LearnedFactorWeights {
     injuryFactorScale:      1.0,
     lineupFactorScale:      1.0,
     competitionFactorScale: 1.0,
-    h2hWeightCap:           0.30,
+    h2hWeightCap:           0.06,
     drawNudgeWeight:        0.10,
     leagueHomeAdvOverride:  {},
     leagueXgNormOverride:   {},
@@ -619,7 +629,7 @@ export async function getLearnedWeights(): Promise<LearnedFactorWeights> {
     for (const row of rows) {
       try {
         const parsed = JSON.parse(row.weightsJson);
-        if (parsed?.adaptiveWeights?.formFactorScale != null) {
+        if (parsed?.adaptiveWeights?.formFactorScale != null && Number(parsed.adaptiveWeights.sampleSize) >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
           const w = parsed.adaptiveWeights as LearnedFactorWeights;
           _cachedWeights = w;
           _cachedWeightsAt = Date.now();

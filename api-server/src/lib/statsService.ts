@@ -5,10 +5,11 @@ import {
   isUefaCompetition,
   manchesterRulePerformanceWeight,
 } from "./competitionStrength";
+import { configuredFootballSeason } from "./season";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
-const SEASON = parseInt(process.env.FOOTBALL_SEASON ?? "2025", 10);
+const SEASON = configuredFootballSeason();
 
 const TEAM_CACHE_TTL = 10 * 60 * 1000;
 const RECENT_FIXTURE_CACHE_TTL = 60 * 60 * 1000;
