@@ -1,12 +1,14 @@
 import { db } from "@workspace/db";
 import { playerProfiles, playerAiSignals, playerMatchStats } from "@workspace/db/schema";
-import { eq, desc, and, gte } from "drizzle-orm";
+import { eq, desc, and, gte, isNull, lt, or } from "drizzle-orm";
 import { logger } from "./logger.js";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
 
-// AI analyses a player and discovers its own predictive signals
+// Generative AI describes already-computed player evidence; it cannot create
+// or promote prediction weights.
 export async function analysePlayerWithAI(playerId: number): Promise<void> {
   try {
     if (!ANTHROPIC_API_KEY) {
@@ -75,7 +77,7 @@ Respond in JSON only:
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: ANTHROPIC_MODEL,
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }]
       })
@@ -122,11 +124,16 @@ Respond in JSON only:
 
 // Run AI analysis on players who have enough data and haven't been analysed recently
 export async function runBatchAIPlayerAnalysis(limit = 20): Promise<void> {
+  if (!ANTHROPIC_API_KEY) {
+    logger.info("AI player explanations disabled: ANTHROPIC_API_KEY is not configured");
+    return;
+  }
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 
   const players = await db.select().from(playerProfiles)
     .where(and(
       gte(playerProfiles.totalMatches, 5),
+      or(isNull(playerProfiles.aiLastAnalysedAt), lt(playerProfiles.aiLastAnalysedAt, twoDaysAgo)),
     ))
     .orderBy(desc(playerProfiles.updatedAt))
     .limit(limit);
@@ -142,7 +149,7 @@ export async function runBatchAIPlayerAnalysis(limit = 20): Promise<void> {
   logger.info("batch AI player analysis complete");
 }
 
-// Get AI signals for a player ranked by predictive power
+// Legacy display-only signals. The canonical predictor never reads this table.
 export async function getPlayerAISignals(playerId: number) {
   return db.select().from(playerAiSignals)
     .where(and(eq(playerAiSignals.playerId, playerId), eq(playerAiSignals.active, true)))

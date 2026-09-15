@@ -5,6 +5,7 @@ import { runAiAwarenessCycle } from "./aiAwareLearningService";
 import { analyzeCircumstanceInfluence } from "./circumstanceLearningService";
 import { getCalibrationReport, getCalibrationFactors } from "./predictionStore";
 import { assertCoreAiLearningPayload, getCoreAiDataPolicyReport } from "./aiDataProvenancePolicy";
+import { MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -135,7 +136,7 @@ function buildUpdateSummary(args: {
   return [
     `Fortnightly AI predictor update ${isoDate(args.start)} to ${isoDate(args.end)}: ${acceptedText}.`,
     `Sample size: ${args.sampleSize} settled/learned match records. Accuracy: ${accuracy}%. Brier score: ${brier.toFixed(4)}.`,
-    `The app refreshed similar-match memory, circumstance influence, calibration parameters, and saved a permanent learning snapshot.`,
+    `The app refreshed similar-match memory and circumstance diagnostics and saved a permanent learning snapshot.`,
     args.accepted
       ? "The new calibration is active because the sample size and safety checks were sufficient."
       : "The update was recorded but not aggressively promoted because the evidence is still building or accuracy checks were not strong enough.",
@@ -166,7 +167,11 @@ export async function generateBiweeklyAiUpdate(options: { force?: boolean } = {}
 
   const sampleSize = safeNumber((aiCycle as any)?.recalibration?.sampleSize ?? (factors as any)?.sampleSize, 0);
   const brier = safeNumber((aiCycle as any)?.recalibration?.brierScore ?? (calibration as any)?.brierScore, 1);
-  const accepted = sampleSize >= 60 && brier > 0 && brier < 0.24;
+  // A fortnightly memory/reporting cycle cannot promote itself. It may only
+  // report a model actually promoted by the guarded adaptive learner.
+  const accepted = sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE
+    && modelAfter?.id != null
+    && modelBefore?.id !== modelAfter.id;
   const summary = buildUpdateSummary({ start, end, sampleSize, calibration, factors, aiCycle, influence, modelBefore, accepted });
 
   const payload = {
@@ -179,8 +184,9 @@ export async function generateBiweeklyAiUpdate(options: { force?: boolean } = {}
     memoryConsolidation: memory,
     dataProvenancePolicy: getCoreAiDataPolicyReport(),
     safetyRules: {
-      minimumSettledMatchesForPromotion: 60,
-      maximumBrierForPromotion: 0.24,
+      minimumSettledMatchesForPromotion: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+      chronologicalHoldoutRequired: true,
+      minimumBrierImprovement: 0.002,
       noSourceCodeSelfModification: true,
       databaseCalibrationOnly: true,
       internalDataOnly: true,

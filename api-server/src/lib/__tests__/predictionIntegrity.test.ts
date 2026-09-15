@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { getEnhancedPrediction, liveMomentumFromEvents, liveScoreAdjustedProbs, scaleMultiplicativeFactor } from "../enhancedStatsService";
 import { currentFootballSeason } from "../season";
 import { normaliseStatus } from "../soccerService";
+import { normaliseThreeWayPercent, selectServingProbabilities } from "../canonicalPredictionService";
+import { applyCalibration } from "../predictionStore";
 
 describe("prediction integrity firewall", () => {
   it.each(["finished", "cancelled", "postponed"])(
@@ -68,6 +70,36 @@ describe("live momentum integrity", () => {
 });
 
 describe("critical prediction-process safeguards", () => {
+  it("serves score/time-adjusted probabilities instead of stale pre-match probabilities", () => {
+    const selected = selectServingProbabilities({
+      home_win: 60, draw: 25, away_win: 15,
+      live_adjusted_home_win: 18, live_adjusted_draw: 27, live_adjusted_away_win: 55,
+    } as any, true);
+    expect(selected.away).toBe(55);
+    expect(selected.home + selected.draw + selected.away).toBe(100);
+  });
+
+  it("gives substitution-adjusted probabilities priority during live play", () => {
+    const selected = selectServingProbabilities({
+      home_win: 60, draw: 25, away_win: 15,
+      live_adjusted_home_win: 45, live_adjusted_draw: 30, live_adjusted_away_win: 25,
+      sub_adjusted_home_win: 35, sub_adjusted_draw: 25, sub_adjusted_away_win: 40,
+    } as any, true);
+    expect(selected).toEqual({ home: 35, draw: 25, away: 40 });
+  });
+
+  it("normalises every prediction table to exactly 100 percent", () => {
+    const probs = normaliseThreeWayPercent(2.4, 1.8, 0.9);
+    expect(probs.home + probs.draw + probs.away).toBe(100);
+  });
+
+  it("refuses unvalidated legacy bucket calibration", () => {
+    const unchanged = applyCalibration(52, "home", {
+      home: { 50: 1.5 }, draw: {}, away: {}, sampleSize: 10_000, validated: false,
+    });
+    expect(unchanged).toBe(52);
+  });
+
   it("applies a promoted learned scale to multiplicative statistics", () => {
     expect(scaleMultiplicativeFactor(1.1, 1.25)).toBeCloseTo(1.125);
     expect(scaleMultiplicativeFactor(0.9, 0.5)).toBeCloseTo(0.95);

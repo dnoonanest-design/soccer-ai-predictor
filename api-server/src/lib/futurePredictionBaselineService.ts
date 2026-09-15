@@ -1,9 +1,7 @@
 import { pool } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, type Match } from "./soccerService";
-import { getMatchStats } from "./statsService";
-import { getEnhancedPrediction } from "./enhancedStatsService";
-import { applyDataQualityReliability } from "./predictionDataQuality";
+import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
 import { savePrediction } from "./predictionStore";
 import { getConfidenceBand, getPredictedOutcome } from "./predictionAccuracyAuditService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
@@ -19,7 +17,7 @@ const MAX_CAPTURES_PER_RUN = clamp(
   1,
   60,
 );
-const MODEL_VERSION = process.env.PREDICTION_MODEL_VERSION ?? "opponent-adjusted-v5";
+const MODEL_VERSION = process.env.PREDICTION_MODEL_VERSION ?? CANONICAL_PREDICTION_PIPELINE_VERSION;
 const ENGINE_REVISION =
   process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
   process.env.GIT_COMMIT_SHA?.slice(0, 12) ??
@@ -84,16 +82,6 @@ function numberOrNull(value: unknown): number | null {
   if (value == null) return null;
   const parsed = typeof value === "string" ? Number(value.replace("%", "")) : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normaliseThreeWay(home: number, draw: number, away: number) {
-  const raw = [home, draw, away].map((v) => Number.isFinite(v) && v > 0 ? v : 0);
-  const total = raw.reduce((sum, value) => sum + value, 0);
-  if (total <= 0) return { home: 33.34, draw: 33.33, away: 33.33 };
-  const h = Math.round((raw[0] / total) * 10_000) / 100;
-  const d = Math.round((raw[1] / total) * 10_000) / 100;
-  const a = Math.round(Math.max(0, 100 - h - d) * 100) / 100;
-  return { home: h, draw: d, away: a };
 }
 
 function isBlockedLeagueName(name: string | null | undefined) {
@@ -204,58 +192,17 @@ async function existingKeys(fixtureIds: number[]) {
 }
 
 async function computeBaseline(match: Match): Promise<BaselinePrediction | null> {
-  const stats = await getMatchStats(
-    match.id,
-    match.home_team.id,
-    match.home_team.name,
-    match.away_team.id,
-    match.away_team.name,
-    match.league_id,
-    false,
-  );
-
-  if (!stats?.home || !stats?.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) {
-    return null;
-  }
-
-  const raw = await getEnhancedPrediction(
-    match.id,
-    match.status,
-    match.home_team.id,
-    match.away_team.id,
-    match.league_id,
-    stats.home.goals_per_game,
-    stats.home.conceded_per_game,
-    stats.away.goals_per_game,
-    stats.away.conceded_per_game,
-    match.home_team.name,
-    match.away_team.name,
-    null,
-    false,
-    null,
-    null,
-    stats.home.form,
-    stats.away.form,
-    { home: stats.home, away: stats.away },
-  );
-
-  const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);
-  const quality = applyDataQualityReliability(
-    normalized,
-    stats.home,
-    stats.away,
-    numberOrNull(raw.confidence_score),
-  );
+  const { prediction: raw } = await createCanonicalPrediction(match);
   return {
-    home: quality.probabilities.home,
-    draw: quality.probabilities.draw,
-    away: quality.probabilities.away,
+    home: raw.home_win,
+    draw: raw.draw,
+    away: raw.away_win,
     over25: numberOrNull(raw.over_25),
     btts: numberOrNull(raw.btts),
     homeXg: numberOrNull(raw.home_xg),
     awayXg: numberOrNull(raw.away_xg),
-    confidence: quality.confidence,
-    dataTier: quality.dataTier,
+    confidence: raw.confidence_score,
+    dataTier: raw.data_tier,
   };
 }
 

@@ -19,6 +19,7 @@ const EVENTS_FINISHED_TTL = 60 * 60 * 1000;
 
 interface CacheEntry<T> { data: T; fetchedAt: number }
 const cache = new Map<string, CacheEntry<unknown>>();
+const inFlightRequests = new Map<string, Promise<unknown>>();
 function getCached<T>(key: string, ttl: number): T | null {
   const e = cache.get(key) as CacheEntry<T> | undefined;
   if (!e || Date.now() - e.fetchedAt > ttl) return null;
@@ -29,17 +30,24 @@ function setCache<T>(key: string, data: T): void {
 }
 async function apiFetch(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) return null;
+  const existing = inFlightRequests.get(path);
+  if (existing) return existing;
   const url = `${API_FOOTBALL_BASE}${path}`;
-  await waitForRateLimit();
-  try {
-    const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
-    if (!res.ok) { logger.warn({ status: res.status, url }, "enhanced: api-football failed"); return null; }
-    const json = await res.json() as { response?: unknown };
-    return json.response ?? null;
-  } catch (err) {
-    logger.warn({ err, url }, "enhanced: fetch error");
-    return null;
-  }
+  const request = (async () => {
+    await waitForRateLimit();
+    try {
+      const res = await fetch(url, { headers: { "x-apisports-key": API_FOOTBALL_KEY } });
+      if (!res.ok) { logger.warn({ status: res.status, url }, "enhanced: api-football failed"); return null; }
+      const json = await res.json() as { response?: unknown };
+      return json.response ?? null;
+    } catch (err) {
+      logger.warn({ err, url }, "enhanced: fetch error");
+      return null;
+    }
+  })();
+  inFlightRequests.set(path, request);
+  try { return await request; }
+  finally { inFlightRequests.delete(path); }
 }
 
 const LEAGUE_HOME_ADV: Record<number, number> = {
@@ -224,9 +232,17 @@ async function fetchSquadStats(teamId: number, leagueId: number): Promise<Map<nu
   const key = `squadstats:${teamId}:${leagueId}`;
   const cached = getCached<Map<number, SquadPlayerStats>>(key, SQUAD_TTL);
   if (cached) return cached;
-  const data = await apiFetch(`/players?team=${teamId}&league=${leagueId}&season=${SEASON}&page=1`) as ApiPlayer[] | null;
+  const data: ApiPlayer[] = [];
+  // API-Football player responses are paginated. Continue only while a full
+  // page is returned so ordinary squads spend one or two quota calls.
+  for (let page = 1; page <= 4; page++) {
+    const rows = await apiFetch(`/players?team=${teamId}&league=${leagueId}&season=${SEASON}&page=${page}`) as ApiPlayer[] | null;
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    data.push(...rows);
+    if (rows.length < 20) break;
+  }
   const map = new Map<number, SquadPlayerStats>();
-  if (!Array.isArray(data)) { setCache(key, map); return map; }
+  if (data.length === 0) { setCache(key, map); return map; }
   for (const entry of data) {
     const stat = entry.statistics[0];
     if (!stat) continue;

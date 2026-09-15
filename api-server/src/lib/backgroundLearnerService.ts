@@ -1,18 +1,17 @@
-import { db, backgroundJobRuns, betTracker, calibrationParameters, deepMatchStats } from "@workspace/db";
+import { db, backgroundJobRuns, betTracker, deepMatchStats, pool, type PoolClient } from "@workspace/db";
 import { desc, eq, sql } from "drizzle-orm";
 import { getAllMatches, getMatchesByIds, type Match } from "./soccerService";
-import { getMatchStats } from "./statsService";
-import { getEnhancedPrediction, type LiveMatchStatsInput } from "./enhancedStatsService";
-import { getUnsettledPredictionFixtureIds, saveOutcome, savePrediction, getCalibrationReport, getCalibrationFactors } from "./predictionStore";
+import { createCanonicalPrediction } from "./canonicalPredictionService";
+import { getUnsettledPredictionFixtureIds, saveOutcome, savePrediction, getCalibrationReport } from "./predictionStore";
 import { runTrainingPipeline, saveLiveAlert, savePredictionSnapshot, settleTrackedBet } from "./predictionPlatformService";
 import { logger } from "./logger";
-import { analyzeCircumstanceInfluence, applyCircumstanceCalibration, collectMatchCircumstances, getCircumstanceLearningReport } from "./circumstanceLearningService";
+import { analyzeCircumstanceInfluence, getCircumstanceLearningReport } from "./circumstanceLearningService";
 import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningService";
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
 import { collectPlayerStatsForFixture } from "./playerService.js";
 import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
 import { isTrackedLeague } from "./leagueConfig";
-import { runAdaptiveLearningCycle } from "./adaptiveLearningEngine";
+import { MIN_SAMPLE_FOR_WEIGHT_UPDATE, runAdaptiveLearningCycle } from "./adaptiveLearningEngine";
 
 type JobStatus = "idle" | "running" | "disabled";
 
@@ -23,7 +22,11 @@ const SETTLE_INTERVAL_MS  = Math.max(10 * 60_000,      Number(process.env.BACKGR
 const TRAIN_INTERVAL_MS   = Math.max(6 * 60 * 60_000,  Number(process.env.BACKGROUND_TRAIN_MS          ?? 6 * 60 * 60_000));
 const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(14 * 24 * 60 * 60_000, Number(process.env.BACKGROUND_BIWEEKLY_UPDATE_MS ?? 14 * 24 * 60 * 60_000));
 const MAX_LIVE_MATCHES    = Math.max(1,  Number(process.env.BACKGROUND_MAX_LIVE_MATCHES  ?? 12));
-const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(25, Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? 60));
+const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(
+  MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+  Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? MIN_SAMPLE_FOR_WEIGHT_UPDATE),
+);
+const TRAINING_ADVISORY_LOCK = 7_310_250_001;
 
 const processedFinishedFixtures = new Set<number>();
 
@@ -49,20 +52,6 @@ function num(v: unknown): number | null {
   }
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-function liveStatsPayload(stats: any): LiveMatchStatsInput | undefined {
-  return stats?.has_live_stats ? { home: stats.home, away: stats.away } : undefined;
-}
-
-function normalizeThreeWayPercent(home: number, draw: number, away: number) {
-  const safe = [home, draw, away].map((p) => Number.isFinite(p) && p > 0 ? p : 0);
-  const total = safe.reduce((a, b) => a + b, 0);
-  if (total <= 0) return { home: 33.34, draw: 33.33, away: 33.33 };
-  const h = Math.round((safe[0] / total) * 10000) / 100;
-  const d = Math.round((safe[1] / total) * 10000) / 100;
-  const a = Math.round(Math.max(0, 100 - h - d) * 100) / 100;
-  return { home: h, draw: d, away: a };
 }
 
 function buildValueEdges(match: Match, home: number, draw: number, away: number) {
@@ -133,51 +122,10 @@ async function computeAndStoreMatch(match: Match) {
   // fixtures are handled by saveOutcome and the settlement/learning pipeline.
   if (match.status === "finished") return false;
 
-  const stats = await getMatchStats(
-    match.id,
-    match.home_team.id,
-    match.home_team.name,
-    match.away_team.id,
-    match.away_team.name,
-    match.league_id,
-    match.status === "live" || match.status === "finished",
-  );
-
-  if (!stats?.home || !stats?.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) {
-    return false;
-  }
-
-  const raw = await getEnhancedPrediction(
-    match.id,
-    match.status,
-    match.home_team.id,
-    match.away_team.id,
-    match.league_id,
-    stats.home.goals_per_game,
-    stats.home.conceded_per_game,
-    stats.away.goals_per_game,
-    stats.away.conceded_per_game,
-    match.home_team.name,
-    match.away_team.name,
-    match.minute ?? null,
-    match.status === "live",
-    match.score?.home ?? null,
-    match.score?.away ?? null,
-    stats.home.form,
-    stats.away.form,
-    liveStatsPayload(stats),
-  );
-
-  const factors = await getCalibrationFactors();
-  const normalized = normalizeThreeWayPercent(raw.home_win, raw.draw, raw.away_win);
-  const circumstances = await collectMatchCircumstances(
-    match, stats.home.form, stats.away.form
-  ).catch((err) => {
-    logger.warn({ err, fixtureId: match.id }, "circumstance collection failed");
-    return null;
+  const { prediction: raw, circumstances, stats } = await createCanonicalPrediction(match, {
+    collectCircumstances: true,
   });
-  const adjusted = await applyCircumstanceCalibration(match, normalized);
-  const valueEdges = buildValueEdges(match, adjusted.home, adjusted.draw, adjusted.away);
+  const valueEdges = buildValueEdges(match, raw.home_win, raw.draw, raw.away_win);
   const liveMomentum = raw.live_momentum;
 
   await savePredictionSnapshot({
@@ -185,9 +133,9 @@ async function computeAndStoreMatch(match: Match) {
     leagueId: match.league_id ?? null,
     minute: match.minute ?? null,
     status: match.status,
-    homeWinProb: adjusted.home,
-    drawProb: adjusted.draw,
-    awayWinProb: adjusted.away,
+    homeWinProb: raw.home_win,
+    drawProb: raw.draw,
+    awayWinProb: raw.away_win,
     over25Prob: raw.over_25 ?? null,
     bttsProb: raw.btts ?? null,
     homeXg: raw.home_xg ?? null,
@@ -197,12 +145,7 @@ async function computeAndStoreMatch(match: Match) {
     nextGoalHome: liveMomentum?.next_goal_home ?? null,
     nextGoalAway: liveMomentum?.next_goal_away ?? null,
     confidence: raw.confidence_score ?? null,
-    reasons: [
-      ...(raw.reasons ?? []),
-      ...(adjusted.adjustment
-        ? [`Circumstance learning adjusted home probability by ${adjusted.adjustment.homeBoost.toFixed(1)} pts`]
-        : []),
-    ],
+    reasons: raw.reasons ?? [],
     valueEdges,
   });
 
@@ -211,15 +154,15 @@ async function computeAndStoreMatch(match: Match) {
     homeTeam: match.home_team.name,
     awayTeam: match.away_team.name,
     leagueId: match.league_id ?? null,
-    homeWinProb: adjusted.home,
-    drawProb: adjusted.draw,
-    awayWinProb: adjusted.away,
+    homeWinProb: raw.home_win,
+    drawProb: raw.draw,
+    awayWinProb: raw.away_win,
     isLive: match.status === "live",
     kickoffAt: match.kickoff ? new Date(match.kickoff) : null,
   });
 
   if (match.status === "live") {
-    await saveDeepStats(match, stats, raw);
+    if (stats) await saveDeepStats(match, stats, raw);
     if (liveMomentum?.pressure_alert) {
       await saveLiveAlert({
         fixtureId: match.id,
@@ -232,7 +175,6 @@ async function computeAndStoreMatch(match: Match) {
     }
   }
 
-  void factors;
   void circumstances;
   return true;
 }
@@ -352,14 +294,18 @@ export async function runAutomaticRecalibration() {
   if (!ENABLED) return { disabled: true };
   if (trainStatus === "running") return { skipped: true, reason: "training job already running" };
   trainStatus = "running";
+  let lockClient: PoolClient | null = null;
   try {
+    lockClient = await pool.connect();
+    const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [TRAINING_ADVISORY_LOCK]);
+    if (!lock.rows[0]?.acquired) return { skipped: true, reason: "training job already running on another instance" };
     const training = await runTrainingPipeline();
     const adaptive = await runAdaptiveLearningCycle();
     const influence = await analyzeCircumstanceInfluence();
     const aiAwareness = await runAiAwarenessCycle();
-    const factors = await getCalibrationFactors();
+    const playerAnalysis = await runBatchAIPlayerAnalysis(20).then(() => ({ completed: true })).catch((err) => ({ completed: false, error: String(err?.message ?? err) }));
     const report = await getCalibrationReport();
-    const sampleSize = Number(factors.sampleSize ?? 0);
+    const sampleSize = Number(adaptive.featureWeights.sampleSize ?? 0);
     lastTrainRun = new Date();
 
     if (sampleSize < MIN_AUTO_CALIBRATION_SAMPLE) {
@@ -368,30 +314,23 @@ export async function runAutomaticRecalibration() {
       return {
         skipped: true,
         reason: `Only ${sampleSize} settled samples; ${MIN_AUTO_CALIBRATION_SAMPLE} required.`,
-        training, adaptive, influence, aiAwareness,
+        training, adaptive, influence, aiAwareness, playerAnalysis,
         calibration: { sampleSize, report },
         finishedAt: new Date(),
       };
     }
 
-    await db.update(calibrationParameters)
-      .set({ active: false })
-      .where(eq(calibrationParameters.active, true));
-    await db.insert(calibrationParameters).values({
-      modelVersion: "auto-calibrated-background-v1",
-      sampleSize,
-      factorsJson: factors as any,
-      metricsJson: report as any,
-      active: true,
-    });
-
     await recordJob("auto_recalibration", "success",
-      Number(training.trainingRows ?? 0), 1 + Number(influence.stored ?? 0));
-    return { training, adaptive, influence, aiAwareness, calibration: { sampleSize, report }, finishedAt: new Date() };
+      Number(training.trainingRows ?? 0), Number(adaptive.featureWeights.improved) + Number(influence.stored ?? 0));
+    return { training, adaptive, influence, aiAwareness, playerAnalysis, calibration: { sampleSize, report }, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("auto_recalibration", "error", 0, 0, String(err?.message ?? err));
     throw err;
   } finally {
+    if (lockClient) {
+      await lockClient.query("SELECT pg_advisory_unlock($1)", [TRAINING_ADVISORY_LOCK]).catch(() => {});
+      lockClient.release();
+    }
     trainStatus = "idle";
   }
 }

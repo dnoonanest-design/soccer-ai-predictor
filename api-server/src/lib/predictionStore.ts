@@ -91,17 +91,16 @@ export async function getUnsettledPredictionFixtureIds(daysBack = 14): Promise<n
 }
 
 // ── Calibration ───────────────────────────────────────────────────────────────
-// For each prediction we look at whether the highest-confidence outcome won.
-// We also compute per-bucket calibration: bucket = floor(prob * 10) * 10
-// i.e. [0,10), [10,20) … [90,100].  Returns multipliers so that
-//   calibrated_prob = raw_prob * multiplier[bucket]
-// Only uses pre-match predictions (isLive = false).
+// Legacy calibration reporting. Serving factors remain neutral: production
+// parameters are promoted only by adaptiveLearningEngine after holdout proof.
 
 export interface CalibrationFactors {
   home: Record<number, number>;
   draw: Record<number, number>;
   away: Record<number, number>;
   sampleSize: number;
+  /** Legacy bucket factors are never production-valid without holdout proof. */
+  validated: boolean;
 }
 
 let _calibCache: { factors: CalibrationFactors; fetchedAt: number } | null = null;
@@ -124,7 +123,7 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
     return _calibCache.factors;
   }
 
-  const EMPTY: CalibrationFactors = { home: {}, draw: {}, away: {}, sampleSize: 0 };
+  const EMPTY: CalibrationFactors = { home: {}, draw: {}, away: {}, sampleSize: 0, validated: false };
 
   try {
     // JOIN predictions (pre-match only) with outcomes
@@ -139,45 +138,13 @@ export async function getCalibrationFactors(): Promise<CalibrationFactors> {
       .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
       .where(eq(matchPredictions.isLive, false));
 
-    if (rows.length < 10) {
-      _calibCache = { factors: EMPTY, fetchedAt: Date.now() };
-      return EMPTY;
-    }
-
-    // Accumulate per bucket: sum of predicted prob and count of actual occurrences
-    type Bucket = { sumPred: number; actualCount: number; total: number };
-    const buckets = (outcome: "home" | "draw" | "away"): Record<number, Bucket> => {
-      const b: Record<number, Bucket> = {};
-      for (const r of rows) {
-        const rawProb = outcome === "home" ? r.homeWinProb : outcome === "draw" ? r.drawProb : r.awayWinProb;
-        const prob = toUnitProb(rawProb);
-        const bucket = Math.min(9, Math.floor(prob * 10)) * 10;
-        if (!b[bucket]) b[bucket] = { sumPred: 0, actualCount: 0, total: 0 };
-        b[bucket].sumPred += prob;
-        b[bucket].total  += 1;
-        if (r.outcome === outcome) b[bucket].actualCount += 1;
-      }
-      return b;
-    };
-
-    const toFactors = (b: Record<number, Bucket>): Record<number, number> => {
-      const factors: Record<number, number> = {};
-      for (const [key, val] of Object.entries(b)) {
-        if (val.total < 5) continue; // not enough data for this bucket
-        const avgPred = val.sumPred / val.total;
-        // Bayesian smoothing prevents wild calibration swings on small samples.
-        const smoothedActualFreq = (val.actualCount + avgPred * 8) / (val.total + 8);
-        if (avgPred < 0.001) continue;
-        factors[Number(key)] = Math.max(0.65, Math.min(1.65, smoothedActualFreq / avgPred));
-      }
-      return factors;
-    };
-
+    // Historical bucket calibration used the same small sample for fitting and
+    // serving. Keep only its sample count for reporting. Production adjustment
+    // is owned exclusively by adaptiveLearningEngine's chronological holdout.
     const factors: CalibrationFactors = {
-      home: toFactors(buckets("home")),
-      draw: toFactors(buckets("draw")),
-      away: toFactors(buckets("away")),
+      home: {}, draw: {}, away: {},
       sampleSize: rows.length,
+      validated: false,
     };
 
     _calibCache = { factors, fetchedAt: Date.now() };
@@ -193,7 +160,7 @@ export function applyCalibration(
   outcome: "home" | "draw" | "away",
   factors: CalibrationFactors,
 ): number {
-  if (factors.sampleSize < 10) return prob;
+  if (!factors.validated || factors.sampleSize < 250) return prob;
   const unitProb = toUnitProb(prob);
   const bucket = Math.min(9, Math.floor(unitProb * 10)) * 10;
   const factor = factors[outcome][bucket];
@@ -208,7 +175,7 @@ export interface AccuracyStats {
   totalPredictions: number;
   correctPicks:     number;
   pickAccuracy:     number;     // 0-1
-  brierScore:       number;     // lower = better; 0.333 = random baseline
+  brierScore:       number;     // 3-class sum; lower is better, random = 0.667
   byOutcome: {
     home: { predicted: number; actual: number; correct: number };
     draw: { predicted: number; actual: number; correct: number };
@@ -414,7 +381,7 @@ export async function getCalibrationReport(): Promise<CalibrationReport> {
     recommendation: n < 250
       ? "Keep collecting results. Calibration will be cautious until at least 250 settled pre-match predictions are available."
       : n < 2000
-        ? "Use bucket calibration and league-level monitoring. External ML training becomes more reliable after 2,000+ rows."
+        ? "Use league-level monitoring; only chronological-holdout improvements may be promoted. External ML training becomes more reliable after 2,000+ rows."
         : "Dataset is large enough to export for XGBoost/LightGBM training and compare against the built-in calibrated model.",
   };
 }

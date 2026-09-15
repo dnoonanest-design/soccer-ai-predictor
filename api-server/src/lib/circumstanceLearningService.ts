@@ -233,31 +233,12 @@ function normalise(home: number, draw: number, away: number) {
 }
 
 export async function applyCircumstanceCalibration(match: Match, probs: { home: number; draw: number; away: number }) {
-  try {
-    const rows = await db.select().from(matchCircumstances).where(eq(matchCircumstances.fixtureId, match.id)).limit(1);
-    const c = rows[0];
-    if (!c) return { ...probs, adjustment: null };
-    const learnedRows = await db.select().from(factorLearningInsights).where(and(eq(factorLearningInsights.active, true), sql`${factorLearningInsights.factorName} IN ('circumstance_score_delta','red_card_delta','injury_delta','star_rating_delta','form_score_delta')`)).orderBy(desc(factorLearningInsights.createdAt)).limit(10);
-    const weights = new Map(learnedRows.map((r) => [r.factorName, Number(r.learnedWeight ?? 0)]));
-    const scoreDelta = Number(c.circumstanceScoreHome ?? 0) - Number(c.circumstanceScoreAway ?? 0);
-    const redDelta = Number(c.awayRedCards ?? 0) - Number(c.homeRedCards ?? 0);
-    const injuryDelta = (Number(c.awayMissingPlayers ?? 0) + Number(c.awayInMatchInjuries ?? 0) * 2) - (Number(c.homeMissingPlayers ?? 0) + Number(c.homeInMatchInjuries ?? 0) * 2);
-    const starDelta = Number(c.homeStarPlayerRating ?? 0) - Number(c.awayStarPlayerRating ?? 0);
-    const formDelta = Number(c.homeFormScore ?? 50) - Number(c.awayFormScore ?? 50);
-    const homeBoost = Math.max(-8, Math.min(8,
-      scoreDelta * (weights.get('circumstance_score_delta') || 0.035) +
-      redDelta * (weights.get('red_card_delta') || 4.0) +
-      injuryDelta * (weights.get('injury_delta') || 0.45) +
-      starDelta * (weights.get('star_rating_delta') || 1.1) +
-      formDelta * (weights.get('form_score_delta') || 0.035)
-    ));
-    const awayBoost = -homeBoost;
-    const drawShift = -Math.abs(homeBoost) * 0.2;
-    return { ...normalise(probs.home + homeBoost, probs.draw + drawShift, probs.away + awayBoost), adjustment: { homeBoost, factors: { scoreDelta, redDelta, injuryDelta, starDelta, formDelta } } };
-  } catch (err) {
-    logger.warn({ err, fixtureId: match.id }, "circumstance calibration failed");
-    return { ...probs, adjustment: null };
-  }
+  // Retained for API compatibility only. These signals overlap with form,
+  // injuries, lineups and live cards already used by the canonical model. The
+  // former default-weight adjustment could double count them without holdout
+  // proof, so it is deliberately neutral until promoted by the adaptive engine.
+  void match;
+  return { ...normalise(probs.home, probs.draw, probs.away), adjustment: null };
 }
 
 export async function analyzeCircumstanceInfluence() {

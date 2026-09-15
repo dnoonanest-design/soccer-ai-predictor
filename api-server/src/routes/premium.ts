@@ -10,8 +10,7 @@ import { statsRateLimit, safeInt, safeFloat, safeString, isSafeUrl } from "../li
 import { getAllMatches } from "../lib/soccerService";
 import { isTrackedLeague } from "../lib/leagueConfig";
 import { getMatchStats } from "../lib/statsService";
-import { getEnhancedPrediction } from "../lib/enhancedStatsService";
-import { getCalibrationFactors, applyCalibration } from "../lib/predictionStore";
+import { createCanonicalPrediction } from "../lib/canonicalPredictionService";
 import { configuredFootballSeason } from "../lib/season";
 
 const router = Router();
@@ -202,8 +201,6 @@ router.get("/value-centre", statsRateLimit, async (req, res) => {
   const leagueId = req.query.league_id ? Number(req.query.league_id) : null;
   try {
     const matches = await getAllMatches(leagueId, "upcoming");
-    const calibFactors = await getCalibrationFactors().catch(() => null);
-
     // Process in batches of 6 to avoid hammering the external API with 30 concurrent calls.
     // Each getEnhancedPrediction can fire up to 10 external requests, so 30 concurrent
     // predictions = up to 300 simultaneous API calls, which would exhaust the quota.
@@ -215,31 +212,8 @@ router.get("/value-centre", statsRateLimit, async (req, res) => {
 
     async function scoreMatch(match: typeof candidateMatches[0]) {
       try {
-        const result = await getMatchStats(
-          match.id,
-          match.home_team.id, match.home_team.name,
-          match.away_team.id, match.away_team.name,
-          match.league_id, false
-        );
-        if (!result.home.matches_played || !result.away.matches_played) return null;
-        const raw = await getEnhancedPrediction(
-          match.id,
-          match.status,
-          match.home_team.id, match.away_team.id, match.league_id,
-          result.home.goals_per_game, result.home.conceded_per_game,
-          result.away.goals_per_game, result.away.conceded_per_game,
-          match.home_team.name, match.away_team.name,
-          null, false, null, null,
-          result.home.form, result.away.form
-        );
-        let homeP = raw.home_win, drawP = raw.draw, awayP = raw.away_win;
-        if (calibFactors && calibFactors.sampleSize >= 10) {
-          homeP = applyCalibration(homeP, "home", calibFactors);
-          drawP = applyCalibration(drawP, "draw", calibFactors);
-          awayP = applyCalibration(awayP, "away", calibFactors);
-          const t = homeP + drawP + awayP;
-          if (t > 0) { homeP = homeP/t*100; drawP = drawP/t*100; awayP = awayP/t*100; }
-        }
+        const { prediction: raw } = await createCanonicalPrediction(match);
+        const homeP = raw.home_win, drawP = raw.draw, awayP = raw.away_win;
         const computeEdge = (modelPct: number, decOdds: number | null) => {
           if (!decOdds || modelPct <= 0) return null;
           const fairOdds = 100 / modelPct;

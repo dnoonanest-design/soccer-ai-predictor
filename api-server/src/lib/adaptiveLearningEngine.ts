@@ -55,7 +55,8 @@
  *  - No source code is ever modified at runtime.
  *  - All learned parameters are stored in the database only.
  *  - Every write to model parameters is accompanied by a before/after audit.
- *  - Parameters are only promoted when sample ≥ 60 AND Brier improves.
+ *  - Parameters are only promoted when sample ≥ 250, the newest chronological
+ *    holdout has ≥ 50 matches, and multiclass Brier improves by ≥ 0.002.
  *  - A rollback mechanism keeps the previous N parameter sets available.
  */
 
@@ -622,8 +623,9 @@ export async function getLearnedWeights(): Promise<LearnedFactorWeights> {
   try {
     const rows = await db.select({ weightsJson: modelTrainingRuns.weightsJson, createdAt: modelTrainingRuns.createdAt })
       .from(modelTrainingRuns)
+      .where(sql`${modelTrainingRuns.weightsJson} LIKE '%"adaptiveWeights"%'`)
       .orderBy(desc(modelTrainingRuns.createdAt))
-      .limit(5);
+      .limit(1);
 
     // Look for a row that has adaptive weights (has formFactorScale field)
     for (const row of rows) {

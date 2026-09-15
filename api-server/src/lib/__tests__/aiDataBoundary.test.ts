@@ -30,4 +30,39 @@ describe("AI temporal data boundary", () => {
     expect(code).toContain("!isLive && learnedWeights.sampleSize >= 250");
     expect(code).toContain("globalOutcomePriors");
   });
+
+  it("routes every production forecast through one canonical pipeline", async () => {
+    const files = [
+      "../../routes/stats.ts",
+      "../../routes/premium.ts",
+      "../backgroundLearnerService.ts",
+      "../futurePredictionBaselineService.ts",
+      "../predictionAccuracyAuditService.ts",
+    ];
+    for (const file of files) {
+      const code = await source(file);
+      expect(code).toContain("createCanonicalPrediction");
+      expect(code).not.toContain("applyCalibration(");
+      expect(code).not.toContain("applyCircumstanceCalibration(");
+      expect(code).not.toContain("getEnhancedPrediction(");
+    }
+    const statsRoute = await source("../../routes/stats.ts");
+    expect(statsRoute).not.toContain("getAllXGPredictions");
+    expect(statsRoute).toContain("canonical_prediction_snapshots");
+  });
+
+  it("keeps pre-match competition-strength evidence connected", async () => {
+    const code = await source("../canonicalPredictionService.ts");
+    expect(code).toContain("modelStatsPayload(stats)");
+    expect(code).toContain("Strength index/sample size are pre-match features");
+  });
+
+  it("uses one 250-match promotion threshold throughout AI reporting", async () => {
+    const background = await source("../backgroundLearnerService.ts");
+    const memory = await source("../aiMemoryUpdateService.ts");
+    expect(background).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE");
+    expect(memory).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE");
+    expect(memory).not.toContain("sampleSize >= 60");
+    expect(memory).not.toContain("maximumBrierForPromotion: 0.24");
+  });
 });

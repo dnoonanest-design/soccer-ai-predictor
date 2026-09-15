@@ -1,14 +1,12 @@
 import { Router } from "express";
-import { getMatchStats, getAllXGPredictions } from "../lib/statsService";
-import { getEnhancedPrediction, getLiveMomentumSnapshot } from "../lib/enhancedStatsService";
-import { getAllMatches, getMatchById } from "../lib/soccerService";
+import { getMatchStats } from "../lib/statsService";
+import { getLiveMomentumSnapshot } from "../lib/enhancedStatsService";
+import { getMatchById } from "../lib/soccerService";
+import { pool } from "@workspace/db";
 import { logger } from "../lib/logger";
-import {
-  savePrediction,
-  getCalibrationFactors,
-  applyCalibration,
-} from "../lib/predictionStore";
+import { savePrediction } from "../lib/predictionStore";
 import { saveLiveAlert, savePredictionSnapshot } from "../lib/predictionPlatformService";
+import { createCanonicalPrediction } from "../lib/canonicalPredictionService";
 
 const router = Router();
 
@@ -20,32 +18,26 @@ function valueEdge(modelPct: number, decimalOdds: number | null) {
   return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
 }
 
-function normalizeThreeWayPercent(home: number, draw: number, away: number) {
-  const safeHome = Number.isFinite(home) && home > 0 ? home : 0;
-  const safeDraw = Number.isFinite(draw) && draw > 0 ? draw : 0;
-  const safeAway = Number.isFinite(away) && away > 0 ? away : 0;
-  const total = safeHome + safeDraw + safeAway;
-  if (total <= 0) {
-    return { home: 33.34, draw: 33.33, away: 33.33 };
-  }
-  const normHome = Math.round((safeHome / total) * 10000) / 100;
-  const normDraw = Math.round((safeDraw / total) * 10000) / 100;
-  const normAway = Math.round(Math.max(0, 100 - normHome - normDraw) * 100) / 100;
-  // If rounding pushes the sum away from 100, put the adjustment on the largest leg.
-  const sum = Math.round((normHome + normDraw + normAway) * 100) / 100;
-  if (sum === 100) return { home: normHome, draw: normDraw, away: normAway };
-  const diff = Math.round((100 - sum) * 100) / 100;
-  if (normHome >= normDraw && normHome >= normAway) return { home: Math.round((normHome + diff) * 100) / 100, draw: normDraw, away: normAway };
-  if (normDraw >= normAway) return { home: normHome, draw: Math.round((normDraw + diff) * 100) / 100, away: normAway };
-  return { home: normHome, draw: normDraw, away: Math.round((normAway + diff) * 100) / 100 };
-}
-
-
 router.get("/xg", async (_req, res) => {
   try {
-    const matches = await getAllMatches(null, null);
-    const predictions = await getAllXGPredictions(matches);
-    return res.json({ predictions });
+    // Read the latest canonical snapshots. This endpoint must not run a second,
+    // simplified probability model or trigger a quota-heavy fixture-wide scan.
+    const result = await pool.query(`
+      SELECT * FROM (
+        SELECT DISTINCT ON (fixture_id)
+          fixture_id AS match_id,
+          home_xg, away_xg,
+          home_win_prob AS home_win,
+          draw_prob AS draw,
+          away_win_prob AS away_win,
+          created_at
+        FROM prediction_snapshots
+        ORDER BY fixture_id, created_at DESC
+      ) latest
+      ORDER BY created_at DESC
+      LIMIT 250
+    `);
+    return res.json({ predictions: result.rows, source: "canonical_prediction_snapshots" });
   } catch (err) {
     logger.error({ err }, "Failed to compute bulk xG predictions");
     return res.status(500).json({ error: "Failed to compute xG predictions" });
@@ -76,52 +68,15 @@ router.get("/matches/:match_id/stats", async (req, res) => {
     // A finished fixture is settlement evidence, never a forecasting input.
     // Do not generate a fresh "prediction" from its final score or final-match
     // telemetry; historical predictions are evaluated by the settlement jobs.
-    if (match.status !== "finished" && result.home.matches_played > 0 && result.away.matches_played > 0) {
+    if (match.status !== "finished") {
       try {
-        const [rawPred, calibFactors] = await Promise.all([
-          getEnhancedPrediction(
-            matchId,
-            match.status,
-            match.home_team.id,
-            match.away_team.id,
-            match.league_id,
-            result.home.goals_per_game,
-            result.home.conceded_per_game,
-            result.away.goals_per_game,
-            result.away.conceded_per_game,
-            match.home_team.name,
-            match.away_team.name,
-            match.minute ?? null,
-            match.status === "live",
-            match.score?.home ?? null,
-            match.score?.away ?? null,
-            result.home.form,
-            result.away.form,
-            result.has_live_stats ? { home: result.home, away: result.away } : undefined
-          ),
-          getCalibrationFactors(),
-        ]);
-
-        if (rawPred) {
-          // Apply calibration to the base pre-match probabilities
-          const calHome = applyCalibration(rawPred.home_win, "home", calibFactors);
-          const calDraw = applyCalibration(rawPred.draw,     "draw", calibFactors);
-          const calAway = applyCalibration(rawPred.away_win, "away", calibFactors);
-
-          // Re-normalise after calibration.
-          // Enhanced predictions are displayed by the clients as 0-100 percentages,
-          // not 0-1 fractions. Keep that contract here.
-          const normalized = normalizeThreeWayPercent(calHome, calDraw, calAway);
-          const normHome = normalized.home;
-          const normDraw = normalized.draw;
-          const normAway = normalized.away;
-
+        const { prediction } = await createCanonicalPrediction(match, { stats: result });
+        if (prediction) {
+          const normHome = prediction.home_win;
+          const normDraw = prediction.draw;
+          const normAway = prediction.away_win;
           enhancedPred = {
-            ...rawPred,
-            home_win: normHome,
-            draw:     normDraw,
-            away_win: normAway,
-            calibration_sample_size: calibFactors.sampleSize,
+            ...prediction,
             value_edges: {
               home: valueEdge(normHome, match.odds?.home_odds ?? null),
               draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),
@@ -129,7 +84,7 @@ router.get("/matches/:match_id/stats", async (req, res) => {
             },
           };
 
-          const confidenceScore = Number((enhancedPred as any).confidence_score ?? 0);
+          const confidenceScore = Number(prediction.confidence_score ?? 0);
           const liveMomentum = (enhancedPred as any).live_momentum;
 
           savePredictionSnapshot({

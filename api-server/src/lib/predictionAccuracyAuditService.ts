@@ -1,16 +1,7 @@
 import { pool } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, getAllMatches, type Match } from "./soccerService";
-import { getMatchStats } from "./statsService";
-import { applyDataQualityReliability } from "./predictionDataQuality";
-import {
-  getEnhancedPrediction,
-  type LiveMatchStatsInput,
-} from "./enhancedStatsService";
-import {
-  applyCircumstanceCalibration,
-  collectMatchCircumstances,
-} from "./circumstanceLearningService";
+import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
@@ -30,7 +21,7 @@ const MAX_LIVE_CAPTURES_PER_RUN = clamp(
   20,
 );
 const MODEL_VERSION =
-  process.env.PREDICTION_MODEL_VERSION ?? "opponent-adjusted-v5";
+  process.env.PREDICTION_MODEL_VERSION ?? CANONICAL_PREDICTION_PIPELINE_VERSION;
 const ENGINE_REVISION =
   process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
   process.env.GIT_COMMIT_SHA?.slice(0, 12) ??
@@ -199,18 +190,6 @@ function settlementSignaturePayload(row: Record<string, any>) {
 function toUnitProbability(value: number): number {
   const unit = value > 1 ? value / 100 : value;
   return Math.max(0.001, Math.min(0.999, unit));
-}
-
-function normaliseThreeWay(home: number, draw: number, away: number) {
-  const raw = [home, draw, away].map((v) =>
-    Number.isFinite(v) && v > 0 ? v : 0,
-  );
-  const total = raw.reduce((sum, value) => sum + value, 0);
-  if (total <= 0) return { home: 33.34, draw: 33.33, away: 33.33 };
-  const h = Math.round((raw[0] / total) * 10_000) / 100;
-  const d = Math.round((raw[1] / total) * 10_000) / 100;
-  const a = Math.round(Math.max(0, 100 - h - d) * 100) / 100;
-  return { home: h, draw: d, away: a };
 }
 
 export function getPredictedOutcome(home: number, draw: number, away: number) {
@@ -386,12 +365,6 @@ async function getUpcomingAuditMatches(now: Date): Promise<Match[]> {
   );
 }
 
-function liveStatsPayload(stats: any): LiveMatchStatsInput | undefined {
-  return stats?.has_live_stats
-    ? { home: stats.home, away: stats.away }
-    : undefined;
-}
-
 async function computeAuditPrediction(
   match: Match,
   includeCircumstances: boolean,
@@ -400,87 +373,26 @@ async function computeAuditPrediction(
   // Recomputing here after full time would leak the result into the forecast.
   if (match.status === "finished") return null;
 
-  const live = match.status === "live";
-  const stats = await getMatchStats(
-    match.id,
-    match.home_team.id,
-    match.home_team.name,
-    match.away_team.id,
-    match.away_team.name,
-    match.league_id,
-    live,
-  );
-
-  if (
-    !stats?.home ||
-    !stats?.away ||
-    stats.home.matches_played <= 0 ||
-    stats.away.matches_played <= 0
-  )
-    return null;
-
-  const raw = await getEnhancedPrediction(
-    match.id,
-    match.status,
-    match.home_team.id,
-    match.away_team.id,
-    match.league_id,
-    stats.home.goals_per_game,
-    stats.home.conceded_per_game,
-    stats.away.goals_per_game,
-    stats.away.conceded_per_game,
-    match.home_team.name,
-    match.away_team.name,
-    match.minute ?? null,
-    live,
-    match.score?.home ?? null,
-    match.score?.away ?? null,
-    stats.home.form,
-    stats.away.form,
-    liveStatsPayload(stats),
-  );
-
-  const normalized = normaliseThreeWay(raw.home_win, raw.draw, raw.away_win);
-  const quality = applyDataQualityReliability(
-    normalized,
-    stats.home,
-    stats.away,
-    numberOrNull(raw.confidence_score),
-  );
-  let circumstances: any = null;
-  let adjusted = quality.probabilities;
-
-  if (includeCircumstances) {
-    circumstances = await collectMatchCircumstances(
-      match,
-      stats.home.form,
-      stats.away.form,
-    ).catch((err) => {
-      logger.warn(
-        { err, fixtureId: match.id },
-        "prediction audit circumstance collection failed",
-      );
-      return null;
-    });
-    adjusted = await applyCircumstanceCalibration(match, adjusted);
-  }
+  const { prediction: raw, circumstances } = await createCanonicalPrediction(match, {
+    collectCircumstances: includeCircumstances,
+  });
 
   return {
-    home: adjusted.home,
-    draw: adjusted.draw,
-    away: adjusted.away,
+    home: raw.home_win,
+    draw: raw.draw,
+    away: raw.away_win,
     over25: numberOrNull(raw.over_25),
     btts: numberOrNull(raw.btts),
     homeXg: numberOrNull(raw.home_xg),
     awayXg: numberOrNull(raw.away_xg),
-    confidence: quality.confidence,
+    confidence: raw.confidence_score,
     circumstanceScoreHome: numberOrNull(circumstances?.circumstanceScoreHome),
     circumstanceScoreAway: numberOrNull(circumstances?.circumstanceScoreAway),
     homeFormScore: numberOrNull(circumstances?.homeFormScore),
     awayFormScore: numberOrNull(circumstances?.awayFormScore),
     dataTier: includeCircumstances
-      ? `${quality.dataTier}+circumstances`
-      : quality.dataTier,
+      ? `${raw.data_tier}+context-recorded`
+      : raw.data_tier,
   };
 }
 
