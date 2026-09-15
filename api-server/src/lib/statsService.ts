@@ -16,9 +16,62 @@ const RECENT_FIXTURE_CACHE_TTL = 60 * 60 * 1000;
 const LIVE_CACHE_TTL = 12 * 1000;
 const RECENT_FORM_SAMPLE = 12;
 const MIN_COMPETITION_SAMPLE = 5;
+const SPARSE_LOG_INTERVAL_MS = 6 * 60 * 60_000;
 
 interface CacheEntry<T> { data: T; fetchedAt: number; }
 const cache = new Map<string, CacheEntry<unknown>>();
+const sparseLogAt = new Map<number, number>();
+const coverageByLeague = new Map<number, {
+  evaluations: number;
+  sparse: number;
+  lastSparseAt: string | null;
+}>();
+let coverageEvaluations = 0;
+let sparseEvaluations = 0;
+let lastSparseAt: string | null = null;
+
+export function getStatsCoverageStatus() {
+  const fallbackRate = coverageEvaluations > 0
+    ? Math.round((sparseEvaluations / coverageEvaluations) * 10_000) / 100
+    : 0;
+  return {
+    evaluations: coverageEvaluations,
+    fullCompetitionHistory: coverageEvaluations - sparseEvaluations,
+    sparseFallbacks: sparseEvaluations,
+    sparseFallbackRatePercent: fallbackRate,
+    lastSparseAt,
+    minimumCompetitionMatches: MIN_COMPETITION_SAMPLE,
+    leagues: Array.from(coverageByLeague.entries())
+      .map(([leagueId, value]) => ({
+        leagueId,
+        ...value,
+        sparseRatePercent: value.evaluations > 0
+          ? Math.round((value.sparse / value.evaluations) * 10_000) / 100
+          : 0,
+      }))
+      .sort((a, b) => b.sparse - a.sparse)
+      .slice(0, 20),
+  };
+}
+
+function recordStatsCoverage(leagueId: number, sparse: boolean) {
+  coverageEvaluations++;
+  if (sparse) {
+    sparseEvaluations++;
+    lastSparseAt = new Date().toISOString();
+  }
+  const league = coverageByLeague.get(leagueId) ?? {
+    evaluations: 0,
+    sparse: 0,
+    lastSparseAt: null,
+  };
+  league.evaluations++;
+  if (sparse) {
+    league.sparse++;
+    league.lastSparseAt = lastSparseAt;
+  }
+  coverageByLeague.set(leagueId, league);
+}
 
 function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -616,9 +669,18 @@ export async function getMatchStats(
     ...(liveStats?.away ?? {}),
   };
 
-  if (
-    home.data_source !== "competition" || away.data_source !== "competition"
-  ) {
+  const sparseHistory = home.data_source !== "competition" || away.data_source !== "competition";
+  recordStatsCoverage(leagueId, sparseHistory);
+
+  const previousSparseLogAt = sparseLogAt.get(fixtureId) ?? 0;
+  if (sparseHistory && Date.now() - previousSparseLogAt >= SPARSE_LOG_INTERVAL_MS) {
+    sparseLogAt.set(fixtureId, Date.now());
+    if (sparseLogAt.size > 5_000) {
+      const cutoff = Date.now() - SPARSE_LOG_INTERVAL_MS;
+      for (const [key, loggedAt] of sparseLogAt) {
+        if (loggedAt < cutoff) sparseLogAt.delete(key);
+      }
+    }
     logger.info({
       fixtureId,
       leagueId,

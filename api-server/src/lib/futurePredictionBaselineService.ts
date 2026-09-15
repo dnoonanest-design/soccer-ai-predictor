@@ -1,10 +1,15 @@
 import { pool } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, type Match } from "./soccerService";
-import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
+import {
+  CANONICAL_PREDICTION_PIPELINE_VERSION,
+  createCanonicalPrediction,
+  PredictionWarmupError,
+} from "./canonicalPredictionService";
 import { savePrediction } from "./predictionStore";
 import { getConfidenceBand, getPredictedOutcome } from "./predictionAccuracyAuditService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
+import { getOfflineFallbackModel, MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
 
 const ENABLED = process.env.FUTURE_PREDICTION_BASELINE_ENABLED !== "false";
 const WINDOW_HOURS = clamp(Number(process.env.FUTURE_PREDICTION_BASELINE_WINDOW_HOURS ?? 192), 168, 240);
@@ -16,6 +21,11 @@ const MAX_CAPTURES_PER_RUN = clamp(
   Number(process.env.FUTURE_PREDICTION_BASELINE_MAX_PER_RUN ?? 30),
   1,
   60,
+);
+const WARMUP_RETRY_MS = durationMs(
+  process.env.FUTURE_PREDICTION_WARMUP_RETRY_MS,
+  60 * 60_000,
+  15 * 60_000,
 );
 const MODEL_VERSION = process.env.PREDICTION_MODEL_VERSION ?? CANONICAL_PREDICTION_PIPELINE_VERSION;
 const ENGINE_REVISION =
@@ -62,7 +72,15 @@ type BaselineRunResult = {
   fixturesInWindow: number;
   due: number;
   captured: number;
+  deferredWarmup: number;
   errors: number;
+};
+
+type WarmupDeferral = {
+  currentSamples: number;
+  requiredSamples: number;
+  retryAt: number;
+  observedAt: string;
 };
 
 let started = false;
@@ -72,10 +90,17 @@ let startupTimer: NodeJS.Timeout | null = null;
 let lastRunAt: Date | null = null;
 let lastResult: BaselineRunResult | null = null;
 let lastError: string | null = null;
+const warmupDeferrals = new Map<string, WarmupDeferral>();
+let lastWarmupObservation: Omit<WarmupDeferral, "retryAt"> | null = null;
 
 function clamp(value: number, min: number, max: number) {
   const safe = Number.isFinite(value) ? Math.floor(value) : min;
   return Math.max(min, Math.min(max, safe));
+}
+
+function durationMs(value: string | undefined, fallback: number, minimum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(minimum, parsed) : fallback;
 }
 
 function numberOrNull(value: unknown): number | null {
@@ -257,9 +282,20 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
 
   try {
     const now = new Date();
+    const fallbackModel = await getOfflineFallbackModel().catch(() => null);
+    if (fallbackModel) {
+      lastWarmupObservation = {
+        currentSamples: fallbackModel.sampleSize,
+        requiredSamples: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+        observedAt: now.toISOString(),
+      };
+      if (fallbackModel.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
+        warmupDeferrals.clear();
+      }
+    }
     const matches = await getFutureMatches(now);
     const existing = await existingKeys(matches.map((match) => match.id));
-    const due = matches
+    const candidates = matches
       .map((match) => ({
         match,
         checkpoint: checkpointFor(new Date(match.kickoff).getTime() - now.getTime()),
@@ -267,7 +303,21 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
       .filter(
         (item): item is { match: Match; checkpoint: "prematch_168h" | "prematch_72h" | "prematch_48h" | "prematch_24h" } =>
           Boolean(item.checkpoint) && !existing.has(`${item.match.id}:${item.checkpoint}`),
-      )
+      );
+    const candidateKeys = new Set(
+      candidates.map(({ match, checkpoint }) => `${match.id}:${checkpoint}`),
+    );
+    for (const key of warmupDeferrals.keys()) {
+      if (!candidateKeys.has(key)) warmupDeferrals.delete(key);
+    }
+    let deferredWarmup = 0;
+    const due = candidates
+      .filter(({ match, checkpoint }) => {
+        const deferral = warmupDeferrals.get(`${match.id}:${checkpoint}`);
+        if (!deferral || deferral.retryAt <= now.getTime()) return true;
+        deferredWarmup++;
+        return false;
+      })
       .slice(0, MAX_CAPTURES_PER_RUN);
 
     let captured = 0;
@@ -278,6 +328,8 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
         if (!prediction) continue;
         const inserted = await insertBaselineAudit(match, checkpoint, prediction);
         if (!inserted) continue;
+
+        warmupDeferrals.delete(`${match.id}:${checkpoint}`);
 
         await savePrediction({
           fixtureId: match.id,
@@ -292,6 +344,23 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
         });
         captured++;
       } catch (err) {
+        if (err instanceof PredictionWarmupError) {
+          deferredWarmup++;
+          const observedAt = new Date().toISOString();
+          const deferral = {
+            currentSamples: err.currentSamples,
+            requiredSamples: err.requiredSamples,
+            retryAt: Date.now() + WARMUP_RETRY_MS,
+            observedAt,
+          };
+          warmupDeferrals.set(`${match.id}:${checkpoint}`, deferral);
+          lastWarmupObservation = {
+            currentSamples: err.currentSamples,
+            requiredSamples: err.requiredSamples,
+            observedAt,
+          };
+          continue;
+        }
         errors++;
         logger.warn({ err, fixtureId: match.id, checkpoint }, "future prediction baseline capture failed");
       }
@@ -301,6 +370,7 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
       fixturesInWindow: matches.length,
       due: due.length,
       captured,
+      deferredWarmup,
       errors,
     };
     lastRunAt = new Date();
@@ -318,6 +388,8 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
 }
 
 export function getFuturePredictionBaselineStatus() {
+  const requiredSamples = lastWarmupObservation?.requiredSamples ?? null;
+  const currentSamples = lastWarmupObservation?.currentSamples ?? null;
   return {
     enabled: ENABLED,
     started,
@@ -325,12 +397,25 @@ export function getFuturePredictionBaselineStatus() {
     windowHours: WINDOW_HOURS,
     scanIntervalMs: SCAN_INTERVAL_MS,
     maxCapturesPerRun: MAX_CAPTURES_PER_RUN,
+    warmupRetryMs: WARMUP_RETRY_MS,
     checkpoints: ["168h", "72h", "48h", "24h"],
     modelVersion: MODEL_VERSION,
     engineRevision: ENGINE_REVISION,
     lastRunAt,
     lastResult,
     lastError,
+    warmup: {
+      state: currentSamples == null || requiredSamples == null
+        ? "unknown"
+        : currentSamples >= requiredSamples ? "ready" : "warming_up",
+      currentSamples,
+      requiredSamples,
+      remainingSamples: currentSamples == null || requiredSamples == null
+        ? null
+        : Math.max(0, requiredSamples - currentSamples),
+      deferredFixtures: warmupDeferrals.size,
+      lastObservedAt: lastWarmupObservation?.observedAt ?? null,
+    },
   };
 }
 
@@ -349,6 +434,7 @@ export function startFuturePredictionBaseline() {
       windowHours: WINDOW_HOURS,
       scanIntervalMs: SCAN_INTERVAL_MS,
       maxCapturesPerRun: MAX_CAPTURES_PER_RUN,
+      warmupRetryMs: WARMUP_RETRY_MS,
       checkpoints: ["168h", "72h", "48h", "24h"],
       modelVersion: MODEL_VERSION,
       engineRevision: ENGINE_REVISION,

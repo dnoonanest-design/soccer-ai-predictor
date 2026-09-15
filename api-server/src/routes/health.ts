@@ -1,12 +1,29 @@
 import { Router, type IRouter } from "express";
+import { readFileSync } from "node:fs";
 import { getApiFootballProviderHealth } from "../lib/apiFootballReliability";
 import { getQuotaOptimizationStatus } from "../lib/quotaOptimizationService";
 import { getOddsOptimizationStatus } from "../lib/oddsOptimizationService";
 import { getLiveDiscoveryConcurrencyGuardStatus } from "../lib/liveDiscoveryConcurrencyGuard";
 import { getDatabaseReadiness } from "../lib/databaseReadinessService";
 import { getBackgroundRuntimeStatus } from "../lib/backgroundLearnerService";
+import { getMatchSnapshotStatus } from "../lib/soccerService";
+import { getStatsCoverageStatus } from "../lib/statsService";
+import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaselineService";
 
 const router: IRouter = Router();
+
+function getReleaseIdentity() {
+  let validatedCommit: string | null = null;
+  try {
+    validatedCommit = readFileSync(".railway-release", "utf8").trim().slice(0, 12) || null;
+  } catch {
+    // Local development and tests do not require a Railway release marker.
+  }
+  return {
+    deployedCommit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    validatedCommit,
+  };
+}
 
 // Liveness: the web process is running. Do not restart the app solely because
 // an external data provider is unavailable; expose those dependencies separately.
@@ -45,13 +62,18 @@ router.get("/health/readiness", async (_req, res) => {
 
   return res.status(ready ? 200 : 503).json({
     status: ready ? "ready" : "degraded",
-    release: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    release: getReleaseIdentity(),
     live_data_status: apiFootball.state,
     database,
     background: {
       ...background,
       predictionRole: "deterministic-model",
       generativeAiRole: "explanation-only",
+    },
+    prediction_pipeline: {
+      fixtureSnapshot: getMatchSnapshotStatus(),
+      statsCoverage: getStatsCoverageStatus(),
+      baselineWorker: getFuturePredictionBaselineStatus(),
     },
     providers: {
       api_football: apiFootball,

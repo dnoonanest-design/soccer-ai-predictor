@@ -49,6 +49,19 @@ export type CanonicalPredictionOptions = {
   collectCircumstances?: boolean;
 };
 
+export class PredictionWarmupError extends Error {
+  readonly code = "PREDICTION_HISTORY_WARMUP";
+
+  constructor(
+    readonly fixtureId: number,
+    readonly currentSamples: number,
+    readonly requiredSamples: number,
+  ) {
+    super(`prediction history warm-up: ${currentSamples}/${requiredSamples} settled matches`);
+    this.name = "PredictionWarmupError";
+  }
+}
+
 export function normaliseThreeWayPercent(home: number, draw: number, away: number): ThreeWay {
   const safe = [home, draw, away].map((value) => Number.isFinite(value) && value > 0 ? value : 0);
   const total = safe[0] + safe[1] + safe[2];
@@ -116,7 +129,11 @@ async function buildFallbackPrediction(match: Match): Promise<CanonicalPredictio
   const fallback = await getOfflineFallbackModel();
   const prior = fallback.leagueOutcomePriors[match.league_id] ?? fallback.globalPriors;
   if (fallback.sampleSize < MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
-    throw new Error(`offline fallback requires ${MIN_SAMPLE_FOR_WEIGHT_UPDATE} settled matches for fixture ${match.id}`);
+    throw new PredictionWarmupError(
+      match.id,
+      fallback.sampleSize,
+      MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+    );
   }
   const probs = normaliseThreeWayPercent(prior.home, prior.draw, prior.away);
   const leagueXg = fallback.leagueXgAverages[match.league_id] ?? { home: 1.35, away: 1.10 };

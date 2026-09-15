@@ -7,6 +7,7 @@ import {
   markApiFootballFailure,
   markApiFootballSuccess,
 } from "./apiFootballReliability";
+import { AsyncSnapshotCache } from "./asyncSnapshotCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -38,6 +39,35 @@ const STALE_LIVE_OVERRIDE_TTL_MS = 6 * 60 * 60_000;
 const staleLiveRefreshAt = new Map<number, number>();
 const staleLiveOverride = new Map<number, CacheEntry<ApiFootballFixture>>();
 const staleLiveSuppressionLogAt = new Map<number, number>();
+
+type MatchSnapshotMode = "daily" | "weekly";
+
+function snapshotTtl(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(5_000, parsed) : fallback;
+}
+
+const MATCH_SNAPSHOT_DAILY_TTL_MS = snapshotTtl(
+  process.env.MATCH_SNAPSHOT_DAILY_TTL_MS,
+  10_000,
+);
+const MATCH_SNAPSHOT_WEEKLY_TTL_MS = snapshotTtl(
+  process.env.MATCH_SNAPSHOT_WEEKLY_TTL_MS,
+  30_000,
+);
+const matchSnapshots = new AsyncSnapshotCache<MatchSnapshotMode, Match[]>(
+  (mode) => mode === "daily" ? MATCH_SNAPSHOT_DAILY_TTL_MS : MATCH_SNAPSHOT_WEEKLY_TTL_MS,
+  2,
+  (mode) => mode === "daily" ? 30_000 : 60_000,
+);
+
+export function getMatchSnapshotStatus() {
+  return {
+    ...matchSnapshots.status(),
+    dailyTtlMs: MATCH_SNAPSHOT_DAILY_TTL_MS,
+    weeklyTtlMs: MATCH_SNAPSHOT_WEEKLY_TTL_MS,
+  };
+}
 
 function getCached<T>(key: string, ttl: number): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -657,10 +687,7 @@ async function getSoccerOdds(
   return Array.from(events.values());
 }
 
-export async function getAllMatches(
-  leagueId?: number | null,
-  status?: string | null,
-): Promise<Match[]> {
+async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
   // Keep provider requests sequential to preserve the shared throttle.
   // Upcoming/all views use the quota optimiser's weekly schedule cache. Live
   // and finished views remain today-only so their polling stays lightweight.
@@ -669,7 +696,7 @@ export async function getAllMatches(
   // (including matches that have just reached FT). Reading the date/window
   // cache first can otherwise render an old NS snapshot for the whole request.
   const liveFixtures = await getLiveFixtures();
-  const todayFixtures = status === "live" || status === "finished"
+  const todayFixtures = mode === "daily"
     ? await getTodayFixtures()
     : await getFixtureWindow(8);
 
@@ -722,18 +749,6 @@ export async function getAllMatches(
     fixtureToMatch(fixture, oddsEvents),
   );
 
-  if (leagueId != null) {
-    matches = matches.filter((match) => match.league_id === leagueId);
-  }
-
-  if (status && status !== "all") {
-    if (status === "live") {
-      matches = matches.filter((match) => liveIds.has(match.id));
-    } else {
-      matches = matches.filter((match) => match.status === status);
-    }
-  }
-
   matches.sort((a, b) => {
     const order: Record<string, number> = { live: 0, upcoming: 1, finished: 2 };
     return (order[a.status] ?? 3) - (order[b.status] ?? 3);
@@ -753,6 +768,27 @@ export async function getAllMatches(
       .catch((err) =>
         logger.warn({ err }, "market intelligence capture failed"),
       );
+  }
+
+  return matches;
+}
+
+export async function getAllMatches(
+  leagueId?: number | null,
+  status?: string | null,
+): Promise<Match[]> {
+  const mode: MatchSnapshotMode = status === "live" || status === "finished"
+    ? "daily"
+    : "weekly";
+  const snapshot = await matchSnapshots.get(mode, () => loadMatchSnapshot(mode));
+  let matches = snapshot;
+
+  if (leagueId != null) {
+    matches = matches.filter((match) => match.league_id === leagueId);
+  }
+
+  if (status && status !== "all") {
+    matches = matches.filter((match) => match.status === status);
   }
 
   return matches;

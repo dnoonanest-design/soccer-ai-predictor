@@ -64,6 +64,10 @@ jobs:
       - name: Smoke test production bundle
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          # Keep provider readiness in its pre-check "unknown" state. All
+          # provider-calling background jobs are disabled or delayed beyond
+          # this local smoke test, so this value is never sent externally.
+          API_FOOTBALL_KEY: ci-placeholder-not-a-real-key
           ADMIN_SECRET: ci-admin-secret
           BACKGROUND_LEARNER_ENABLED: "true"
           PREDICTION_ACCURACY_AUDIT_ENABLED: "false"
