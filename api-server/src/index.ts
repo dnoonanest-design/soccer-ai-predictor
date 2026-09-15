@@ -21,6 +21,7 @@ import {
   startFullMatchLifecycleReliabilityTest,
   stopFullMatchLifecycleReliabilityTest,
 } from "./lib/fullMatchLifecycleReliabilityService";
+import { warmMatchSnapshot } from "./lib/soccerService";
 
 // Install provider optimisers before any background worker starts. The football
 // layer owns schedule-aware fixture batching; the odds layer then wraps the
@@ -47,6 +48,11 @@ const server = app.listen(port, () => {
   startFuturePredictionBaseline();
   startPredictionAccuracyAudit();
   startFullMatchLifecycleReliabilityTest();
+  if (process.env.MATCH_SNAPSHOT_PREWARM_ENABLED !== "false") {
+    void warmMatchSnapshot()
+      .then((result) => logger.info(result, "weekly dashboard snapshot prewarmed"))
+      .catch((err) => logger.warn({ err }, "weekly dashboard snapshot prewarm failed"));
+  }
 });
 
 server.on("error", (err) => {

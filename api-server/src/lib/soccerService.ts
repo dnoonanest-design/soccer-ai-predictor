@@ -794,6 +794,13 @@ export async function getAllMatches(
   return matches;
 }
 
+/** Populate the shared weekly dashboard snapshot before the first user load. */
+export async function warmMatchSnapshot() {
+  const startedAt = Date.now();
+  const matches = await matchSnapshots.get("weekly", () => loadMatchSnapshot("weekly"));
+  return { matchCount: matches.length, durationMs: Date.now() - startedAt };
+}
+
 /** Resolve exact fixtures for catch-up jobs without re-fetching whole days. */
 export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
   const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));

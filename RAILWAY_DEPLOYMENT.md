@@ -32,6 +32,7 @@ FUTURE_PREDICTION_BASELINE_ENABLED=true
 FUTURE_PREDICTION_WARMUP_RETRY_MS=3600000
 MATCH_SNAPSHOT_DAILY_TTL_MS=10000
 MATCH_SNAPSHOT_WEEKLY_TTL_MS=30000
+MATCH_SNAPSHOT_PREWARM_ENABLED=true
 PREDICTION_AUDIT_SIGNING_KEY=generate_a_random_secret_of_at_least_32_bytes
 # Optional: enables scheduled AI-written player insight summaries. It never
 # creates or changes prediction probabilities.

@@ -74,6 +74,7 @@ jobs:
           FUTURE_PREDICTION_BASELINE_ENABLED: "false"
           FULL_MATCH_LIFECYCLE_TEST_ENABLED: "false"
           MARKET_FUTURE_SAMPLER_ENABLED: "false"
+          MATCH_SNAPSHOT_PREWARM_ENABLED: "false"
           NODE_ENV: production
           PORT: "3100"
         run: |
