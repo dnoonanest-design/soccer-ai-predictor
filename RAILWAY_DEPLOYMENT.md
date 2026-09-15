@@ -29,22 +29,26 @@ BACKGROUND_BIWEEKLY_UPDATE_MS=1209600000
 BACKGROUND_MAX_LIVE_MATCHES=12
 MIN_AUTO_CALIBRATION_SAMPLE=250
 PREDICTION_AUDIT_SIGNING_KEY=generate_a_random_secret_of_at_least_32_bytes
+# Optional: enables scheduled AI-written player insight summaries. It never
+# creates or changes prediction probabilities.
+ANTHROPIC_API_KEY=your_anthropic_key
 ```
 
 Railway PostgreSQL normally provides `DATABASE_URL` automatically. If it does not, copy the PostgreSQL connection string into a variable called `DATABASE_URL`.
 
 ## 3. Database migration
 
-After the first deploy, open the Railway service shell and run:
+Railway runs this automatically before every deployment through
+`preDeployCommand`. To verify it manually in the Railway service shell, run:
 
 ```bash
 pnpm run migrate
 ```
 
-This applies:
+This applies every numbered migration in order, including:
 
 ```bash
-db/001_prediction_platform.sql
+lib/db/012_player_intelligence.sql
 ```
 
 ## 4. Build/start commands
@@ -54,7 +58,7 @@ Railway should detect `railway.toml` automatically.
 Build command:
 
 ```bash
-corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile && pnpm run railway:build
+corepack enable && corepack prepare pnpm@11.19.0 --activate && pnpm install --frozen-lockfile && pnpm run railway:build
 ```
 
 Start command:
@@ -67,6 +71,13 @@ Health check:
 
 ```text
 /api/healthz
+```
+
+Production readiness (database migration, background learner and provider
+state):
+
+```text
+/api/health/readiness
 ```
 
 ## 5. iPad install

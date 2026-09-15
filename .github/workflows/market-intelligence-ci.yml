@@ -12,6 +12,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -31,6 +45,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Apply migrations on a clean database twice
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          pnpm migrate
+          pnpm migrate
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -44,7 +65,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           ADMIN_SECRET: ci-admin-secret
-          BACKGROUND_LEARNER_ENABLED: "false"
+          BACKGROUND_LEARNER_ENABLED: "true"
           PREDICTION_ACCURACY_AUDIT_ENABLED: "false"
           FUTURE_PREDICTION_BASELINE_ENABLED: "false"
           FULL_MATCH_LIFECYCLE_TEST_ENABLED: "false"
@@ -60,8 +81,9 @@ jobs:
           }
           trap cleanup EXIT
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3100/api/healthz >/dev/null; then
-              echo "Production bundle health check passed"
+            if curl --fail --silent http://127.0.0.1:3100/api/healthz >/dev/null && \
+               curl --fail --silent http://127.0.0.1:3100/api/health/readiness >/dev/null; then
+              echo "Production bundle liveness and readiness checks passed"
               exit 0
             fi
             if ! kill -0 "$app_pid" 2>/dev/null; then

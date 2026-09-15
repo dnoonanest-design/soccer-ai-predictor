@@ -44,6 +44,20 @@ let lastSettleRun:        Date | null = null;
 let lastTrainRun:         Date | null = null;
 let lastBiweeklyUpdateRun: Date | null = null;
 
+export function getBackgroundRuntimeStatus() {
+  return {
+    enabled: ENABLED,
+    started,
+    playerAiExplanationsConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
+    jobs: {
+      liveDeepStats: { status: liveStatus, lastRun: lastLiveRun },
+      settlement: { status: settleStatus, lastRun: lastSettleRun },
+      recalibration: { status: trainStatus, lastRun: lastTrainRun },
+      biweeklyAiUpdate: { status: biweeklyStatus, lastRun: lastBiweeklyUpdateRun },
+    },
+  };
+}
+
 function num(v: unknown): number | null {
   if (v == null) return null;
   if (typeof v === "string") {
@@ -409,19 +423,12 @@ export async function getBackgroundLearnerStatus() {
   const aiMemoryUpdates = await getAiMemoryUpdateReport()
     .catch(() => ({ recentBiweeklyUpdates: [], recentLearningMemory: [] }));
   return {
-    enabled: ENABLED,
-    started,
+    ...getBackgroundRuntimeStatus(),
     intervals: {
       liveMs: LIVE_INTERVAL_MS,
       settleMs: SETTLE_INTERVAL_MS,
       trainMs: TRAIN_INTERVAL_MS,
       biweeklyUpdateMs: BIWEEKLY_UPDATE_INTERVAL_MS,
-    },
-    jobs: {
-      liveDeepStats:   { status: liveStatus,     lastRun: lastLiveRun },
-      settlement:      { status: settleStatus,   lastRun: lastSettleRun },
-      recalibration:   { status: trainStatus,    lastRun: lastTrainRun },
-      biweeklyAiUpdate:{ status: biweeklyStatus, lastRun: lastBiweeklyUpdateRun },
     },
     recentRuns,
     circumstanceLearning,

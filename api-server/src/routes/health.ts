@@ -3,6 +3,8 @@ import { getApiFootballProviderHealth } from "../lib/apiFootballReliability";
 import { getQuotaOptimizationStatus } from "../lib/quotaOptimizationService";
 import { getOddsOptimizationStatus } from "../lib/oddsOptimizationService";
 import { getLiveDiscoveryConcurrencyGuardStatus } from "../lib/liveDiscoveryConcurrencyGuard";
+import { getDatabaseReadiness } from "../lib/databaseReadinessService";
+import { getBackgroundRuntimeStatus } from "../lib/backgroundLearnerService";
 
 const router: IRouter = Router();
 
@@ -30,16 +32,27 @@ router.get("/healthz", (_req, res) => {
 // Readiness: whether the predictor can currently serve trustworthy live data.
 // Bookmaker odds remain an independent intelligence layer, so an odds-provider
 // quota state does not make the core football predictor unready.
-router.get("/health/readiness", (_req, res) => {
+router.get("/health/readiness", async (_req, res) => {
   const apiFootball = getApiFootballProviderHealth();
   const footballQuota = getQuotaOptimizationStatus();
   const oddsQuota = getOddsOptimizationStatus();
   const liveDiscoveryGuard = getLiveDiscoveryConcurrencyGuardStatus();
-  const ready = apiFootball.state === "healthy" || apiFootball.state === "unknown";
+  const database = await getDatabaseReadiness();
+  const background = getBackgroundRuntimeStatus();
+  const providerReady = apiFootball.state === "healthy" || apiFootball.state === "unknown";
+  const backgroundReady = process.env.NODE_ENV !== "production" || (background.enabled && background.started);
+  const ready = providerReady && database.ready && backgroundReady;
 
   return res.status(ready ? 200 : 503).json({
     status: ready ? "ready" : "degraded",
+    release: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
     live_data_status: apiFootball.state,
+    database,
+    background: {
+      ...background,
+      predictionRole: "deterministic-model",
+      generativeAiRole: "explanation-only",
+    },
     providers: {
       api_football: apiFootball,
     },
