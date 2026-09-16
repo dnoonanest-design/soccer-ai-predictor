@@ -3,6 +3,7 @@ import { pool } from "@workspace/db";
 export const REQUIRED_PLAYER_INTELLIGENCE_MIGRATION = "012_player_intelligence.sql";
 export const REQUIRED_AUDIT_BOUNDARY_MIGRATION = "013_reject_late_prematch_audits.sql";
 export const REQUIRED_PREMATCH_FREEZE_MIGRATION = "014_freeze_prematch_predictions.sql";
+export const REQUIRED_WALL_CLOCK_FREEZE_MIGRATION = "015_use_wall_clock_for_prematch_freeze.sql";
 
 export interface DatabaseReadiness {
   ready: boolean;
@@ -23,6 +24,7 @@ type QueryResult = {
     player_migration_applied: boolean;
     audit_boundary_migration_applied: boolean;
     prematch_freeze_migration_applied: boolean;
+    wall_clock_freeze_migration_applied: boolean;
     player_profiles_present: boolean;
     player_match_stats_present: boolean;
     player_ai_signals_present: boolean;
@@ -50,6 +52,7 @@ export async function getDatabaseReadiness(
     REQUIRED_PLAYER_INTELLIGENCE_MIGRATION,
     REQUIRED_AUDIT_BOUNDARY_MIGRATION,
     REQUIRED_PREMATCH_FREEZE_MIGRATION,
+    REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
   ];
   const auditSigningRequired = options.production ?? process.env.NODE_ENV === "production";
   const configuredSigningKey = Object.prototype.hasOwnProperty.call(options, "auditSigningKey")
@@ -82,6 +85,9 @@ export async function getDatabaseReadiness(
         EXISTS (
           SELECT 1 FROM schema_migrations WHERE filename = $3
         ) AS prematch_freeze_migration_applied,
+        EXISTS (
+          SELECT 1 FROM schema_migrations WHERE filename = $4
+        ) AS wall_clock_freeze_migration_applied,
         to_regclass('public.player_profiles') IS NOT NULL AS player_profiles_present,
         to_regclass('public.player_match_stats') IS NOT NULL AS player_match_stats_present,
         to_regclass('public.player_ai_signals') IS NOT NULL AS player_ai_signals_present,
@@ -108,7 +114,8 @@ export async function getDatabaseReadiness(
     const migrationsApplied = Boolean(
       migrationApplied &&
       row?.audit_boundary_migration_applied &&
-      row?.prematch_freeze_migration_applied,
+      row?.prematch_freeze_migration_applied &&
+      row?.wall_clock_freeze_migration_applied,
     );
     const auditBoundaryTriggerPresent = Boolean(row?.audit_boundary_trigger_present);
     const prematchFreezeTriggersPresent = Boolean(

@@ -56,12 +56,14 @@ This applies every numbered migration in order, including:
 lib/db/012_player_intelligence.sql
 lib/db/013_reject_late_prematch_audits.sql
 lib/db/014_freeze_prematch_predictions.sql
+lib/db/015_use_wall_clock_for_prematch_freeze.sql
 ```
 
 Migration 013 rejects audit captures labelled pre-match at or after kickoff.
 Migration 014 freezes the compatibility `match_predictions` pre-match row at
-kickoff and rejects late inserts. Production readiness verifies both the
-migration records and their PostgreSQL triggers.
+kickoff and rejects late inserts. Migration 015 enforces that boundary against
+the actual wall clock, including transactions that span kickoff. Production
+readiness verifies the migration records and their PostgreSQL triggers.
 
 ## 4. Build/start commands
 
