@@ -54,7 +54,14 @@ This applies every numbered migration in order, including:
 
 ```bash
 lib/db/012_player_intelligence.sql
+lib/db/013_reject_late_prematch_audits.sql
+lib/db/014_freeze_prematch_predictions.sql
 ```
+
+Migration 013 rejects audit captures labelled pre-match at or after kickoff.
+Migration 014 freezes the compatibility `match_predictions` pre-match row at
+kickoff and rejects late inserts. Production readiness verifies both the
+migration records and their PostgreSQL triggers.
 
 ## 4. Build/start commands
 
@@ -79,7 +86,7 @@ Health check:
 ```
 
 Production readiness (database migration, background learner and provider
-state):
+state, audit signing key and prediction-boundary triggers):
 
 ```text
 /api/health/readiness

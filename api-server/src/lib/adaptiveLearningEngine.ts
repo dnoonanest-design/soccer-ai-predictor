@@ -1386,16 +1386,36 @@ export async function runAdaptiveLearningCycle(): Promise<{
 // ─── Report ───────────────────────────────────────────────────────────────────
 
 export async function getAdaptiveLearningReport() {
-  const [weights, offlineModel, recentAudits] = await Promise.all([
+  const [weights, offlineModel, activeModels, recentAudits] = await Promise.all([
     getLearnedWeights(),
     getOfflineFallbackModel(),
+    db.select().from(aiModelRegistry)
+      .where(and(
+        eq(aiModelRegistry.modelType, "adaptive-chronological-calibrator"),
+        eq(aiModelRegistry.active, true),
+      ))
+      .orderBy(desc(aiModelRegistry.createdAt))
+      .limit(1),
     db.select().from(aiLearningAudits)
       .where(eq(aiLearningAudits.auditType, "adaptive_learning_cycle"))
       .orderBy(desc(aiLearningAudits.createdAt))
       .limit(5),
   ]);
 
+  const activeModel = activeModels[0] ?? null;
+  const lastAcceptedCycle = recentAudits.find((cycle) => cycle.accepted) ?? null;
+
   return {
+    servingRole: "validated-calibration-only",
+    activePromotion: activeModel ? {
+      modelVersion: activeModel.modelVersion,
+      modelType: activeModel.modelType,
+      trainingRows: activeModel.trainingRows,
+      featureSet: activeModel.featureSetJson,
+      metrics: activeModel.metricsJson,
+      promotedAt: activeModel.createdAt,
+      notes: activeModel.notes,
+    } : null,
     currentWeights: weights,
     offlineModel: {
       lastUpdated: offlineModel.lastUpdated,
@@ -1404,13 +1424,28 @@ export async function getAdaptiveLearningReport() {
       globalPriors: offlineModel.globalPriors,
     },
     recentCycles: recentAudits,
+    lastAcceptedCycle,
+    promotionPolicy: {
+      minimumSettledMatches: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+      minimumChronologicalHoldoutMatches: MIN_HOLDOUT_SAMPLE,
+      minimumBrierImprovement: MIN_BRIER_IMPROVEMENT,
+      runtimeSourceCodeChanges: false,
+      generativeAiChangesProbabilities: false,
+      currentlyPromotableParameters: ["drawNudgeWeight", "globalOutcomePriors"],
+      neutralUntilPointInTimeReplay: [
+        "formFactorScale",
+        "injuryFactorScale",
+        "lineupFactorScale",
+        "competitionFactorScale",
+        "leagueHomeAdvOverride",
+        "leagueXgNormOverride",
+      ],
+    },
     explanation: [
-      "The adaptive learning engine closes the prediction loop by:",
-      "1. Learning which model factors (form, injuries, lineup, competition) are genuinely predictive using logistic regression with temporal decay.",
-      "2. Computing circumstance residuals — what the Poisson model misses after all factors are applied.",
-      "3. Maintaining an offline fallback model so predictions improve even when the live API is unavailable.",
-      "4. Automatically resolving self-improvement queue items by adjusting the relevant parameters.",
-      "5. Generating per-match explanations that show which factors drove each prediction and whether they were correct.",
+      "The deterministic predictor remains the serving model.",
+      "The adaptive learner may promote only draw calibration and global outcome priors after chronological holdout proof.",
+      "Form, injury, lineup, competition and league overrides remain neutral until exact point-in-time replay is available.",
+      "Circumstance residuals, similar-match memory and generated explanations are diagnostic and do not alter serving probabilities.",
     ].join(" "),
   };
 }

@@ -1,4 +1,7 @@
 import { logger } from "./logger";
+import { pool } from "@workspace/db";
+import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
+import { verifyPredictionAuditIntegrity } from "./predictionAccuracyAuditService";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -49,6 +52,58 @@ export interface BacktestResult {
   generated_at: string;
 }
 
+type Outcome = "home" | "draw" | "away";
+
+export interface WalkForwardRow {
+  fixtureId: number;
+  leagueId: number | null;
+  kickoffAt: string;
+  home: number;
+  draw: number;
+  away: number;
+  actual: Outcome;
+  modelVersion: string;
+}
+
+export interface EvaluationMetrics {
+  samples: number;
+  accuracy: number | null;
+  brierScore: number | null;
+  logLoss: number | null;
+}
+
+export interface WalkForwardFold {
+  fold: number;
+  trainingSamples: number;
+  holdoutSamples: number;
+  holdoutStart: string;
+  holdoutEnd: string;
+  modelVersions: string[];
+  model: EvaluationMetrics;
+  expandingPriorBaseline: EvaluationMetrics;
+}
+
+export interface ModelBacktestResult {
+  status: "complete" | "collecting";
+  methodology: string;
+  generatedAt: string;
+  integrityVerifiedRows: number;
+  minimumTrainingSamples: number;
+  foldSize: number;
+  evaluatedSamples: number;
+  model: EvaluationMetrics;
+  expandingPriorBaseline: EvaluationMetrics;
+  brierImprovement: number | null;
+  folds: WalkForwardFold[];
+  safeguards: {
+    onePredictionPerFixture: true;
+    latestPreKickoffOnly: true;
+    chronologicalSplits: true;
+    futureOutcomesExcludedFromBaseline: true;
+    bookmakerOddsUsedByCoreModel: false;
+  };
+}
+
 type ApiFixture = {
   fixture: { id: number; status: { short: string } };
   goals: { home: number | null; away: number | null };
@@ -80,6 +135,153 @@ async function fetchFixtures(leagueId: number, season: number): Promise<ApiFixtu
 function pct(n: number, total: number): number {
   if (total === 0) return 0;
   return Math.round((n / total) * 1000) / 10;
+}
+
+function unit(value: number) {
+  return Math.max(0.001, Math.min(0.999, value > 1 ? value / 100 : value));
+}
+
+function probabilities(row: Pick<WalkForwardRow, "home" | "draw" | "away">) {
+  const raw = { home: unit(row.home), draw: unit(row.draw), away: unit(row.away) };
+  const total = raw.home + raw.draw + raw.away;
+  return { home: raw.home / total, draw: raw.draw / total, away: raw.away / total };
+}
+
+function scoreRows(
+  rows: WalkForwardRow[],
+  predictor: (row: WalkForwardRow) => { home: number; draw: number; away: number },
+): EvaluationMetrics {
+  if (!rows.length) return { samples: 0, accuracy: null, brierScore: null, logLoss: null };
+  let correct = 0;
+  let brier = 0;
+  let logLoss = 0;
+  for (const row of rows) {
+    const probs = probabilities(predictor(row));
+    const pick = probs.home >= probs.draw && probs.home >= probs.away
+      ? "home"
+      : probs.away >= probs.home && probs.away >= probs.draw ? "away" : "draw";
+    if (pick === row.actual) correct += 1;
+    brier += (probs.home - (row.actual === "home" ? 1 : 0)) ** 2
+      + (probs.draw - (row.actual === "draw" ? 1 : 0)) ** 2
+      + (probs.away - (row.actual === "away" ? 1 : 0)) ** 2;
+    logLoss += -Math.log(Math.max(0.001, probs[row.actual]));
+  }
+  const round = (value: number) => Math.round(value * 10_000) / 10_000;
+  return {
+    samples: rows.length,
+    accuracy: round(correct / rows.length),
+    brierScore: round(brier / rows.length),
+    logLoss: round(logLoss / rows.length),
+  };
+}
+
+function outcomePrior(rows: WalkForwardRow[]) {
+  const counts = { home: 1, draw: 1, away: 1 };
+  for (const row of rows) counts[row.actual] += 1;
+  const total = counts.home + counts.draw + counts.away;
+  return { home: counts.home / total, draw: counts.draw / total, away: counts.away / total };
+}
+
+export function evaluateWalkForwardRows(
+  input: WalkForwardRow[],
+  minimumTrainingSamples = 250,
+  foldSize = 50,
+): Omit<ModelBacktestResult, "generatedAt" | "integrityVerifiedRows"> {
+  const rows = [...input].sort((a, b) =>
+    a.kickoffAt.localeCompare(b.kickoffAt) || a.fixtureId - b.fixtureId,
+  );
+  const safeMinimum = Number.isFinite(minimumTrainingSamples)
+    ? Math.max(10, Math.floor(minimumTrainingSamples)) : 250;
+  const safeFoldSize = Number.isFinite(foldSize)
+    ? Math.max(10, Math.floor(foldSize)) : 50;
+  const folds: WalkForwardFold[] = [];
+  const evaluated: WalkForwardRow[] = [];
+  let weightedBaselineBrier = 0;
+  let weightedBaselineLogLoss = 0;
+  let weightedBaselineAccuracy = 0;
+
+  for (let start = safeMinimum; start < rows.length; start += safeFoldSize) {
+    const training = rows.slice(0, start);
+    const holdout = rows.slice(start, start + safeFoldSize);
+    const prior = outcomePrior(training);
+    const model = scoreRows(holdout, probabilities);
+    const baseline = scoreRows(holdout, () => prior);
+    evaluated.push(...holdout);
+    weightedBaselineBrier += (baseline.brierScore ?? 0) * holdout.length;
+    weightedBaselineLogLoss += (baseline.logLoss ?? 0) * holdout.length;
+    weightedBaselineAccuracy += (baseline.accuracy ?? 0) * holdout.length;
+    folds.push({
+      fold: folds.length + 1,
+      trainingSamples: training.length,
+      holdoutSamples: holdout.length,
+      holdoutStart: holdout[0].kickoffAt,
+      holdoutEnd: holdout[holdout.length - 1].kickoffAt,
+      modelVersions: [...new Set(holdout.map((row) => row.modelVersion))],
+      model,
+      expandingPriorBaseline: baseline,
+    });
+  }
+
+  const model = scoreRows(evaluated, probabilities);
+  const baseline: EvaluationMetrics = evaluated.length ? {
+    samples: evaluated.length,
+    accuracy: Math.round((weightedBaselineAccuracy / evaluated.length) * 10_000) / 10_000,
+    brierScore: Math.round((weightedBaselineBrier / evaluated.length) * 10_000) / 10_000,
+    logLoss: Math.round((weightedBaselineLogLoss / evaluated.length) * 10_000) / 10_000,
+  } : { samples: 0, accuracy: null, brierScore: null, logLoss: null };
+
+  return {
+    status: folds.length ? "complete" : "collecting",
+    methodology: "Walk-forward evaluation of frozen serving predictions. Each fold uses only earlier outcomes to fit the expanding-prior baseline, then scores the next chronological holdout.",
+    minimumTrainingSamples: safeMinimum,
+    foldSize: safeFoldSize,
+    evaluatedSamples: evaluated.length,
+    model,
+    expandingPriorBaseline: baseline,
+    brierImprovement: model.brierScore == null || baseline.brierScore == null
+      ? null
+      : Math.round((baseline.brierScore - model.brierScore) * 10_000) / 10_000,
+    folds,
+    safeguards: {
+      onePredictionPerFixture: true,
+      latestPreKickoffOnly: true,
+      chronologicalSplits: true,
+      futureOutcomesExcludedFromBaseline: true,
+      bookmakerOddsUsedByCoreModel: false,
+    },
+  };
+}
+
+export async function runModelBacktest(options: {
+  minimumTrainingSamples?: number;
+  foldSize?: number;
+} = {}): Promise<ModelBacktestResult> {
+  const integrity = await verifyPredictionAuditIntegrity({ fresh: true });
+  const canonicalCte = canonicalPrematchAuditCte("$1");
+  const result = await pool.query(`
+    WITH ${canonicalCte}
+    SELECT fixture_id, league_id, kickoff_at, home_win_prob, draw_prob,
+           away_win_prob, actual_outcome, model_version
+      FROM canonical_prematch
+     WHERE settled_at IS NOT NULL
+       AND actual_outcome IN ('home', 'draw', 'away')
+     ORDER BY kickoff_at ASC, fixture_id ASC
+  `, [integrity.validIds]);
+  const rows: WalkForwardRow[] = result.rows.map((row) => ({
+    fixtureId: Number(row.fixture_id),
+    leagueId: row.league_id == null ? null : Number(row.league_id),
+    kickoffAt: new Date(row.kickoff_at).toISOString(),
+    home: Number(row.home_win_prob),
+    draw: Number(row.draw_prob),
+    away: Number(row.away_win_prob),
+    actual: row.actual_outcome as Outcome,
+    modelVersion: String(row.model_version),
+  }));
+  return {
+    ...evaluateWalkForwardRows(rows, options.minimumTrainingSamples, options.foldSize),
+    generatedAt: new Date().toISOString(),
+    integrityVerifiedRows: rows.length,
+  };
 }
 
 function determineResult(

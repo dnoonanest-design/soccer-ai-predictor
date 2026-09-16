@@ -52,6 +52,11 @@ jobs:
           pnpm migrate
           pnpm migrate
 
+      - name: Verify prediction time-boundary invariants
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: node lib/db/scripts/verify-prediction-boundaries.mjs
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -69,6 +74,7 @@ jobs:
           # this local smoke test, so this value is never sent externally.
           API_FOOTBALL_KEY: ci-placeholder-not-a-real-key
           ADMIN_SECRET: ci-admin-secret
+          PREDICTION_AUDIT_SIGNING_KEY: ci-audit-signing-key
           BACKGROUND_LEARNER_ENABLED: "true"
           PREDICTION_ACCURACY_AUDIT_ENABLED: "false"
           FUTURE_PREDICTION_BASELINE_ENABLED: "false"
@@ -87,8 +93,10 @@ jobs:
           trap cleanup EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3100/api/healthz >/dev/null && \
-               curl --fail --silent http://127.0.0.1:3100/api/health/readiness >/dev/null; then
-              echo "Production bundle liveness and readiness checks passed"
+               curl --fail --silent http://127.0.0.1:3100/api/health/readiness >/dev/null && \
+               curl --fail --silent http://127.0.0.1:3100/api/backtest/model >/dev/null && \
+               curl --fail --silent http://127.0.0.1:3100/api/background/adaptive-learning >/dev/null; then
+              echo "Production bundle and evidence endpoints passed"
               exit 0
             fi
             if ! kill -0 "$app_pid" 2>/dev/null; then

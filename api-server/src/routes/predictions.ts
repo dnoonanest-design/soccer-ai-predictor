@@ -3,6 +3,8 @@ import { pool } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaselineService";
 import { getTrackedCompetition, isTrackedLeague } from "../lib/leagueConfig";
+import { canonicalPrematchAuditCte } from "../lib/canonicalPrematchAudit";
+import { verifyPredictionAuditIntegrity } from "../lib/predictionAccuracyAuditService";
 
 const router = Router();
 const DAY_MS = 24 * 60 * 60_000;
@@ -112,20 +114,20 @@ function predictedOutcome(home: number, draw: number, away: number) {
 }
 
 async function readPredictions(start: Date, end: Date) {
+  const integrity = await verifyPredictionAuditIntegrity();
+  const canonicalCte = canonicalPrematchAuditCte("$3");
   const result = await pool.query(
-    `WITH latest_audit AS (
-       SELECT DISTINCT ON (fixture_id)
+    `WITH ${canonicalCte}, latest_audit AS (
+       SELECT
          fixture_id, league_id, home_team, away_team, kickoff_at,
          checkpoint, data_tier, model_version, engine_revision,
          home_win_prob, draw_prob, away_win_prob,
          over25_prob, btts_prob, home_xg, away_xg,
          confidence, pick_confidence, confidence_band,
          predicted_outcome, captured_at
-       FROM prediction_audit_records
-       WHERE phase = 'prematch'
-         AND kickoff_at >= $1
+       FROM canonical_prematch
+       WHERE kickoff_at >= $1
          AND kickoff_at < $2
-       ORDER BY fixture_id, captured_at DESC
      ),
      latest_stored AS (
        SELECT DISTINCT ON (fixture_id)
@@ -145,12 +147,9 @@ async function readPredictions(start: Date, end: Date) {
        COALESCE(a.home_team, s.home_team) AS home_team,
        COALESCE(a.away_team, s.away_team) AS away_team,
        COALESCE(a.kickoff_at, s.kickoff_at) AS kickoff_at,
-       CASE WHEN s.updated_at IS NOT NULL AND (a.captured_at IS NULL OR s.updated_at > a.captured_at)
-            THEN s.home_win_prob ELSE a.home_win_prob END AS home_win_prob,
-       CASE WHEN s.updated_at IS NOT NULL AND (a.captured_at IS NULL OR s.updated_at > a.captured_at)
-            THEN s.draw_prob ELSE a.draw_prob END AS draw_prob,
-       CASE WHEN s.updated_at IS NOT NULL AND (a.captured_at IS NULL OR s.updated_at > a.captured_at)
-            THEN s.away_win_prob ELSE a.away_win_prob END AS away_win_prob,
+       COALESCE(a.home_win_prob, s.home_win_prob) AS home_win_prob,
+       COALESCE(a.draw_prob, s.draw_prob) AS draw_prob,
+       COALESCE(a.away_win_prob, s.away_win_prob) AS away_win_prob,
        a.over25_prob,
        a.btts_prob,
        a.home_xg,
@@ -162,13 +161,13 @@ async function readPredictions(start: Date, end: Date) {
        a.data_tier,
        COALESCE(a.model_version, s.model_version) AS model_version,
        a.engine_revision,
-       CASE WHEN s.updated_at IS NOT NULL AND (a.captured_at IS NULL OR s.updated_at > a.captured_at)
-            THEN 'current_prediction' ELSE 'audit_checkpoint' END AS source,
-       GREATEST(COALESCE(a.captured_at, '-infinity'::timestamp), COALESCE(s.updated_at, '-infinity'::timestamp)) AS generated_at
+       CASE WHEN a.fixture_id IS NOT NULL THEN 'verified_audit_checkpoint'
+            ELSE 'legacy_prediction_fallback' END AS source,
+       COALESCE(a.captured_at, s.updated_at) AS generated_at
      FROM latest_audit a
      FULL OUTER JOIN latest_stored s USING (fixture_id)
      ORDER BY COALESCE(a.kickoff_at, s.kickoff_at), COALESCE(a.fixture_id, s.fixture_id)`,
-    [start, end],
+    [start, end, integrity.validIds],
   );
 
   return result.rows

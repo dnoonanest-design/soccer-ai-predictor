@@ -2,6 +2,7 @@ import { Router } from "express";
 import { logger } from "../lib/logger";
 import { getBackgroundLearnerStatus, runAutomaticRecalibration, runBiweeklyAiUpdate, runFinishedSettlement, runLiveDeepStatCollection } from "../lib/backgroundLearnerService";
 import { analyzeCircumstanceInfluence, getCircumstanceLearningReport } from "../lib/circumstanceLearningService";
+import { getAdaptiveLearningReport } from "../lib/adaptiveLearningEngine";
 
 const router = Router();
 
@@ -35,6 +36,16 @@ router.post("/background/run/biweekly-ai-update", async (req, res) => {
 router.get("/background/circumstance-learning", async (_req, res) => {
   try { return res.json(await getCircumstanceLearningReport()); }
   catch (err) { logger.error({ err }, "circumstance learning report failed"); return res.status(500).json({ error: "Failed to fetch circumstance learning report" }); }
+});
+
+router.get("/background/adaptive-learning", async (_req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    return res.json(await getAdaptiveLearningReport());
+  } catch (err) {
+    logger.error({ err }, "adaptive learning report failed");
+    return res.status(500).json({ error: "Failed to fetch adaptive learning report" });
+  }
 });
 
 router.post("/background/run/circumstance-analysis", async (_req, res) => {

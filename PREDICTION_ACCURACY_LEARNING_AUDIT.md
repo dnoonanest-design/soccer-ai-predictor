@@ -59,17 +59,36 @@ Returns overall performance and breakdowns by:
 - predicted home/draw/away outcome
 - home/away circumstance edge
 
+The `certified` headline is fixture-level: it uses exactly one integrity-verified
+pre-kickoff prediction per fixture, selecting the latest valid capture. The
+checkpoint breakdowns intentionally retain every verified capture for diagnostic
+comparison and therefore may include several rows for one fixture.
+
 `GET /api/accuracy/audit/status`
 
 Returns worker status, cadence, current model/revision and the most recent audit run.
 
+`GET /api/backtest/model`
+
+Runs a chronological walk-forward evaluation over those frozen fixture-level
+predictions. Earlier outcomes fit an expanding-prior baseline; only the next
+holdout is scored. It reports fold-level accuracy, multiclass Brier score and
+log-loss without using future outcomes or bookmaker odds. The default warm-up
+is 250 earlier fixtures and each subsequent holdout contains up to 50 fixtures.
+
+`GET /api/background/adaptive-learning`
+
+Shows the active promoted calibrator, before/after evidence, recent decisions and
+the promotion policy. It explicitly distinguishes production-active parameters
+from diagnostic signals and neutral parameters awaiting point-in-time replay.
+
 ## Data maturity
 
-The report labels the evidence base as:
+The report labels the fixture-level certified evidence base as:
 
-- `collecting`: fewer than 250 settled checkpoint predictions
-- `developing`: 250-999 settled checkpoint predictions
-- `mature`: 1,000 or more settled checkpoint predictions
+- `collecting`: fewer than 250 settled fixtures
+- `developing`: 250-999 settled fixtures
+- `mature`: 1,000 or more settled fixtures
 
 Model changes should not be promoted purely because they look better on a very small sample. League/checkpoint-specific conclusions should also require enough examples to avoid reacting to noise.
 
@@ -94,3 +113,9 @@ Environment controls:
 ## Learning rule
 
 The audit is measurement-first. It does not automatically change the prediction formula. Its evidence should feed the existing guarded recalibration/self-improvement process, where proposed changes must improve holdout metrics before becoming active.
+
+The serving adaptive layer currently promotes only draw calibration and global
+outcome priors after at least 250 settled matches, a newest chronological holdout
+of at least 50 matches, and a multiclass Brier improvement of at least 0.002.
+Generative player summaries, circumstance residuals and similar-match memory are
+explanation/diagnostic layers and do not change probabilities.

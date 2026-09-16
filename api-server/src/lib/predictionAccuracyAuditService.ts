@@ -4,6 +4,7 @@ import { fetchFootball, getAllMatches, type Match } from "./soccerService";
 import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
 
 const ENABLED = process.env.PREDICTION_ACCURACY_AUDIT_ENABLED !== "false";
 const SCAN_INTERVAL_MS = Math.max(
@@ -89,6 +90,8 @@ let startupTimer: NodeJS.Timeout | null = null;
 let lastRunAt: Date | null = null;
 let lastResult: AuditRunResult | null = null;
 let lastError: string | null = null;
+let integrityCache: { value: Awaited<ReturnType<typeof verifyPredictionAuditIntegrityUncached>>; at: number } | null = null;
+const INTEGRITY_CACHE_MS = 15_000;
 
 function clamp(value: number, min: number, max: number) {
   const safe = Number.isFinite(value) ? Math.floor(value) : min;
@@ -799,7 +802,7 @@ function mapMetricRows(rows: any[]) {
   }));
 }
 
-export async function verifyPredictionAuditIntegrity() {
+async function verifyPredictionAuditIntegrityUncached() {
   const result = await pool.query(`
     SELECT a.*,
            o.outcome AS current_outcome, o.score_home AS current_score_home,
@@ -900,10 +903,20 @@ export async function verifyPredictionAuditIntegrity() {
   };
 }
 
+export async function verifyPredictionAuditIntegrity(options: { fresh?: boolean } = {}) {
+  if (!options.fresh && integrityCache && Date.now() - integrityCache.at < INTEGRITY_CACHE_MS) {
+    return integrityCache.value;
+  }
+  const value = await verifyPredictionAuditIntegrityUncached();
+  integrityCache = { value, at: Date.now() };
+  return value;
+}
+
 export async function getPredictionAccuracyAuditReport() {
-  const integrityResult = await verifyPredictionAuditIntegrity();
+  const integrityResult = await verifyPredictionAuditIntegrity({ fresh: true });
   const certifiedIds = integrityResult.validIds;
   const certifiedFilter = "id = ANY($1::bigint[])";
+  const canonicalCte = canonicalPrematchAuditCte("$1");
   const [
     overall,
     certified,
@@ -931,6 +944,7 @@ export async function getPredictionAccuracyAuditReport() {
     `),
     pool.query(
       `
+      WITH ${canonicalCte}
       SELECT COUNT(*)::int AS captured,
              COUNT(DISTINCT fixture_id)::int AS fixtures,
              COUNT(*) FILTER (WHERE settled_at IS NOT NULL)::int AS settled,
@@ -940,8 +954,7 @@ export async function getPredictionAccuracyAuditReport() {
              AVG(log_loss) FILTER (WHERE settled_at IS NOT NULL) AS log_loss,
              AVG(over25_correct::int) FILTER (WHERE over25_correct IS NOT NULL) AS over25_accuracy,
              AVG(btts_correct::int) FILTER (WHERE btts_correct IS NOT NULL) AS btts_accuracy
-        FROM prediction_audit_records
-       WHERE ${certifiedFilter}
+        FROM canonical_prematch
     `,
       [certifiedIds],
     ),
@@ -1083,6 +1096,10 @@ export async function getPredictionAccuracyAuditReport() {
       prematchCheckpoints: ["24h", "6h", "90m", "15m"],
       liveCheckpoints: [15, 30, 45, 60, 75, 90],
       circumstanceDataFrom: "90 minutes before kickoff and in-play",
+      headlineMetrics:
+        "latest integrity-verified pre-kickoff prediction; one row per fixture",
+      diagnosticBreakdowns:
+        "all integrity-verified checkpoints; may contain multiple rows per fixture",
     },
     dataMaturity,
     integrity: (({ validIds: _validIds, ...publicIntegrity }) =>
