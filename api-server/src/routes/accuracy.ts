@@ -18,8 +18,7 @@ function disableCaching(res: any) {
   res.set("Expires", "0");
 }
 
-async function getBalancedRecentLedger(integrityStatus: string) {
-  const result = await pool.query(`
+export const BALANCED_RECENT_LEDGER_SQL = `
     WITH settled_ranked AS (
       SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
              phase, checkpoint, data_tier, model_version, engine_revision,
@@ -33,7 +32,10 @@ async function getBalancedRecentLedger(integrityStatus: string) {
                ORDER BY captured_at DESC, id DESC
              ) AS fixture_rank
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL
+       WHERE phase = 'prematch'
+         AND kickoff_at IS NOT NULL
+         AND captured_at < kickoff_at
+         AND settled_at IS NOT NULL
     ), pending_ranked AS (
       SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
              phase, checkpoint, data_tier, model_version, engine_revision,
@@ -47,11 +49,17 @@ async function getBalancedRecentLedger(integrityStatus: string) {
                ORDER BY captured_at DESC, id DESC
              ) AS fixture_rank
         FROM prediction_audit_records
-       WHERE settled_at IS NULL
+       WHERE phase = 'prematch'
+         AND kickoff_at IS NOT NULL
+         AND captured_at < kickoff_at
+         AND settled_at IS NULL
          AND NOT EXISTS (
            SELECT 1
              FROM prediction_audit_records settled
             WHERE settled.fixture_id = prediction_audit_records.fixture_id
+              AND settled.phase = 'prematch'
+              AND settled.kickoff_at IS NOT NULL
+              AND settled.captured_at < settled.kickoff_at
               AND settled.settled_at IS NOT NULL
          )
     ), recent_settled AS (
@@ -71,7 +79,10 @@ async function getBalancedRecentLedger(integrityStatus: string) {
       SELECT * FROM recent_pending
     ) ledger
     ORDER BY (settled_at IS NULL), COALESCE(settled_at, captured_at) DESC
-  `);
+  `;
+
+async function getBalancedRecentLedger(integrityStatus: string) {
+  const result = await pool.query(BALANCED_RECENT_LEDGER_SQL);
 
   return result.rows.map((row: any) => {
     const { fixture_rank: _fixtureRank, ...publicRow } = row;
