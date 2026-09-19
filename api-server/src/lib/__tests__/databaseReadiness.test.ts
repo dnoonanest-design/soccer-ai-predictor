@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getDatabaseReadiness,
+  getDatabaseConnectionTarget,
   REQUIRED_PLAYER_INTELLIGENCE_MIGRATION,
   REQUIRED_AUDIT_BOUNDARY_MIGRATION,
   REQUIRED_PREMATCH_FREEZE_MIGRATION,
@@ -9,6 +10,16 @@ import {
 } from "../databaseReadinessService";
 
 describe("database readiness", () => {
+  it("exposes only a safe Railway service hint for duplicate-database diagnosis", () => {
+    expect(getDatabaseConnectionTarget(
+      "postgresql://user:secret@postgres-fvyf.railway.internal:5432/railway",
+    )).toBe("postgres-fvyf");
+    expect(getDatabaseConnectionTarget(
+      "postgresql://user:secret@db.example.com:5432/app",
+    )).toBe("external-database");
+    expect(getDatabaseConnectionTarget("not-a-database-url")).toBeNull();
+  });
+
   it("requires the recorded player migration and all player tables", async () => {
     const result = await getDatabaseReadiness(async (_sql, values) => {
       expect(values).toEqual([
@@ -73,11 +84,12 @@ describe("database readiness", () => {
   it("fails closed without exposing database error details", async () => {
     const result = await getDatabaseReadiness(async () => {
       throw new Error("postgresql://secret@host/database");
-    });
+    }, { databaseUrl: null });
 
     expect(result).toEqual({
       ready: false,
       connected: false,
+      connectionTarget: null,
       requiredMigration: REQUIRED_PLAYER_INTELLIGENCE_MIGRATION,
       requiredMigrations: [
         REQUIRED_PLAYER_INTELLIGENCE_MIGRATION,

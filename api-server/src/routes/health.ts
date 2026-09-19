@@ -65,6 +65,9 @@ router.get("/health/readiness", async (_req, res) => {
     release: getReleaseIdentity(),
     live_data_status: apiFootball.state,
     database,
+    administration: {
+      manualOperationsEnabled: Boolean(process.env.ADMIN_SECRET?.trim()),
+    },
     background: {
       ...background,
       predictionRole: "deterministic-model",

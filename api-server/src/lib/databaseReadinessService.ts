@@ -9,6 +9,8 @@ export const REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION = "016_deactivate_unvalidate
 export interface DatabaseReadiness {
   ready: boolean;
   connected: boolean;
+  /** Safe Railway private-service hint; never includes credentials or a full URL. */
+  connectionTarget: string | null;
   requiredMigration: string;
   migrationApplied: boolean;
   requiredMigrations: string[];
@@ -38,6 +40,22 @@ type QueryResult = {
 
 type Query = (sql: string, values: unknown[]) => Promise<QueryResult>;
 
+export function getDatabaseConnectionTarget(
+  databaseUrl: string | null | undefined = process.env.DATABASE_URL,
+): string | null {
+  if (!databaseUrl) return null;
+  try {
+    const hostname = new URL(databaseUrl).hostname.toLowerCase();
+    if (hostname.endsWith(".railway.internal")) {
+      return hostname.slice(0, -".railway.internal".length) || null;
+    }
+    // Do not publish externally hosted database names from a health endpoint.
+    return hostname ? "external-database" : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Verify the database contract required by participant-gated player
  * intelligence. Keep this separate from liveness: Railway should not restart a
@@ -48,6 +66,7 @@ export async function getDatabaseReadiness(
   options: {
     production?: boolean;
     auditSigningKey?: string | null;
+    databaseUrl?: string | null;
   } = {},
 ): Promise<DatabaseReadiness> {
   const requiredMigrations = [
@@ -62,7 +81,11 @@ export async function getDatabaseReadiness(
     ? options.auditSigningKey
     : process.env.PREDICTION_AUDIT_SIGNING_KEY;
   const auditSigningConfigured = Boolean(configuredSigningKey?.trim());
+  const configuredDatabaseUrl = Object.prototype.hasOwnProperty.call(options, "databaseUrl")
+    ? options.databaseUrl
+    : process.env.DATABASE_URL;
   const base = {
+    connectionTarget: getDatabaseConnectionTarget(configuredDatabaseUrl),
     requiredMigration: REQUIRED_PLAYER_INTELLIGENCE_MIGRATION,
     migrationApplied: false,
     requiredMigrations,

@@ -12,6 +12,7 @@ const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const SEASON = configuredFootballSeason();
 
 const TEAM_CACHE_TTL = 10 * 60 * 1000;
+const HISTORICAL_TEAM_CACHE_TTL = 24 * 60 * 60 * 1000;
 const RECENT_FIXTURE_CACHE_TTL = 60 * 60 * 1000;
 const LIVE_CACHE_TTL = 12 * 1000;
 const RECENT_FORM_SAMPLE = 12;
@@ -24,10 +25,12 @@ const sparseLogAt = new Map<number, number>();
 const coverageByLeague = new Map<number, {
   evaluations: number;
   sparse: number;
+  priorSeasonRollForwards: number;
   lastSparseAt: string | null;
 }>();
 let coverageEvaluations = 0;
 let sparseEvaluations = 0;
+let priorSeasonRollForwardEvaluations = 0;
 let lastSparseAt: string | null = null;
 
 export function getStatsCoverageStatus() {
@@ -39,6 +42,7 @@ export function getStatsCoverageStatus() {
     fullCompetitionHistory: coverageEvaluations - sparseEvaluations,
     sparseFallbacks: sparseEvaluations,
     sparseFallbackRatePercent: fallbackRate,
+    priorSeasonRollForwards: priorSeasonRollForwardEvaluations,
     lastSparseAt,
     minimumCompetitionMatches: MIN_COMPETITION_SAMPLE,
     leagues: Array.from(coverageByLeague.entries())
@@ -54,18 +58,24 @@ export function getStatsCoverageStatus() {
   };
 }
 
-function recordStatsCoverage(leagueId: number, sparse: boolean) {
+function recordStatsCoverage(leagueId: number, home: TeamStats, away: TeamStats) {
+  const sparse = home.data_source !== "competition" || away.data_source !== "competition";
+  const priorSeasonRollForward =
+    (home.prior_season_matches_used ?? 0) > 0 || (away.prior_season_matches_used ?? 0) > 0;
   coverageEvaluations++;
   if (sparse) {
     sparseEvaluations++;
     lastSparseAt = new Date().toISOString();
   }
+  if (priorSeasonRollForward) priorSeasonRollForwardEvaluations++;
   const league = coverageByLeague.get(leagueId) ?? {
     evaluations: 0,
     sparse: 0,
+    priorSeasonRollForwards: 0,
     lastSparseAt: null,
   };
   league.evaluations++;
+  if (priorSeasonRollForward) league.priorSeasonRollForwards++;
   if (sparse) {
     league.sparse++;
     league.lastSparseAt = lastSparseAt;
@@ -122,6 +132,8 @@ export interface TeamStats {
   dangerous_attacks: number | null;
   data_source?: "competition" | "recent_all_comp" | "blended";
   competition_matches_played?: number;
+  current_season_matches_played?: number;
+  prior_season_matches_used?: number;
   recent_matches_used?: number;
   venue_matches_used?: number;
   strength_index?: number;
@@ -200,6 +212,8 @@ function emptyTeamStats(id: number, name: string): TeamStats {
     expected_goals_live: null, dangerous_attacks: null,
     data_source: "competition",
     competition_matches_played: 0,
+    current_season_matches_played: 0,
+    prior_season_matches_used: 0,
     recent_matches_used: 0,
     venue_matches_used: 0,
     strength_index: 1,
@@ -207,13 +221,23 @@ function emptyTeamStats(id: number, name: string): TeamStats {
   };
 }
 
-async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamStats | null> {
-  const key = `teamstats:${teamId}:${leagueId}`;
-  const cached = getCached<TeamStats>(key, TEAM_CACHE_TTL);
+async function fetchTeamStatsForSeason(
+  teamId: number,
+  leagueId: number,
+  season: number,
+): Promise<TeamStats | null> {
+  // Keep the current-season key stable because getAllXGPredictions reads the
+  // warmed cache directly. Historical seasons are immutable and can be cached
+  // for much longer.
+  const key = season === SEASON
+    ? `teamstats:${teamId}:${leagueId}`
+    : `teamstats:${teamId}:${leagueId}:${season}`;
+  const cacheTtl = season === SEASON ? TEAM_CACHE_TTL : HISTORICAL_TEAM_CACHE_TTL;
+  const cached = getCached<TeamStats>(key, cacheTtl);
   if (cached) return cached;
 
   const data = (await fetchFootball(
-    `/teams/statistics?team=${teamId}&league=${leagueId}&season=${SEASON}`
+    `/teams/statistics?team=${teamId}&league=${leagueId}&season=${season}`
   )) as ApiTeamStatsResp | null;
 
   const r = data?.response;
@@ -260,6 +284,8 @@ async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamSta
     dangerous_attacks: null,
     data_source: "competition",
     competition_matches_played: played,
+    current_season_matches_played: season === SEASON ? played : 0,
+    prior_season_matches_used: 0,
     recent_matches_used: 0,
     venue_matches_used: 0,
     strength_index: competitionStrengthIndex(leagueId),
@@ -267,6 +293,54 @@ async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamSta
   };
   setCache(key, stats);
   return stats;
+}
+
+async function fetchTeamStats(teamId: number, leagueId: number): Promise<TeamStats | null> {
+  return fetchTeamStatsForSeason(teamId, leagueId, SEASON);
+}
+
+const PRIOR_SEASON_DECAY = 0.65;
+
+/**
+ * Fill an early-season competition sample with only the minimum number of
+ * prior-season matches needed to reach the safe five-match threshold. Prior
+ * evidence is explicitly decayed so it cannot overpower current form.
+ */
+export function rollForwardCompetitionStats(
+  current: TeamStats | null,
+  previous: TeamStats | null,
+): TeamStats | null {
+  const currentPlayed = current?.matches_played ?? 0;
+  const previousPlayed = previous?.matches_played ?? 0;
+  if (!previous || previousPlayed <= 0 || currentPlayed >= MIN_COMPETITION_SAMPLE) return current;
+
+  const priorUsed = Math.min(MIN_COMPETITION_SAMPLE - currentPlayed, previousPlayed);
+  if (priorUsed <= 0) return current;
+
+  const base = current ?? previous;
+  const currentWeight = currentPlayed;
+  const priorWeight = priorUsed * PRIOR_SEASON_DECAY;
+  const totalWeight = currentWeight + priorWeight;
+  const scaledPriorCount = (value: number) => value * (priorUsed / previousPlayed);
+  const blendAverage = (currentValue: number, previousValue: number) =>
+    Math.round(((currentValue * currentWeight + previousValue * priorWeight) / totalWeight) * 100) / 100;
+
+  return {
+    ...base,
+    form: `${previous.form}${current?.form ?? ""}`.slice(-5),
+    goals_per_game: blendAverage(current?.goals_per_game ?? 0, previous.goals_per_game),
+    conceded_per_game: blendAverage(current?.conceded_per_game ?? 0, previous.conceded_per_game),
+    clean_sheets: Math.round((current?.clean_sheets ?? 0) + scaledPriorCount(previous.clean_sheets)),
+    matches_played: currentPlayed + priorUsed,
+    wins: Math.round((current?.wins ?? 0) + scaledPriorCount(previous.wins)),
+    draws: Math.round((current?.draws ?? 0) + scaledPriorCount(previous.draws)),
+    losses: Math.round((current?.losses ?? 0) + scaledPriorCount(previous.losses)),
+    data_source: "competition",
+    competition_matches_played: currentPlayed + priorUsed,
+    current_season_matches_played: currentPlayed,
+    prior_season_matches_used: priorUsed,
+    strength_sample_size: currentPlayed + priorUsed * PRIOR_SEASON_DECAY,
+  };
 }
 
 function isUsableHistoryFixture(fixture: ApiRecentFixture, teamId: number): boolean {
@@ -405,6 +479,8 @@ function blendSparseCompetitionStats(
       team: teamName,
       data_source: "recent_all_comp",
       competition_matches_played: competition?.matches_played ?? 0,
+      current_season_matches_played: competition?.current_season_matches_played ?? 0,
+      prior_season_matches_used: competition?.prior_season_matches_used ?? 0,
     };
   }
 
@@ -417,6 +493,9 @@ function blendSparseCompetitionStats(
       team: teamName,
       data_source: "competition",
       competition_matches_played: competition.matches_played,
+      current_season_matches_played:
+        competition.current_season_matches_played ?? competition.matches_played,
+      prior_season_matches_used: competition.prior_season_matches_used ?? 0,
       recent_matches_used: recent?.matches_played ?? 0,
       venue_matches_used: recent?.venue_matches_used ?? 0,
       strength_index: recent?.strength_index ?? competition.strength_index ?? 1,
@@ -445,6 +524,9 @@ function blendSparseCompetitionStats(
     ),
     data_source: "blended",
     competition_matches_played: competition.matches_played,
+    current_season_matches_played:
+      competition.current_season_matches_played ?? competition.matches_played,
+    prior_season_matches_used: competition.prior_season_matches_used ?? 0,
     recent_matches_used: recent.matches_played,
     venue_matches_used: recent.venue_matches_used ?? 0,
     strength_index: recent.strength_index ?? competition.strength_index ?? 1,
@@ -633,10 +715,28 @@ export async function getMatchStats(
   leagueId: number,
   isLiveOrFinished: boolean
 ): Promise<MatchStatsResult> {
-  const [homeCompetition, awayCompetition] = await Promise.all([
+  const [homeCurrentCompetition, awayCurrentCompetition] = await Promise.all([
     fetchTeamStats(homeTeamId, leagueId),
     fetchTeamStats(awayTeamId, leagueId),
   ]);
+
+  const [homePreviousCompetition, awayPreviousCompetition] = await Promise.all([
+    !homeCurrentCompetition || homeCurrentCompetition.matches_played < MIN_COMPETITION_SAMPLE
+      ? fetchTeamStatsForSeason(homeTeamId, leagueId, SEASON - 1)
+      : Promise.resolve(null),
+    !awayCurrentCompetition || awayCurrentCompetition.matches_played < MIN_COMPETITION_SAMPLE
+      ? fetchTeamStatsForSeason(awayTeamId, leagueId, SEASON - 1)
+      : Promise.resolve(null),
+  ]);
+
+  const homeCompetition = rollForwardCompetitionStats(
+    homeCurrentCompetition,
+    homePreviousCompetition,
+  );
+  const awayCompetition = rollForwardCompetitionStats(
+    awayCurrentCompetition,
+    awayPreviousCompetition,
+  );
 
   const [homeRecent, awayRecent] = await Promise.all([
     isUefaCompetition(leagueId) || !homeCompetition || homeCompetition.matches_played < MIN_COMPETITION_SAMPLE
@@ -670,7 +770,7 @@ export async function getMatchStats(
   };
 
   const sparseHistory = home.data_source !== "competition" || away.data_source !== "competition";
-  recordStatsCoverage(leagueId, sparseHistory);
+  recordStatsCoverage(leagueId, home, away);
 
   const previousSparseLogAt = sparseLogAt.get(fixtureId) ?? 0;
   if (sparseHistory && Date.now() - previousSparseLogAt >= SPARSE_LOG_INTERVAL_MS) {
@@ -690,6 +790,10 @@ export async function getMatchStats(
       awaySource: away.data_source,
       homeCompetitionMatches: home.competition_matches_played,
       awayCompetitionMatches: away.competition_matches_played,
+      homeCurrentSeasonMatches: home.current_season_matches_played,
+      awayCurrentSeasonMatches: away.current_season_matches_played,
+      homePriorSeasonMatches: home.prior_season_matches_used,
+      awayPriorSeasonMatches: away.prior_season_matches_used,
       homeRecentMatches: home.recent_matches_used,
       awayRecentMatches: away.recent_matches_used,
       homeVenueMatches: home.venue_matches_used,

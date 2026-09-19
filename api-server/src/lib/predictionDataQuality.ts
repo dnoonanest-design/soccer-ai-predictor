@@ -20,7 +20,14 @@ function sample(value: number | undefined, target: number) {
 }
 
 export function teamEvidenceQuality(stats: TeamStats): number {
-  const competition = sample(stats.competition_matches_played ?? stats.matches_played, 5);
+  const currentCompetition = stats.current_season_matches_played;
+  const priorCompetition = stats.prior_season_matches_used ?? 0;
+  // Prior-season evidence closes early-season coverage gaps, but is worth less
+  // than a current-season match because squads and managers can change.
+  const effectiveCompetition = currentCompetition == null
+    ? (stats.competition_matches_played ?? stats.matches_played)
+    : currentCompetition + priorCompetition * 0.65;
+  const competition = sample(effectiveCompetition, 5);
   const recent = sample(stats.recent_matches_used, 8);
   const venue = sample(stats.venue_matches_used, 4);
   const total = sample(stats.matches_played, 8);
