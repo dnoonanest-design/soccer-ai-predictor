@@ -57,6 +57,7 @@ lib/db/012_player_intelligence.sql
 lib/db/013_reject_late_prematch_audits.sql
 lib/db/014_freeze_prematch_predictions.sql
 lib/db/015_use_wall_clock_for_prematch_freeze.sql
+lib/db/016_deactivate_unvalidated_ai_models.sql
 ```
 
 Migration 013 rejects audit captures labelled pre-match at or after kickoff.
@@ -64,6 +65,9 @@ Migration 014 freezes the compatibility `match_predictions` pre-match row at
 kickoff and rejects late inserts. Migration 015 enforces that boundary against
 the actual wall clock, including transactions that span kickoff. Production
 readiness verifies the migration records and their PostgreSQL triggers.
+Migration 016 retires legacy registry rows that were marked active before the
+chronological holdout promotion guard existed. Only validated adaptive
+chronological calibrators may be shown as serving adjustments.
 
 ## 4. Build/start commands
 

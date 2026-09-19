@@ -1,5 +1,5 @@
 import { db, aiBiweeklyUpdates, aiLearningMemory, aiLearningAudits, aiModelRegistry, selfImprovementQueue } from "@workspace/db";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import { runAiAwarenessCycle } from "./aiAwareLearningService";
 import { analyzeCircumstanceInfluence } from "./circumstanceLearningService";
@@ -115,7 +115,10 @@ export async function consolidatePersistentLearningMemory(limit = 200) {
 }
 
 async function latestActiveModel() {
-  const models = await db.select().from(aiModelRegistry).where(eq(aiModelRegistry.active, true)).orderBy(desc(aiModelRegistry.createdAt)).limit(1);
+  const models = await db.select().from(aiModelRegistry).where(and(
+    eq(aiModelRegistry.active, true),
+    eq(aiModelRegistry.modelType, "adaptive-chronological-calibrator"),
+  )).orderBy(desc(aiModelRegistry.createdAt)).limit(1);
   return models[0] ?? null;
 }
 

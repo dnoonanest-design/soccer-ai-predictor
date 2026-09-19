@@ -805,6 +805,7 @@ export async function warmMatchSnapshot() {
 export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
   const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
   const matches: Match[] = [];
+  let directRecoveryBudget = 5;
 
   // API-Football accepts hyphen-separated fixture IDs; conservative batches
   // keep URLs small and are also understood by the quota optimisation cache.
@@ -814,6 +815,25 @@ export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
     const fixtures = requireFixtureArray(await fetchFootball(path), path);
     for (const fixture of fixtures) {
       if (isTrackedLeague(fixture.league.id)) {
+        matches.push(fixtureToMatch(fixture, []));
+      }
+    }
+
+    // API-Football occasionally returns a partial/empty response for an ids
+    // batch even though the same fixture is available through the single-id
+    // endpoint. Settlement must not silently strand those predictions. Retry
+    // a small bounded number directly; the provider cache still deduplicates
+    // successful lookups and the bound protects quota during provider faults.
+    const resolved = new Set(matches.map((match) => match.id));
+    const missing = group
+      .filter((id) => !resolved.has(id))
+      .slice(0, directRecoveryBudget);
+    directRecoveryBudget -= missing.length;
+    for (const id of missing) {
+      const directPath = `/fixtures?id=${id}`;
+      const direct = requireFixtureArray(await fetchFootball(directPath), directPath);
+      const fixture = direct.find((item) => item.fixture?.id === id);
+      if (fixture && isTrackedLeague(fixture.league.id)) {
         matches.push(fixtureToMatch(fixture, []));
       }
     }

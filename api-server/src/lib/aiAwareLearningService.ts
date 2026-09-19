@@ -409,14 +409,21 @@ export async function getAiAwarenessReport() {
       .orderBy(desc(similarMatchMemory.createdAt))
       .limit(5),
   ]);
+  const servingModel = models.find(
+    (model: any) => model.active && model.modelType === "adaptive-chronological-calibrator",
+  ) ?? null;
   return {
-    activeModel: models.find((m: any) => m.active) ?? null,
+    servingRole: "validated-calibration-only",
+    activeModel: servingModel,
     latestModel: models[0] ?? null,
+    legacyActiveModelsIgnored: models.filter(
+      (model: any) => model.active && model.modelType !== "adaptive-chronological-calibrator",
+    ).length,
     recentAudits: audits,
     openImprovements: queue,
     recentSimilarMatchMemory: memoryRows,
     dataProvenancePolicy: getCoreAiDataPolicyReport(),
     explanation:
-      "The core AI learns from the app's own stored prediction snapshots, match circumstances and settled results. Market intelligence and third-party forecasts are isolated from this learning path.",
+      "The deterministic predictor remains the serving model. Only an adaptive chronological calibrator promoted after holdout validation may alter serving probabilities; similar-match memory remains diagnostic. Market intelligence and third-party forecasts are isolated from this learning path.",
   };
 }
