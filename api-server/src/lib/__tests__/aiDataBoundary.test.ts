@@ -6,16 +6,22 @@ async function source(relativePath: string) {
 }
 
 describe("AI temporal data boundary", () => {
-  it.each([
-    ["../adaptiveLearningEngine.ts", "adaptive learner"],
-    ["../aiAwareLearningService.ts", "similar-match memory"],
-  ])("keeps %s on strictly pre-kickoff snapshots", async (file) => {
-    const code = await source(file);
+  it("keeps similar-match memory on strictly pre-kickoff snapshots", async () => {
+    const code = await source("../aiAwareLearningService.ts");
     expect(code).toContain("ps.status = 'upcoming'");
     expect(code).toContain("ps.minute IS NULL");
     expect(code).toContain("mp.kickoff_at IS NOT NULL");
     expect(code).toContain("ps.created_at < mp.kickoff_at");
     expect(code).not.toContain("mp.kickoff_at IS NULL OR ps.created_at < mp.kickoff_at");
+  });
+
+  it("trains the adaptive learner only from verified, settled canonical snapshots", async () => {
+    const code = await source("../adaptiveLearningEngine.ts");
+    expect(code).toContain("verifyPredictionAuditIntegrity");
+    expect(code).toContain("canonicalPrematchAuditCte");
+    expect(code).toContain("c.settled_at IS NOT NULL");
+    expect(code).toContain("c.actual_outcome IN ('home','draw','away')");
+    expect(code).toContain("x.updated_at <= c.captured_at");
   });
 
   it("keeps similar-match memory diagnostic-only", async () => {

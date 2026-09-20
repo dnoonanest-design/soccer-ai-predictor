@@ -815,6 +815,7 @@ async function verifyPredictionAuditIntegrityUncached() {
   const validIds: number[] = [];
   let unsigned = 0;
   let legacySigned = 0;
+  let currentSigned = 0;
   let invalid = 0;
   let latePrematch = 0;
   let invalidProbability = 0;
@@ -829,6 +830,7 @@ async function verifyPredictionAuditIntegrityUncached() {
       legacySigned++;
       continue;
     }
+    currentSigned++;
     const predictionValid = safeSignatureMatch(
       signPayload(predictionSignaturePayload(row)),
       row.audit_signature,
@@ -895,6 +897,13 @@ async function verifyPredictionAuditIntegrityUncached() {
     latePrematch,
     invalidProbability,
     resultMismatch,
+    currentSigned,
+    currentSealCoveragePct: currentSigned
+      ? Math.round((validIds.length / currentSigned) * 10_000) / 100
+      : 0,
+    legacyArchiveCoveragePct: checked
+      ? Math.round((validIds.length / checked) * 10_000) / 100
+      : 0,
     coveragePct: checked
       ? Math.round((validIds.length / checked) * 10_000) / 100
       : 0,
@@ -934,7 +943,8 @@ export async function getPredictionAccuracyAuditReport() {
         COUNT(*)::int AS captured,
         COUNT(DISTINCT fixture_id)::int AS fixtures,
         COUNT(*) FILTER (WHERE settled_at IS NOT NULL)::int AS settled,
-        COUNT(*) FILTER (WHERE settled_at IS NULL)::int AS pending,
+        COUNT(*) FILTER (WHERE settled_at IS NULL AND voided_at IS NULL)::int AS pending,
+        COUNT(*) FILTER (WHERE voided_at IS NOT NULL)::int AS voided,
         AVG(correct::int) FILTER (WHERE settled_at IS NOT NULL) AS accuracy,
         AVG(brier_score) FILTER (WHERE settled_at IS NOT NULL) AS brier_score,
         AVG(log_loss) FILTER (WHERE settled_at IS NOT NULL) AS log_loss,
@@ -949,6 +959,7 @@ export async function getPredictionAccuracyAuditReport() {
              COUNT(DISTINCT fixture_id)::int AS fixtures,
              COUNT(*) FILTER (WHERE settled_at IS NOT NULL)::int AS settled,
              COUNT(*) FILTER (WHERE settled_at IS NULL)::int AS pending,
+             COUNT(*) FILTER (WHERE voided_at IS NOT NULL)::int AS voided,
              AVG(correct::int) FILTER (WHERE settled_at IS NOT NULL) AS accuracy,
              AVG(brier_score) FILTER (WHERE settled_at IS NOT NULL) AS brier_score,
              AVG(log_loss) FILTER (WHERE settled_at IS NOT NULL) AS log_loss,
@@ -1071,6 +1082,7 @@ export async function getPredictionAccuracyAuditReport() {
              captured_at, settled_at, audit_signature, signature_version,
              settlement_signature
         FROM prediction_audit_records
+       WHERE voided_at IS NULL
        ORDER BY captured_at DESC
        LIMIT 40
     `),
@@ -1109,6 +1121,7 @@ export async function getPredictionAccuracyAuditReport() {
       fixtures: Number(rawCertified.fixtures ?? 0),
       settled,
       pending: Number(rawCertified.pending ?? 0),
+      voided: Number(rawCertified.voided ?? 0),
       accuracy: toMetricNumber(rawCertified.accuracy),
       brierScore: toMetricNumber(rawCertified.brier_score),
       logLoss: toMetricNumber(rawCertified.log_loss),
@@ -1120,6 +1133,7 @@ export async function getPredictionAccuracyAuditReport() {
       fixtures: Number(rawOverall.fixtures ?? 0),
       settled: Number(rawOverall.settled ?? 0),
       pending: Number(rawOverall.pending ?? 0),
+      voided: Number(rawOverall.voided ?? 0),
       accuracy: toMetricNumber(rawOverall.accuracy),
       brierScore: toMetricNumber(rawOverall.brier_score),
       logLoss: toMetricNumber(rawOverall.log_loss),

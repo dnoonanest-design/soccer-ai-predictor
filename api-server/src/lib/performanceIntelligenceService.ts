@@ -65,7 +65,14 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
                   COUNT(*)::int samples, AVG(a.correct::int) accuracy, AVG(a.brier_score) brier_score,
                   AVG(a.log_loss) log_loss, AVG(a.pick_confidence) average_confidence
              FROM prediction_audit_records a
-             LEFT JOIN match_circumstances mc ON mc.fixture_id = a.fixture_id
+             LEFT JOIN LATERAL (
+               SELECT x.home_starting_xi_count, x.away_starting_xi_count
+                 FROM match_circumstances x
+                WHERE x.fixture_id = a.fixture_id
+                  AND x.updated_at <= a.captured_at
+                ORDER BY x.updated_at DESC
+                LIMIT 1
+             ) mc ON TRUE
             WHERE a.settled_at IS NOT NULL AND a.id = ANY($1::bigint[]) AND a.captured_at >= $2
             GROUP BY group_name ORDER BY samples DESC`),
     query(`SELECT CASE WHEN EXISTS (
@@ -139,6 +146,30 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
   }
 
   const marketRow = market.rows[0] ?? {};
+  const lineupMetrics = metricRows(lineup.rows);
+  const manchesterMetrics = metricRows(manchester.rows);
+  const evidenceSummary = (
+    rows: ReturnType<typeof metricRows>,
+    treatmentName: string,
+    baselineName: string,
+    minimumSamples: number,
+  ) => {
+    const treatment = rows.find((row) => row.group_name === treatmentName);
+    const baseline = rows.find((row) => row.group_name === baselineName);
+    const enough = (treatment?.samples ?? 0) >= minimumSamples && (baseline?.samples ?? 0) >= minimumSamples;
+    const brierDelta = treatment?.brierScore != null && baseline?.brierScore != null
+      ? n(baseline.brierScore - treatment.brierScore)
+      : null;
+    return {
+      status: !enough ? "collecting" : (brierDelta ?? 0) >= 0.002 ? "observed-improvement" : "no-proven-improvement",
+      minimumSamples,
+      treatmentSamples: treatment?.samples ?? 0,
+      baselineSamples: baseline?.samples ?? 0,
+      brierImprovement: brierDelta,
+      adaptivePromotionAllowed: false,
+      reason: "Diagnostic observation only; adaptive promotion requires chronological point-in-time replay and holdout improvement.",
+    };
+  };
   return {
     generatedAt: new Date().toISOString(),
     windowDays: days,
@@ -155,8 +186,12 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
     byPickSide: metricRows(byPick.rows),
     byDataQuality: metricRows(byDataTier.rows),
     byPhase: metricRows(byPhase.rows),
-    byLineupState: metricRows(lineup.rows),
-    manchesterRule: metricRows(manchester.rows),
+    byLineupState: lineupMetrics,
+    manchesterRule: manchesterMetrics,
+    featureEvidence: {
+      confirmedLineups: evidenceSummary(lineupMetrics, "confirmed-lineups", "lineups-not-confirmed", 100),
+      manchesterRule: evidenceSummary(manchesterMetrics, "manchester-rule-tagged", "not-tagged", 100),
+    },
     dailyTrend: metricRows(recentDays.rows).map((row) => ({ ...row, day: row.day })),
     lifecycleWarnings: Array.from(warnings.entries()).map(([reason, samples]) => ({ reason, samples })).sort((a,b) => b.samples-a.samples),
     marketBenchmark: {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getEnhancedPrediction, liveMomentumFromEvents, liveScoreAdjustedProbs, scaleMultiplicativeFactor } from "../enhancedStatsService";
 import { currentFootballSeason } from "../season";
-import { normaliseStatus } from "../soccerService";
+import { applySettledOutcomeToFixture, normaliseStatus } from "../soccerService";
 import { normaliseThreeWayPercent, selectServingProbabilities } from "../canonicalPredictionService";
 import { applyCalibration } from "../predictionStore";
 
@@ -27,6 +27,19 @@ describe("prediction integrity firewall", () => {
 });
 
 describe("fixture status normalisation", () => {
+  it("lets a settled local result override a stale provider NS snapshot", () => {
+    const fixture = {
+      fixture: { id: 1637500, date: "2026-09-08T19:00:00Z", status: { long: "Not Started", short: "NS", elapsed: null } },
+      league: { id: 1, name: "Test", logo: "", country: "Test" },
+      teams: { home: { id: 10, name: "Alcains", logo: "" }, away: { id: 20, name: "Vitoria Setubal", logo: "" } },
+      goals: { home: null, away: null },
+    };
+    const overlaid = applySettledOutcomeToFixture(fixture, { fixture_id: 1637500, score_home: 0, score_away: 2 });
+    expect(overlaid.fixture.status.short).toBe("FT");
+    expect(overlaid.goals).toEqual({ home: 0, away: 2 });
+    expect(overlaid.score?.fulltime).toEqual({ home: 0, away: 2 });
+  });
+
   it.each(["PST", "CANC", "ABD", "SUSP", "INT"])(
     "does not advertise %s fixtures as upcoming",
     (status) => expect(normaliseStatus(status)).toBe("cancelled"),

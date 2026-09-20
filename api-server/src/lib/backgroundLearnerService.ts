@@ -229,15 +229,16 @@ export async function runLiveDeepStatCollection() {
 }
 
 export async function runFinishedSettlement() {
-  if (!ENABLED) return { disabled: true, checked: 0, settled: 0 };
+  if (!ENABLED) return { disabled: true, checked: 0, settled: 0, voided: 0 };
   if (settleStatus === "running") return { skipped: true, reason: "settlement job already running" };
   settleStatus = "running";
   let checked = 0;
   let settled = 0;
+  let voided = 0;
   try {
     // The normal match window starts today. Resolve outstanding prediction IDs
     // directly so a late result missed before midnight is caught automatically.
-    const pendingFixtureIds = await getUnsettledPredictionFixtureIds(14);
+    const pendingFixtureIds = await getUnsettledPredictionFixtureIds(30);
     // A result may already be settled while its player feed was temporarily
     // incomplete. Persistently recover those fixtures instead of relying on an
     // in-memory retry set which disappears on restart.
@@ -255,6 +256,21 @@ export async function runFinishedSettlement() {
     const matches = await getMatchesByIds(fixtureIds);
 
     for (const match of matches) {
+      if (match.status === "cancelled") {
+        checked++;
+        const result = await pool.query(
+          `UPDATE prediction_audit_records
+              SET voided_at = COALESCE(voided_at, NOW()),
+                  void_reason = COALESCE(void_reason, $2)
+            WHERE fixture_id = $1
+              AND settled_at IS NULL
+              AND voided_at IS NULL`,
+          [match.id, `provider:${match.status_detail}`],
+        );
+        voided += result.rowCount ?? 0;
+        processedFinishedFixtures.add(match.id);
+        continue;
+      }
       if (match.status !== "finished") continue;
       if (processedFinishedFixtures.has(match.id)) continue;
 
@@ -311,8 +327,8 @@ export async function runFinishedSettlement() {
     }
 
     lastSettleRun = new Date();
-    await recordJob("settle_finished", "success", checked, settled);
-    return { checked, settled, finishedAt: new Date() };
+    await recordJob("settle_finished", "success", checked, settled + voided);
+    return { checked, settled, voided, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("settle_finished", "error", checked, settled, String(err?.message ?? err));
     throw err;
@@ -394,9 +410,11 @@ export function startBackgroundLearner() {
   trainTimer    = setInterval(() => runAutomaticRecalibration().catch(err => logger.warn({ err }, "recalibration background learner failed")), TRAIN_INTERVAL_MS);
   biweeklyTimer = setInterval(() => runBiweeklyAiUpdate(false).catch(err => logger.warn({ err }, "biweekly AI update failed")), BIWEEKLY_UPDATE_INTERVAL_MS);
 
-  setTimeout(() => runFinishedSettlement().catch(() => {}),        60_000);
-  setTimeout(() => runLiveDeepStatCollection().catch(() => {}),    90_000);
-  setTimeout(() => runAutomaticRecalibration().catch(() => {}),  5 * 60_000);
+  // Settle first, then rebuild the verified fallback model before live
+  // collection begins so startup cannot repeatedly report an obsolete warm-up.
+  setTimeout(() => runFinishedSettlement().catch(() => {}),        30_000);
+  setTimeout(() => runAutomaticRecalibration().catch(() => {}),    60_000);
+  setTimeout(() => runLiveDeepStatCollection().catch(() => {}),  2 * 60_000);
   setTimeout(() => runBiweeklyAiUpdate(false).catch(() => {}),  10 * 60_000);
 
   logger.info(

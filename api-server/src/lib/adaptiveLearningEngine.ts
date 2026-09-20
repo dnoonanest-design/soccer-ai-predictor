@@ -63,9 +63,10 @@
 import { db, modelTrainingRuns, factorLearningInsights, aiLearningAudits,
          aiModelRegistry, selfImprovementQueue, aiLearningMemory,
          predictionSnapshots, matchOutcomes, matchCircumstances,
-         deepMatchStats, calibrationParameters } from "@workspace/db";
+         deepMatchStats, calibrationParameters, pool } from "@workspace/db";
 import { desc, eq, sql, and } from "drizzle-orm";
 import { logger } from "./logger";
+import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -252,9 +253,11 @@ function learnFactorScale(
 
 // ─── Data loading ─────────────────────────────────────────────────────────────
 
-interface TrainingRow {
+export interface TrainingRow {
   fixtureId:     number;
   leagueId:      number | null;
+  homeTeam:      string;
+  awayTeam:      string;
   homeWinProb:   number;
   drawProb:      number;
   awayWinProb:   number;
@@ -280,57 +283,69 @@ interface TrainingRow {
   circumstanceScoreAway:    number | null;
 }
 
-async function loadTrainingRows(limit = 2000): Promise<TrainingRow[]> {
-  const rows = await db.execute(sql`
-    SELECT * FROM (
-    SELECT DISTINCT ON (ps.fixture_id)
-      ps.fixture_id,
-      ps.league_id,
-      ps.home_win_prob,
-      ps.draw_prob,
-      ps.away_win_prob,
-      ps.home_xg,
-      ps.away_xg,
-      ps.created_at,
-      -- Extract base probs from reasons_json if stored, else null
-      NULL::real AS base_home_win,
-      NULL::real AS base_draw,
-      NULL::real AS base_away_win,
-      mo.outcome,
-      mo.score_home,
-      mo.score_away,
-      mc.home_form_score,
-      mc.away_form_score,
-      mc.home_red_cards,
-      mc.away_red_cards,
-      mc.home_missing_players,
-      mc.away_missing_players,
-      mc.home_star_player_rating,
-      mc.away_star_player_rating,
-      mc.circumstance_score_home,
-      mc.circumstance_score_away
-    FROM prediction_snapshots ps
-    JOIN match_outcomes mo ON mo.fixture_id = ps.fixture_id
-    JOIN match_predictions mp ON mp.fixture_id = ps.fixture_id AND mp.is_live = false
-    LEFT JOIN match_circumstances mc
-      ON mc.fixture_id = ps.fixture_id
-     AND mc.status = 'upcoming'
-     AND mc.updated_at < mp.kickoff_at
-    WHERE ps.status = 'upcoming'
-      AND ps.minute IS NULL
-      AND mp.kickoff_at IS NOT NULL
-      AND ps.created_at < mp.kickoff_at
-    ORDER BY ps.fixture_id, ps.created_at DESC
-    ) safe_rows
-    ORDER BY created_at ASC
-    LIMIT ${limit}
-  `) as any;
+export async function loadVerifiedTrainingRows(limit = 2000): Promise<TrainingRow[]> {
+  const safeLimit = Math.max(1, Math.min(20_000, Math.floor(limit)));
+  // Dynamic import avoids an initialisation cycle: the audit worker uses the
+  // canonical predictor, while training runs only after application startup.
+  const { verifyPredictionAuditIntegrity } = await import("./predictionAccuracyAuditService");
+  const integrity = await verifyPredictionAuditIntegrity();
+  if (integrity.status !== "verified" || integrity.validIds.length === 0) return [];
 
-  const raw = Array.isArray(rows.rows) ? rows.rows : (Array.isArray(rows) ? rows : []);
+  const canonicalCte = canonicalPrematchAuditCte("$1");
+  const rows = await pool.query(
+    `WITH ${canonicalCte}
+     SELECT c.fixture_id,
+            c.league_id,
+            c.home_team,
+            c.away_team,
+            c.home_win_prob,
+            c.draw_prob,
+            c.away_win_prob,
+            c.home_xg,
+            c.away_xg,
+            COALESCE(c.kickoff_at, c.captured_at) AS created_at,
+            NULL::real AS base_home_win,
+            NULL::real AS base_draw,
+            NULL::real AS base_away_win,
+            c.actual_outcome AS outcome,
+            c.score_home,
+            c.score_away,
+            COALESCE(c.home_form_score, mc.home_form_score) AS home_form_score,
+            COALESCE(c.away_form_score, mc.away_form_score) AS away_form_score,
+            mc.home_red_cards,
+            mc.away_red_cards,
+            mc.home_missing_players,
+            mc.away_missing_players,
+            mc.home_star_player_rating,
+            mc.away_star_player_rating,
+            COALESCE(c.circumstance_score_home, mc.circumstance_score_home) AS circumstance_score_home,
+            COALESCE(c.circumstance_score_away, mc.circumstance_score_away) AS circumstance_score_away
+       FROM canonical_prematch c
+       LEFT JOIN LATERAL (
+         SELECT x.*
+           FROM match_circumstances x
+          WHERE x.fixture_id = c.fixture_id
+            AND x.status = 'upcoming'
+            AND x.updated_at <= c.captured_at
+          ORDER BY x.updated_at DESC
+          LIMIT 1
+       ) mc ON TRUE
+      WHERE c.settled_at IS NOT NULL
+        AND c.actual_outcome IN ('home','draw','away')
+        AND c.score_home IS NOT NULL
+        AND c.score_away IS NOT NULL
+      ORDER BY COALESCE(c.kickoff_at, c.captured_at) ASC
+      LIMIT $2`,
+    [integrity.validIds, safeLimit],
+  );
+
+  const raw = rows.rows;
 
   return raw.map((r: any) => ({
     fixtureId:                Number(r.fixture_id),
     leagueId:                 r.league_id != null ? Number(r.league_id) : null,
+    homeTeam:                 String(r.home_team ?? ""),
+    awayTeam:                 String(r.away_team ?? ""),
     homeWinProb:              safeProb(r.home_win_prob),
     drawProb:                 safeProb(r.draw_prob),
     awayWinProb:              safeProb(r.away_win_prob),
@@ -387,7 +402,7 @@ export async function learnFeatureWeights(): Promise<{
   afterBrier: number;
   sampleSize: number;
 }> {
-  const rows = await loadTrainingRows(3000);
+  const rows = await loadVerifiedTrainingRows(3000);
 
   if (rows.length < MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
     return {
@@ -665,7 +680,7 @@ export function invalidateWeightsCache(): void {
  * and is loaded into memory at prediction time when API calls fail.
  */
 export async function buildOfflineFallbackModel(): Promise<OfflineFallbackModel> {
-  const rows = await loadTrainingRows(5000);
+  const rows = await loadVerifiedTrainingRows(5000);
 
   if (rows.length < 30) {
     logger.warn({ rows: rows.length }, "adaptiveLearning: not enough data for offline fallback model");
@@ -827,7 +842,7 @@ export async function learnCircumstanceResiduals(): Promise<{
   learned: Array<{ factor: string; residualWeight: number; correlation: number; sampleSize: number }>;
   stored: number;
 }> {
-  const rows = await loadTrainingRows(3000);
+  const rows = await loadVerifiedTrainingRows(3000);
   if (rows.length < MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
     return { learned: [], stored: 0 };
   }
@@ -1432,7 +1447,7 @@ export async function getAdaptiveLearningReport() {
       runtimeSourceCodeChanges: false,
       generativeAiChangesProbabilities: false,
       currentlyPromotableParameters: ["drawNudgeWeight", "globalOutcomePriors"],
-      neutralUntilPointInTimeReplay: [
+      adaptiveScalingLockedUntilPointInTimeReplay: [
         "formFactorScale",
         "injuryFactorScale",
         "lineupFactorScale",
@@ -1444,7 +1459,7 @@ export async function getAdaptiveLearningReport() {
     explanation: [
       "The deterministic predictor remains the serving model.",
       "The adaptive learner may promote only draw calibration and global outcome priors after chronological holdout proof.",
-      "Form, injury, lineup, competition and league overrides remain neutral until exact point-in-time replay is available.",
+      "Fixed, bounded form, injury, lineup and competition effects remain active, but adaptive scaling is locked until exact point-in-time replay proves an improvement.",
       "Circumstance residuals, similar-match memory and generated explanations are diagnostic and do not alter serving probabilities.",
     ].join(" "),
   };

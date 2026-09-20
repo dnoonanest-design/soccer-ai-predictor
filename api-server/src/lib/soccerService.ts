@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { pool } from "@workspace/db";
 import { configuredFootballSeason } from "./season";
 import { waitForRateLimit } from "./rateLimiter";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
@@ -351,6 +352,67 @@ type ApiFootballFixture = {
     fulltime?: { home: number | null; away: number | null } | null;
   };
 };
+
+type SettledOutcome = {
+  fixture_id: number;
+  score_home: number;
+  score_away: number;
+};
+
+/**
+ * The settlement ledger is the local source of truth once a result has been
+ * recorded. API-Football date responses are intentionally cached for quota
+ * safety and can therefore still say NS after the exact-fixture settlement
+ * worker has recorded FT. Overlaying the immutable result prevents the main
+ * dashboard and performance ledger disagreeing about the same fixture.
+ */
+export function applySettledOutcomeToFixture(
+  fixture: ApiFootballFixture,
+  outcome: SettledOutcome,
+): ApiFootballFixture {
+  return {
+    ...fixture,
+    fixture: {
+      ...fixture.fixture,
+      status: {
+        long: "Match Finished",
+        short: "FT",
+        elapsed: fixture.fixture.status.elapsed ?? 90,
+      },
+    },
+    goals: { home: outcome.score_home, away: outcome.score_away },
+    score: {
+      ...fixture.score,
+      fulltime: { home: outcome.score_home, away: outcome.score_away },
+    },
+  };
+}
+
+async function overlaySettledOutcomes(
+  fixtures: ApiFootballFixture[],
+): Promise<ApiFootballFixture[]> {
+  const ids = fixtures.map((fixture) => fixture.fixture.id);
+  if (ids.length === 0) return fixtures;
+  try {
+    const result = await pool.query<SettledOutcome>(
+      `SELECT fixture_id, score_home, score_away
+         FROM match_outcomes
+        WHERE fixture_id = ANY($1::int[])`,
+      [ids],
+    );
+    if (result.rows.length === 0) return fixtures;
+    const settled = new Map(result.rows.map((row) => [Number(row.fixture_id), row]));
+    return fixtures.map((fixture) => {
+      const outcome = settled.get(fixture.fixture.id);
+      return outcome ? applySettledOutcomeToFixture(fixture, outcome) : fixture;
+    });
+  } catch (err) {
+    // Fixture serving must remain available during a database incident. The
+    // provider snapshot is still a safe degraded response.
+    logger.warn({ err }, "settled-outcome fixture overlay failed");
+    return fixtures;
+  }
+}
 
 export type OddsApiEvent = {
   id: string;
@@ -735,7 +797,7 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
     combined.set(fixtureId, cachedStaleLiveOverride(fixtureId) ?? fixture);
   }
   for (const fixture of liveFixtures) combined.set(fixture.fixture.id, fixture);
-  const combinedFixtures = Array.from(combined.values());
+  const combinedFixtures = await overlaySettledOutcomes(Array.from(combined.values()));
 
   const hasActiveMatches = combinedFixtures.some((fixture) => {
     const fixtureStatus = normaliseStatus(fixture.fixture.status.short);

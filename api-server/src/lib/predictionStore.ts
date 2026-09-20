@@ -1,4 +1,4 @@
-import { db, matchPredictions, matchOutcomes } from "@workspace/db";
+import { db, matchPredictions, matchOutcomes, pool } from "@workspace/db";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { logger } from "./logger";
 
@@ -72,7 +72,7 @@ export async function saveOutcome(opts: {
  * downloading complete historical match days.
  */
 export async function getUnsettledPredictionFixtureIds(daysBack = 14): Promise<number[]> {
-  const safeDays = Math.max(1, Math.min(14, Math.floor(daysBack)));
+  const safeDays = Math.max(1, Math.min(60, Math.floor(daysBack)));
   const now = new Date();
   const cutoff = new Date(now.getTime() - safeDays * 24 * 60 * 60_000);
   const rows = await db
@@ -87,7 +87,21 @@ export async function getUnsettledPredictionFixtureIds(daysBack = 14): Promise<n
       sql`${matchPredictions.kickoffAt} >= ${cutoff}`,
     ));
 
-  return rows.map((row) => row.fixtureId);
+  const auditRows = await pool.query<{ fixture_id: number }>(
+    `SELECT DISTINCT fixture_id
+       FROM prediction_audit_records
+      WHERE settled_at IS NULL
+        AND voided_at IS NULL
+        AND kickoff_at IS NOT NULL
+        AND kickoff_at <= $1
+        AND kickoff_at >= $2`,
+    [now, cutoff],
+  );
+
+  return Array.from(new Set([
+    ...rows.map((row) => row.fixtureId),
+    ...auditRows.rows.map((row) => Number(row.fixture_id)),
+  ]));
 }
 
 // ── Calibration ───────────────────────────────────────────────────────────────
@@ -307,16 +321,10 @@ function clampUnit(v: number): number {
 }
 
 export async function getCalibrationReport(): Promise<CalibrationReport> {
-  const rows = await db
-    .select({
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb:    matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      outcome:     matchOutcomes.outcome,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false));
+  // Loaded lazily to avoid an initialisation cycle. Calibration must use the
+  // immutable, verified pre-match ledger rather than mutable prediction rows.
+  const { loadVerifiedTrainingRows } = await import("./adaptiveLearningEngine");
+  const rows = await loadVerifiedTrainingRows(20_000);
 
   const outcomes = ["home", "draw", "away"] as const;
   type Bucket = { sumPred: number; actual: number; total: number };
@@ -388,25 +396,8 @@ export async function getCalibrationReport(): Promise<CalibrationReport> {
 
 export async function getTrainingDataset(limit = 5000) {
   const safeLimit = Math.max(1, Math.min(20000, Math.floor(limit || 5000)));
-  const rows = await db
-    .select({
-      fixtureId: matchPredictions.fixtureId,
-      homeTeam: matchPredictions.homeTeam,
-      awayTeam: matchPredictions.awayTeam,
-      leagueId: matchPredictions.leagueId,
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb: matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      kickoffAt: matchPredictions.kickoffAt,
-      outcome: matchOutcomes.outcome,
-      scoreHome: matchOutcomes.scoreHome,
-      scoreAway: matchOutcomes.scoreAway,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false))
-    .orderBy(desc(matchPredictions.updatedAt))
-    .limit(safeLimit);
+  const { loadVerifiedTrainingRows } = await import("./adaptiveLearningEngine");
+  const rows = (await loadVerifiedTrainingRows(safeLimit)).reverse();
 
   return rows.map((r) => ({
     fixture_id: r.fixtureId,
@@ -416,7 +407,7 @@ export async function getTrainingDataset(limit = 5000) {
     home_win_prob: Math.round(toUnitProb(r.homeWinProb) * 10000) / 10000,
     draw_prob: Math.round(toUnitProb(r.drawProb) * 10000) / 10000,
     away_win_prob: Math.round(toUnitProb(r.awayWinProb) * 10000) / 10000,
-    kickoff_at: r.kickoffAt,
+    kickoff_at: r.createdAt,
     outcome: r.outcome,
     score_home: r.scoreHome,
     score_away: r.scoreAway,

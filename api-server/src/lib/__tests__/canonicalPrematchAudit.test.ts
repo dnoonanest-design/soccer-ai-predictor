@@ -6,6 +6,7 @@ describe("canonical prematch audit selector", () => {
     const sql = canonicalPrematchAuditCte("$3");
     expect(sql).toMatch(/id = ANY\(\$3::bigint\[\]\)/);
     expect(sql).toMatch(/phase = 'prematch'/);
+    expect(sql).toMatch(/voided_at IS NULL/);
     expect(sql).toMatch(/captured_at < kickoff_at/);
     expect(sql).toMatch(/DISTINCT ON \(fixture_id\)/);
     expect(sql).toMatch(/ORDER BY fixture_id, captured_at DESC, id DESC/);

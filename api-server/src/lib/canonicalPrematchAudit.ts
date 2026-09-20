@@ -13,6 +13,7 @@ export function canonicalPrematchAuditCte(validIdsParameter: string) {
       FROM prediction_audit_records
      WHERE id = ANY(${validIdsParameter}::bigint[])
        AND phase = 'prematch'
+       AND voided_at IS NULL
        AND kickoff_at IS NOT NULL
        AND captured_at < kickoff_at
   ), canonical_prematch AS (

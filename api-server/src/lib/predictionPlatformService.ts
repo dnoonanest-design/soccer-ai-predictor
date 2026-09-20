@@ -1,7 +1,8 @@
-import { db, predictionSnapshots, betTracker, modelTrainingRuns, liveAlerts, matchPredictions, matchOutcomes } from "@workspace/db";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { db, predictionSnapshots, betTracker, modelTrainingRuns, liveAlerts } from "@workspace/db";
+import { desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { getCalibrationReport } from "./predictionStore";
+import { loadVerifiedTrainingRows } from "./adaptiveLearningEngine";
 
 export interface PredictionSnapshotInput {
   fixtureId: number;
@@ -128,23 +129,10 @@ export async function getBetTrackerSummary() {
 }
 
 export async function runTrainingPipeline() {
-  const rows = await db
-    .select({
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb: matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      outcome: matchOutcomes.outcome,
-      updatedAt: matchPredictions.updatedAt,
-      kickoffAt: matchPredictions.kickoffAt,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(and(
-      eq(matchPredictions.isLive, false),
-      sql`${matchPredictions.kickoffAt} IS NOT NULL`,
-      sql`${matchPredictions.updatedAt} < ${matchPredictions.kickoffAt}`,
-    ))
-    .orderBy(asc(matchPredictions.updatedAt));
+  // Use the same HMAC-verified, canonical pre-kickoff ledger as the adaptive
+  // learner. This prevents mutable prediction rows or later circumstances
+  // from entering either the training set or chronological holdout.
+  const rows = await loadVerifiedTrainingRows(20_000);
 
   const n = rows.length;
   const holdoutRows = n >= 10 ? Math.max(1, Math.floor(n * 0.2)) : 0;
