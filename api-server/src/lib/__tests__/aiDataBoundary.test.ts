@@ -33,7 +33,7 @@ describe("AI temporal data boundary", () => {
   it("connects only persisted adaptive calibration to pre-match inference", async () => {
     const code = await source("../enhancedStatsService.ts");
     expect(code).toContain("const learnedWeights = await getLearnedWeights()");
-    expect(code).toContain("!isLive && learnedWeights.sampleSize >= 250");
+    expect(code).toContain("!isLive && learnedWeights.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE");
     expect(code).toContain("globalOutcomePriors");
   });
 
@@ -63,9 +63,14 @@ describe("AI temporal data boundary", () => {
     expect(code).toContain("Strength index/sample size are pre-match features");
   });
 
-  it("uses one 250-match promotion threshold throughout AI reporting", async () => {
+  it("uses one 500-match promotion threshold throughout AI reporting", async () => {
+    const adaptive = await source("../adaptiveLearningEngine.ts");
     const background = await source("../backgroundLearnerService.ts");
     const memory = await source("../aiMemoryUpdateService.ts");
+    expect(adaptive).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE = 500");
+    expect(adaptive).toContain("afterLogLoss <= beforeLogLoss - MIN_LOG_LOSS_IMPROVEMENT");
+    expect(adaptive).toContain("afterAccuracy >= beforeAccuracy - MAX_ACCURACY_REGRESSION");
+    expect(adaptive).toContain("adaptive-chronological-challenger");
     expect(background).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE");
     expect(memory).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE");
     expect(memory).not.toContain("sampleSize >= 60");

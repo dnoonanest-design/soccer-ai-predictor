@@ -12,6 +12,7 @@ const CLOSE_TTL_MS = clamp(Number(process.env.ODDS_CACHE_CLOSE_MS ?? 10 * 60_000
 const LIVE_TTL_MS = clamp(Number(process.env.ODDS_CACHE_LIVE_MS ?? 5 * 60_000), 60_000, 15 * 60_000);
 const EMPTY_TTL_MS = clamp(Number(process.env.ODDS_CACHE_EMPTY_MS ?? 30 * 60_000), 5 * 60_000, 2 * 60 * 60_000);
 const FAILURE_BACKOFF_MS = clamp(Number(process.env.ODDS_FAILURE_BACKOFF_MS ?? 15 * 60_000), 60_000, 60 * 60_000);
+const RESERVED_CREDITS = clamp(Number(process.env.ODDS_RESERVED_CREDITS ?? 100), 0, 100_000);
 
 export type OddsQuotaMode = "full" | "conserve" | "protect" | "critical";
 
@@ -91,6 +92,7 @@ export function getOddsOptimizationStatus() {
       lastRequestCost,
       utilisationPct,
       quotaObservedAt: lastQuotaObservedAt,
+      reservedCredits: RESERVED_CREDITS,
     },
     requests: {
       providerRequests,
@@ -147,7 +149,7 @@ async function oddsOptimizedFetch(input: FetchInput, init?: RequestInit): Promis
     return restoreResponse(cachedFailure, true, true);
   }
 
-  if (!requestAllowed(mode, cached, now)) {
+  if (!requestAllowed(mode, cached, now, estimatedCost)) {
     blockedCalls++;
     if (cached) {
       staleCacheHits++;
@@ -269,7 +271,8 @@ function shouldServeStale(mode: OddsQuotaMode, entry: CacheEntry, now: number): 
   return age < 24 * 60 * 60_000;
 }
 
-function requestAllowed(mode: OddsQuotaMode, entry: CacheEntry | undefined, now: number): boolean {
+function requestAllowed(mode: OddsQuotaMode, entry: CacheEntry | undefined, now: number, estimatedCost: number): boolean {
+  if (providerRemaining != null && providerRemaining - estimatedCost < RESERVED_CREDITS) return false;
   if (mode === "full" || mode === "conserve") return true;
   if (mode === "protect") {
     if (!entry) return true;
@@ -283,6 +286,7 @@ function requestAllowed(mode: OddsQuotaMode, entry: CacheEntry | undefined, now:
 
 function quotaMode(): OddsQuotaMode {
   if (providerUsed == null || providerTotal == null || providerTotal <= 0) return "full";
+  if (providerRemaining != null && providerRemaining <= RESERVED_CREDITS) return "critical";
   const ratio = providerUsed / providerTotal;
   if (ratio >= 0.95) return "critical";
   if (ratio >= 0.85) return "protect";

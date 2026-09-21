@@ -27,6 +27,8 @@ const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(
   Number(process.env.MIN_AUTO_CALIBRATION_SAMPLE ?? MIN_SAMPLE_FOR_WEIGHT_UPDATE),
 );
 const TRAINING_ADVISORY_LOCK = 7_310_250_001;
+const LIVE_ADVISORY_LOCK = 7_310_250_002;
+const SETTLEMENT_ADVISORY_LOCK = 7_310_250_003;
 
 const processedFinishedFixtures = new Set<number>();
 
@@ -200,7 +202,11 @@ export async function runLiveDeepStatCollection() {
   const startedAt = new Date();
   let checked = 0;
   let stored = 0;
+  let lockClient: PoolClient | null = null;
   try {
+    lockClient = await pool.connect();
+    const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [LIVE_ADVISORY_LOCK]);
+    if (!lock.rows[0]?.acquired) return { skipped: true, reason: "live job already running on another instance" };
     // ── FIXED: Only process tracked leagues ──────────────────────────────────
     const liveMatches = (await getAllMatches(null, "live"))
       .filter(m => isTrackedLeague(m.league_id))
@@ -224,6 +230,10 @@ export async function runLiveDeepStatCollection() {
     await recordJob("live_deep_stats", "error", checked, stored, String(err?.message ?? err));
     throw err;
   } finally {
+    if (lockClient) {
+      await lockClient.query("SELECT pg_advisory_unlock($1)", [LIVE_ADVISORY_LOCK]).catch(() => {});
+      lockClient.release();
+    }
     liveStatus = "idle";
   }
 }
@@ -235,7 +245,11 @@ export async function runFinishedSettlement() {
   let checked = 0;
   let settled = 0;
   let voided = 0;
+  let lockClient: PoolClient | null = null;
   try {
+    lockClient = await pool.connect();
+    const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [SETTLEMENT_ADVISORY_LOCK]);
+    if (!lock.rows[0]?.acquired) return { skipped: true, reason: "settlement job already running on another instance" };
     // The normal match window starts today. Resolve outstanding prediction IDs
     // directly so a late result missed before midnight is caught automatically.
     const pendingFixtureIds = await getUnsettledPredictionFixtureIds(30);
@@ -333,6 +347,10 @@ export async function runFinishedSettlement() {
     await recordJob("settle_finished", "error", checked, settled, String(err?.message ?? err));
     throw err;
   } finally {
+    if (lockClient) {
+      await lockClient.query("SELECT pg_advisory_unlock($1)", [SETTLEMENT_ADVISORY_LOCK]).catch(() => {});
+      lockClient.release();
+    }
     settleStatus = "idle";
   }
 }

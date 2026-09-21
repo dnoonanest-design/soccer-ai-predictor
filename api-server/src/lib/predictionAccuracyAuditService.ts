@@ -1,4 +1,4 @@
-import { pool } from "@workspace/db";
+import { pool, type PoolClient } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, getAllMatches, type Match } from "./soccerService";
 import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
@@ -9,7 +9,7 @@ import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
 const ENABLED = process.env.PREDICTION_ACCURACY_AUDIT_ENABLED !== "false";
 const SCAN_INTERVAL_MS = Math.max(
   5 * 60_000,
-  Number(process.env.PREDICTION_ACCURACY_AUDIT_SCAN_MS ?? 15 * 60_000),
+  Number(process.env.PREDICTION_ACCURACY_AUDIT_SCAN_MS ?? 5 * 60_000),
 );
 const MAX_PREMATCH_CAPTURES_PER_RUN = clamp(
   Number(process.env.PREDICTION_ACCURACY_AUDIT_MAX_PREMATCH ?? 10),
@@ -35,6 +35,7 @@ const SIGNATURE_VERSION = AUDIT_SIGNING_KEY
 
 const HOUR = 60 * 60_000;
 const MINUTE = 60_000;
+const AUDIT_ADVISORY_LOCK = 7_310_250_004;
 
 type FutureFixture = {
   fixture?: {
@@ -726,8 +727,12 @@ export async function runPredictionAccuracyAudit(): Promise<
     };
   running = true;
   lastError = null;
+  let lockClient: PoolClient | null = null;
 
   try {
+    lockClient = await pool.connect();
+    const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [AUDIT_ADVISORY_LOCK]);
+    if (!lock.rows[0]?.acquired) return { skipped: true, reason: "prediction accuracy audit already running on another instance" };
     const now = new Date();
     const prematch = await capturePrematchCheckpoints(now);
     const live = await captureLiveCheckpoints();
@@ -750,6 +755,10 @@ export async function runPredictionAccuracyAudit(): Promise<
     logger.warn({ err }, "prediction accuracy audit failed");
     throw err;
   } finally {
+    if (lockClient) {
+      await lockClient.query("SELECT pg_advisory_unlock($1)", [AUDIT_ADVISORY_LOCK]).catch(() => {});
+      lockClient.release();
+    }
     running = false;
   }
 }

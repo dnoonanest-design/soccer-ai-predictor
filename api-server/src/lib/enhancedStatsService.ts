@@ -1,7 +1,7 @@
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
 import { relativeStrengthAdjustment } from "./competitionStrength";
-import { getLearnedWeights } from "./adaptiveLearningEngine";
+import { getLearnedWeights, MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
 import { configuredFootballSeason } from "./season";
 import {
   getMatchPlayerInfluence,
@@ -887,7 +887,7 @@ export async function getEnhancedPrediction(
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
   const learnedPriors = learnedWeights.globalOutcomePriors;
-  if (!isLive && learnedWeights.sampleSize >= 250 && learnedPriors) {
+  if (!isLive && learnedWeights.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE && learnedPriors) {
     const w = Math.max(0.05, Math.min(0.20, learnedWeights.drawNudgeWeight));
     finalHome = (1 - w) * finalHome + w * learnedPriors.home * 100;
     finalDraw = (1 - w) * finalDraw + w * learnedPriors.draw * 100;
@@ -906,7 +906,7 @@ export async function getEnhancedPrediction(
     if (homeNames.length) reasons.unshift(`${homeTeamName || "Home"} confirmed stars included: ${homeNames.join(", ")}.`);
     if (awayNames.length) reasons.unshift(`${awayTeamName || "Away"} confirmed stars included: ${awayNames.join(", ")}.`);
   }
-  if (!isLive && learnedWeights.sampleSize >= 250 && learnedPriors) {
+  if (!isLive && learnedWeights.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE && learnedPriors) {
     reasons.push(`Adaptive calibration ${learnedWeights.version} applied after chronological holdout validation.`);
   }
   if (strength.home >= 1.08) reasons.unshift(`Manchester Rule: ${homeTeamName || "Home"}'s results carry greater competition-strength weight.`);

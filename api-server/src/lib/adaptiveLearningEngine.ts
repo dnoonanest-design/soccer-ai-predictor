@@ -147,9 +147,11 @@ const MAX_ITERATIONS = 200;
 const L2_LAMBDA = 0.005;    // regularisation
 
 // Minimum samples before updating any learned weights
-export const MIN_SAMPLE_FOR_WEIGHT_UPDATE = 250;
-const MIN_HOLDOUT_SAMPLE = 50;
+export const MIN_SAMPLE_FOR_WEIGHT_UPDATE = 500;
+const MIN_HOLDOUT_SAMPLE = 100;
 const MIN_BRIER_IMPROVEMENT = 0.002;
+const MIN_LOG_LOSS_IMPROVEMENT = 0.001;
+const MAX_ACCURACY_REGRESSION = 0.01;
 
 // Cache key for the offline fallback model in calibrationParameters table
 const OFFLINE_MODEL_VERSION = "adaptive-offline-fallback-v1";
@@ -400,6 +402,10 @@ export async function learnFeatureWeights(): Promise<{
   improved: boolean;
   beforeBrier: number;
   afterBrier: number;
+  beforeLogLoss: number;
+  afterLogLoss: number;
+  beforeAccuracy: number;
+  afterAccuracy: number;
   sampleSize: number;
 }> {
   const rows = await loadVerifiedTrainingRows(3000);
@@ -410,6 +416,10 @@ export async function learnFeatureWeights(): Promise<{
       improved: false,
       beforeBrier: 0,
       afterBrier: 0,
+      beforeLogLoss: 0,
+      afterLogLoss: 0,
+      beforeAccuracy: 0,
+      afterAccuracy: 0,
       sampleSize: rows.length,
     };
   }
@@ -425,12 +435,18 @@ export async function learnFeatureWeights(): Promise<{
       improved: false,
       beforeBrier: 0,
       afterBrier: 0,
+      beforeLogLoss: 0,
+      afterLogLoss: 0,
+      beforeAccuracy: 0,
+      afterAccuracy: 0,
       sampleSize: rows.length,
     };
   }
 
   // ── Step 1: Compute before-Brier on the newest chronological holdout ──────
   let beforeBrier = 0;
+  let beforeLogLoss = 0;
+  let beforeCorrect = 0;
   let totalWeight = 0;
   for (const r of holdoutRows) {
     const w = temporalWeight(r.createdAt, now);
@@ -440,9 +456,15 @@ export async function learnFeatureWeights(): Promise<{
       Math.pow(d - (r.outcome === "draw" ? 1 : 0), 2) +
       Math.pow(a - (r.outcome === "away" ? 1 : 0), 2)
     );
+    const actualProbability = r.outcome === "home" ? h : r.outcome === "draw" ? d : a;
+    beforeLogLoss += w * -Math.log(Math.max(1e-9, actualProbability));
+    const predicted = h >= d && h >= a ? "home" : a >= h && a >= d ? "away" : "draw";
+    if (predicted === r.outcome) beforeCorrect += w;
     totalWeight += w;
   }
   beforeBrier = totalWeight > 0 ? beforeBrier / totalWeight : 0;
+  beforeLogLoss = totalWeight > 0 ? beforeLogLoss / totalWeight : 0;
+  const beforeAccuracy = totalWeight > 0 ? beforeCorrect / totalWeight : 0;
 
   // ── Step 2: Learn per-league outcome priors ────────────────────────────────
   const leaguePriors: Record<number, { home: number; draw: number; away: number; n: number; w: number }> = {};
@@ -550,6 +572,8 @@ export async function learnFeatureWeights(): Promise<{
   // ── Step 6: Compute after-Brier estimate ──────────────────────────────────
   // Apply the new draw nudge and compare against before
   let afterBrier = 0;
+  let afterLogLoss = 0;
+  let afterCorrect = 0;
   let totalWeight2 = 0;
   const globalDrawPrior = totalW2 > 0 ? drawActual / totalW2 : 0.27;
   const globalHomePrior = trainingRows.reduce((s, r) => s + temporalWeight(r.createdAt, now) * (r.outcome === "home" ? 1 : 0), 0) / Math.max(1, totalW2);
@@ -567,11 +591,20 @@ export async function learnFeatureWeights(): Promise<{
       Math.pow(dF - (r.outcome === "draw" ? 1 : 0), 2) +
       Math.pow(aF - (r.outcome === "away" ? 1 : 0), 2)
     );
+    const actualProbability = r.outcome === "home" ? hF : r.outcome === "draw" ? dF : aF;
+    afterLogLoss += w * -Math.log(Math.max(1e-9, actualProbability));
+    const predicted = hF >= dF && hF >= aF ? "home" : aF >= hF && aF >= dF ? "away" : "draw";
+    if (predicted === r.outcome) afterCorrect += w;
     totalWeight2 += w;
   }
   afterBrier = totalWeight2 > 0 ? afterBrier / totalWeight2 : beforeBrier;
+  afterLogLoss = totalWeight2 > 0 ? afterLogLoss / totalWeight2 : beforeLogLoss;
+  const afterAccuracy = totalWeight2 > 0 ? afterCorrect / totalWeight2 : beforeAccuracy;
 
-  const improved = afterBrier <= beforeBrier - MIN_BRIER_IMPROVEMENT;
+  const improved =
+    afterBrier <= beforeBrier - MIN_BRIER_IMPROVEMENT &&
+    afterLogLoss <= beforeLogLoss - MIN_LOG_LOSS_IMPROVEMENT &&
+    afterAccuracy >= beforeAccuracy - MAX_ACCURACY_REGRESSION;
 
   // The holdout calculation above validates the outcome-prior calibration.
   // Feature scales and league overrides require an exact point-in-time feature
@@ -602,6 +635,10 @@ export async function learnFeatureWeights(): Promise<{
     improved,
     beforeBrier: Math.round(beforeBrier * 10000) / 10000,
     afterBrier:  Math.round(afterBrier  * 10000) / 10000,
+    beforeLogLoss: Math.round(beforeLogLoss * 10000) / 10000,
+    afterLogLoss: Math.round(afterLogLoss * 10000) / 10000,
+    beforeAccuracy: Math.round(beforeAccuracy * 10000) / 10000,
+    afterAccuracy: Math.round(afterAccuracy * 10000) / 10000,
     sampleSize:  rows.length,
   };
 }
@@ -1137,6 +1174,31 @@ async function persistLearnedWeights(weights: LearnedFactorWeights, beforeBrier:
     "adaptiveLearning: persisted learned weights");
 }
 
+async function persistShadowChallenger(
+  weights: LearnedFactorWeights,
+  metrics: {
+    beforeBrier: number; afterBrier: number;
+    beforeLogLoss: number; afterLogLoss: number;
+    beforeAccuracy: number; afterAccuracy: number;
+  },
+): Promise<void> {
+  await db.insert(aiModelRegistry).values({
+    modelVersion: `${weights.version}-shadow-${Date.now()}`,
+    modelType: "adaptive-chronological-challenger",
+    featureSetJson: ["pre_kickoff_probabilities", "league_priors", "draw_calibration"],
+    weightsJson: weights as any,
+    metricsJson: {
+      metricDefinition: "multi_metric_chronological_holdout",
+      ...metrics,
+      chronologicalHoldout: true,
+      promoted: false,
+    } as any,
+    trainingRows: Math.max(0, weights.sampleSize - Math.floor(weights.sampleSize * 0.2)),
+    active: false,
+    notes: "Shadow challenger retained for comparison. It cannot affect serving probabilities unless every promotion gate passes.",
+  });
+}
+
 // ─── Match explanation generation ────────────────────────────────────────────
 
 /**
@@ -1311,7 +1373,11 @@ export async function explainRecentPredictions(limit = 30): Promise<{ explained:
  *  7. Store an audit record
  */
 export async function runAdaptiveLearningCycle(): Promise<{
-  featureWeights:  { improved: boolean; beforeBrier: number; afterBrier: number; sampleSize: number };
+  featureWeights:  {
+    improved: boolean; beforeBrier: number; afterBrier: number;
+    beforeLogLoss: number; afterLogLoss: number;
+    beforeAccuracy: number; afterAccuracy: number; sampleSize: number;
+  };
   residuals:       { learned: number; stored: number };
   offlineModel:    { sampleSize: number; leagueCount: number };
   improvements:    { resolved: number; actions: string[] };
@@ -1324,6 +1390,15 @@ export async function runAdaptiveLearningCycle(): Promise<{
   const weightResult = await learnFeatureWeights();
   if (weightResult.improved && weightResult.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
     await persistLearnedWeights(weightResult.weights, weightResult.beforeBrier);
+  } else if (weightResult.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
+    await persistShadowChallenger(weightResult.weights, {
+      beforeBrier: weightResult.beforeBrier,
+      afterBrier: weightResult.afterBrier,
+      beforeLogLoss: weightResult.beforeLogLoss,
+      afterLogLoss: weightResult.afterLogLoss,
+      beforeAccuracy: weightResult.beforeAccuracy,
+      afterAccuracy: weightResult.afterAccuracy,
+    });
   }
 
   // Step 3: Circumstance residuals
@@ -1344,9 +1419,15 @@ export async function runAdaptiveLearningCycle(): Promise<{
     const [audit] = await db.insert(aiLearningAudits).values({
       auditType:           "adaptive_learning_cycle",
       sampleSize:          weightResult.sampleSize,
-      beforeMetricsJson:   { brierScore: weightResult.beforeBrier } as any,
+      beforeMetricsJson:   {
+        brierScore: weightResult.beforeBrier,
+        logLoss: weightResult.beforeLogLoss,
+        accuracy: weightResult.beforeAccuracy,
+      } as any,
       afterMetricsJson:    {
         brierScore:           weightResult.afterBrier,
+        logLoss:              weightResult.afterLogLoss,
+        accuracy:             weightResult.afterAccuracy,
         improved:             weightResult.improved,
         formFactorScale:      weightResult.weights.formFactorScale,
         injuryFactorScale:    weightResult.weights.injuryFactorScale,
@@ -1382,6 +1463,10 @@ export async function runAdaptiveLearningCycle(): Promise<{
       improved:    weightResult.improved,
       beforeBrier: weightResult.beforeBrier,
       afterBrier:  weightResult.afterBrier,
+      beforeLogLoss: weightResult.beforeLogLoss,
+      afterLogLoss: weightResult.afterLogLoss,
+      beforeAccuracy: weightResult.beforeAccuracy,
+      afterAccuracy: weightResult.afterAccuracy,
       sampleSize:  weightResult.sampleSize,
     },
     residuals: {
@@ -1444,6 +1529,9 @@ export async function getAdaptiveLearningReport() {
       minimumSettledMatches: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
       minimumChronologicalHoldoutMatches: MIN_HOLDOUT_SAMPLE,
       minimumBrierImprovement: MIN_BRIER_IMPROVEMENT,
+      minimumLogLossImprovement: MIN_LOG_LOSS_IMPROVEMENT,
+      maximumAccuracyRegression: MAX_ACCURACY_REGRESSION,
+      shadowChallengersRetained: true,
       runtimeSourceCodeChanges: false,
       generativeAiChangesProbabilities: false,
       currentlyPromotableParameters: ["drawNudgeWeight", "globalOutcomePriors"],

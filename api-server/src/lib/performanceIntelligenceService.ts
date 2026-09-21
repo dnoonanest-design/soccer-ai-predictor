@@ -202,7 +202,7 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
       averageModelMarketGapPctPoints: n(marketRow.avg_model_market_gap),
     },
     learningSafety: {
-      minimumPromotionSamples: 250,
+      minimumPromotionSamples: 500,
       minimumResidualSamples: 100,
       principle: "Promote only after chronological holdout improvement; bookmaker prices are excluded from training.",
     },
