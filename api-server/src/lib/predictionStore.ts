@@ -61,19 +61,38 @@ export async function saveOutcomeWithStatus(opts: {
     : "draw";
   try {
     const result = await pool.query(
-      `INSERT INTO match_outcomes (fixture_id, outcome, score_home, score_away)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (fixture_id) DO UPDATE
-         SET outcome = EXCLUDED.outcome,
-             score_home = EXCLUDED.score_home,
-             score_away = EXCLUDED.score_away,
-             recorded_at = NOW()
-       WHERE ROW(match_outcomes.outcome, match_outcomes.score_home, match_outcomes.score_away)
-             IS DISTINCT FROM ROW(EXCLUDED.outcome, EXCLUDED.score_home, EXCLUDED.score_away)
-       RETURNING fixture_id`,
+      `WITH saved AS (
+         INSERT INTO match_outcomes (fixture_id, outcome, score_home, score_away)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (fixture_id) DO UPDATE
+           SET outcome = EXCLUDED.outcome,
+               score_home = EXCLUDED.score_home,
+               score_away = EXCLUDED.score_away,
+               recorded_at = NOW()
+         WHERE ROW(match_outcomes.outcome, match_outcomes.score_home, match_outcomes.score_away)
+               IS DISTINCT FROM ROW(EXCLUDED.outcome, EXCLUDED.score_home, EXCLUDED.score_away)
+         RETURNING fixture_id, outcome, score_home, score_away
+       ), quarantined AS (
+         UPDATE prediction_audit_records a
+            SET voided_at = COALESCE(a.voided_at, NOW()),
+                void_reason = COALESCE(a.void_reason, 'provider-result-correction')
+           FROM saved s
+          WHERE a.fixture_id = s.fixture_id
+            AND a.settled_at IS NOT NULL
+            AND a.voided_at IS NULL
+            AND ROW(a.actual_outcome, a.score_home, a.score_away)
+                IS DISTINCT FROM ROW(s.outcome, s.score_home, s.score_away)
+         RETURNING a.id
+       )
+       SELECT fixture_id FROM saved`,
       [opts.fixtureId, outcome, opts.scoreHome, opts.scoreAway],
     );
-    return { saved: true, changed: (result.rowCount ?? 0) > 0 };
+    const changed = (result.rowCount ?? 0) > 0;
+    if (changed) {
+      const { invalidatePredictionAuditIntegrityCache } = await import("./predictionAccuracyAuditService");
+      invalidatePredictionAuditIntegrityCache();
+    }
+    return { saved: true, changed };
   } catch (err) {
     logger.warn({ err, fixtureId: opts.fixtureId }, "predictionStore: failed to save outcome");
     return { saved: false, changed: false };

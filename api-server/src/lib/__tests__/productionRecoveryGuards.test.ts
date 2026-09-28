@@ -10,7 +10,11 @@ describe("production recovery guards", () => {
     const code = await source("../predictionStore.ts");
     expect(code).toContain("saveOutcomeWithStatus");
     expect(code).toContain("IS DISTINCT FROM ROW(EXCLUDED.outcome, EXCLUDED.score_home, EXCLUDED.score_away)");
-    expect(code).toContain("changed: (result.rowCount ?? 0) > 0");
+    expect(code).toContain("const changed = (result.rowCount ?? 0) > 0");
+    expect(code).toContain("WITH saved AS");
+    expect(code).toContain("UPDATE prediction_audit_records a");
+    expect(code).toContain("FROM saved s");
+    expect(code).toContain("invalidatePredictionAuditIntegrityCache");
   });
 
   it("quarantines corrected provider outcomes without changing signed settlement fields", async () => {
@@ -46,5 +50,16 @@ describe("production recovery guards", () => {
     const code = await source("../../routes/accuracy.ts");
 
     expect(code.match(/voided_at IS NULL/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("backs off omitted fixtures and reopens recovery after a corrected result", async () => {
+    const code = await source("../backgroundLearnerService.ts");
+
+    expect(code).toContain('"provider omitted fixture"');
+    expect(code).toContain("fixture not terminal:");
+    expect(code).toContain("ON CONFLICT (fixture_id) DO UPDATE");
+    expect(code).toContain("completed_at = NULL");
+    expect(code).toContain("TRACKED_LEAGUE_IDS");
+    expect(code).toContain("outside tracked competition");
   });
 });

@@ -92,6 +92,10 @@ let lastRunAt: Date | null = null;
 let lastResult: AuditRunResult | null = null;
 let lastError: string | null = null;
 let integrityCache: { value: Awaited<ReturnType<typeof verifyPredictionAuditIntegrityUncached>>; at: number } | null = null;
+
+export function invalidatePredictionAuditIntegrityCache() {
+  integrityCache = null;
+}
 const INTEGRITY_CACHE_MS = 15_000;
 
 function clamp(value: number, min: number, max: number) {

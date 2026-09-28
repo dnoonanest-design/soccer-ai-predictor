@@ -10,7 +10,7 @@ import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningServ
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
 import { collectPlayerStatsForFixture } from "./playerService.js";
 import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
-import { isTrackedLeague } from "./leagueConfig";
+import { isTrackedLeague, TRACKED_LEAGUE_IDS } from "./leagueConfig";
 import { MIN_SAMPLE_FOR_WEIGHT_UPDATE, runAdaptiveLearningCycle } from "./adaptiveLearningEngine";
 import { quarantineResultMismatches } from "./predictionAccuracyAuditService";
 
@@ -257,16 +257,41 @@ export async function runFinishedSettlement() {
     // Result settlement always has priority. Player-data recovery uses its own
     // persistent, bounded queue so an unavailable player feed cannot crowd out
     // final scores or consume the same quota every ten minutes forever.
+    const trackedLeagueIds = Array.from(TRACKED_LEAGUE_IDS);
+    await pool.query(`
+      UPDATE player_stats_recovery_queue q
+         SET completed_at = COALESCE(q.completed_at, NOW()),
+             last_error = 'outside tracked competition'
+       WHERE q.completed_at IS NULL
+         AND NOT (
+           EXISTS (
+             SELECT 1 FROM match_predictions p
+              WHERE p.fixture_id = q.fixture_id AND p.league_id = ANY($1::int[])
+           ) OR EXISTS (
+             SELECT 1 FROM prediction_audit_records a
+              WHERE a.fixture_id = q.fixture_id AND a.league_id = ANY($1::int[])
+           )
+         )
+    `, [trackedLeagueIds]);
     await pool.query(`
       INSERT INTO player_stats_recovery_queue (fixture_id)
       SELECT mo.fixture_id
         FROM match_outcomes mo
         LEFT JOIN player_match_stats pms ON pms.fixture_id = mo.fixture_id
        WHERE mo.recorded_at >= NOW() - INTERVAL '14 days'
+         AND (
+           EXISTS (
+             SELECT 1 FROM match_predictions p
+              WHERE p.fixture_id = mo.fixture_id AND p.league_id = ANY($1::int[])
+           ) OR EXISTS (
+             SELECT 1 FROM prediction_audit_records a
+              WHERE a.fixture_id = mo.fixture_id AND a.league_id = ANY($1::int[])
+           )
+         )
        GROUP BY mo.fixture_id
       HAVING COUNT(pms.id) < 14 OR COUNT(DISTINCT pms.team_id) < 2
       ON CONFLICT (fixture_id) DO NOTHING
-    `);
+    `, [trackedLeagueIds]);
     const playerRetryRows = await pool.query<{ fixture_id: number; attempts: number }>(`
       SELECT fixture_id, attempts
         FROM player_stats_recovery_queue
@@ -282,6 +307,31 @@ export async function runFinishedSettlement() {
       ...playerRetryRows.rows.map((row) => Number(row.fixture_id)),
     ])];
     const matches = await getMatchesByIds(fixtureIds);
+    const returnedFixtureIds = new Set(matches.map((match) => match.id));
+
+    const deferPlayerRecovery = async (fixtureId: number, attempts: number, reason: string) => {
+      const delayMs = Math.min(24 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(attempts, 7));
+      await pool.query(
+        `UPDATE player_stats_recovery_queue
+            SET attempts = attempts + 1,
+                completed_at = NULL,
+                last_attempt_at = NOW(),
+                next_retry_at = $2,
+                last_error = $3
+          WHERE fixture_id = $1`,
+        [fixtureId, new Date(Date.now() + delayMs), reason],
+      );
+      playerDeferred++;
+    };
+
+    // Provider omissions must advance their retry schedule. Otherwise the same
+    // oldest five rows remain due forever and starve every fixture behind them.
+    for (const row of playerRetryRows.rows) {
+      const fixtureId = Number(row.fixture_id);
+      if (!returnedFixtureIds.has(fixtureId)) {
+        await deferPlayerRecovery(fixtureId, Number(row.attempts), "provider omitted fixture");
+      }
+    }
 
     for (const match of matches) {
       if (match.status === "cancelled") {
@@ -304,25 +354,60 @@ export async function runFinishedSettlement() {
         );
         continue;
       }
-      if (match.status !== "finished") continue;
+      if (match.status !== "finished") {
+        const attempts = playerRetryByFixture.get(match.id);
+        if (attempts != null) {
+          await deferPlayerRecovery(match.id, attempts, `fixture not terminal: ${match.status}`);
+        }
+        continue;
+      }
 
       // ── FIXED: Only process tracked leagues ────────────────────────────────
-      if (!isTrackedLeague(match.league_id)) continue;
+      if (!isTrackedLeague(match.league_id)) {
+        await pool.query(
+          `UPDATE player_stats_recovery_queue
+              SET completed_at = COALESCE(completed_at, NOW()), last_error = 'untracked league'
+            WHERE fixture_id = $1`,
+          [match.id],
+        );
+        continue;
+      }
 
       checked++;
       const home = match.score?.home;
       const away = match.score?.away;
-      if (home == null || away == null) continue;
+      if (home == null || away == null) {
+        const attempts = playerRetryByFixture.get(match.id);
+        if (attempts != null) await deferPlayerRecovery(match.id, attempts, "finished fixture has no score");
+        continue;
+      }
 
       const outcomeStatus = await saveOutcomeWithStatus({ fixtureId: match.id, scoreHome: home, scoreAway: away });
-      if (!outcomeStatus.saved) continue;
+      if (!outcomeStatus.saved) {
+        const attempts = playerRetryByFixture.get(match.id);
+        if (attempts != null) await deferPlayerRecovery(match.id, attempts, "outcome persistence failed");
+        continue;
+      }
       if (outcomeStatus.changed) settled++;
 
-      await pool.query(
-        `INSERT INTO player_stats_recovery_queue (fixture_id)
-         VALUES ($1) ON CONFLICT (fixture_id) DO NOTHING`,
-        [match.id],
-      );
+      if (outcomeStatus.changed) {
+        // A newly stored or provider-corrected result invalidates any previous
+        // completion marker and must be eligible for fresh player enrichment.
+        await pool.query(
+          `INSERT INTO player_stats_recovery_queue (fixture_id)
+           VALUES ($1)
+           ON CONFLICT (fixture_id) DO UPDATE
+             SET attempts = 0, next_retry_at = NOW(), completed_at = NULL,
+                 last_attempt_at = NULL, last_error = NULL`,
+          [match.id],
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO player_stats_recovery_queue (fixture_id)
+           VALUES ($1) ON CONFLICT (fixture_id) DO NOTHING`,
+          [match.id],
+        );
+      }
 
       const homeResult: "win" | "draw" | "loss" = home > away ? "win" : home < away ? "loss" : "draw";
       const shouldRecoverPlayers = outcomeStatus.changed || playerRetryByFixture.has(match.id);
@@ -355,17 +440,10 @@ export async function runFinishedSettlement() {
             [match.id],
           );
         } else {
-          playerDeferred++;
-          const attempts = playerRetryByFixture.get(match.id) ?? 0;
-          const delayMs = Math.min(24 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(attempts, 7));
-          await pool.query(
-            `UPDATE player_stats_recovery_queue
-                SET attempts = attempts + 1,
-                    last_attempt_at = NOW(),
-                    next_retry_at = $2,
-                    last_error = $3
-              WHERE fixture_id = $1`,
-            [match.id, new Date(Date.now() + delayMs), playerError ?? "provider returned incomplete player coverage"],
+          await deferPlayerRecovery(
+            match.id,
+            outcomeStatus.changed ? 0 : (playerRetryByFixture.get(match.id) ?? 0),
+            playerError ?? "provider returned incomplete player coverage",
           );
         }
       }
