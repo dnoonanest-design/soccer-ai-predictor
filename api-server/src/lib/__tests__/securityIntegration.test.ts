@@ -47,6 +47,10 @@ describe("application security boundary", () => {
   it("blocks privileged mutations without the configured admin key", async () => {
     for (const path of [
       "/api/ai/run-learning-cycle",
+      "/api/ai/generate-biweekly-update",
+      "/api/background/run/recalibrate",
+      "/api/background/run/biweekly-ai-update",
+      "/api/background/run/settle",
       "/api/background/run/circumstance-analysis",
       "/api/live/alerts",
       "/api/watchlist",

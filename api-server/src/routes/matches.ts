@@ -1,6 +1,5 @@
 import { Router, type IRouter, type Response } from "express";
 import { getAllMatches, getMatchById } from "../lib/soccerService";
-import { saveOutcome } from "../lib/predictionStore";
 import { isTrackedLeague } from "../lib/leagueConfig";
 import { getMatchPresentation } from "../lib/matchPresentationService";
 import {
@@ -81,18 +80,6 @@ router.get("/matches/:match_id", async (req, res) => {
     const match = await getMatchById(id);
     if (!match || !inProductScope(match)) {
       return res.status(404).json({ error: "Match not found" });
-    }
-
-    if (
-      match.status === "finished" &&
-      match.score?.home != null &&
-      match.score?.away != null
-    ) {
-      saveOutcome({
-        fixtureId: id,
-        scoreHome: match.score.home,
-        scoreAway: match.score.away,
-      }).catch(() => {});
     }
 
     return res.json(match);

@@ -423,7 +423,10 @@ async function evaluateFixture(row: FixtureRow): Promise<Evaluation> {
             advisory_json = $7::jsonb,
             stage_json = $8::jsonb,
             last_evaluated_at = NOW(),
-            completed_at = COALESCE(completed_at, $9),
+            completed_at = CASE
+              WHEN $2 = 'completed' THEN COALESCE(completed_at, $9)
+              ELSE NULL
+            END,
             updated_at = NOW()
       WHERE fixture_id = $1`,
     [
@@ -496,10 +499,16 @@ export async function runFullMatchLifecycleReliabilityTest() {
   try {
     const enrolled = await enrollFixtures();
     const active = await pool.query(
-      `SELECT fixture_id, league_id, home_team, away_team, kickoff_at, enrolled_at, first_checkpoint
-         FROM lifecycle_reliability_fixtures
-        WHERE completed_at IS NULL
-        ORDER BY kickoff_at ASC
+      `SELECT f.fixture_id, f.league_id, f.home_team, f.away_team,
+              f.kickoff_at, f.enrolled_at, f.first_checkpoint
+         FROM lifecycle_reliability_fixtures f
+         LEFT JOIN match_outcomes o ON o.fixture_id = f.fixture_id
+        WHERE f.completed_at IS NULL
+           OR o.recorded_at > COALESCE(f.last_evaluated_at, f.enrolled_at)
+        ORDER BY CASE WHEN f.completed_at IS NULL THEN 0 ELSE 1 END,
+                 CASE WHEN f.completed_at IS NULL THEN f.kickoff_at END ASC,
+                 o.recorded_at DESC NULLS LAST,
+                 f.kickoff_at DESC
         LIMIT $1`,
       [MAX_ACTIVE_FIXTURES],
     );
@@ -598,7 +607,10 @@ export async function getFullMatchLifecycleReliabilityReport(limit = 30) {
               verdict, missing_required_json, advisory_json, stage_json,
               last_evaluated_at, completed_at
          FROM lifecycle_reliability_fixtures
-        ORDER BY CASE WHEN completed_at IS NULL THEN 0 ELSE 1 END, kickoff_at ASC
+        ORDER BY CASE WHEN completed_at IS NULL THEN 0 ELSE 1 END ASC,
+                 CASE WHEN completed_at IS NULL THEN kickoff_at END ASC,
+                 last_evaluated_at DESC NULLS LAST,
+                 kickoff_at DESC
         LIMIT $1`,
       [safeLimit],
     ),
