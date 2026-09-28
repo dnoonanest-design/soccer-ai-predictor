@@ -47,22 +47,36 @@ export async function saveOutcome(opts: {
   scoreHome: number;
   scoreAway: number;
 }): Promise<boolean> {
+  return (await saveOutcomeWithStatus(opts)).saved;
+}
+
+export async function saveOutcomeWithStatus(opts: {
+  fixtureId: number;
+  scoreHome: number;
+  scoreAway: number;
+}): Promise<{ saved: boolean; changed: boolean }> {
   const outcome =
     opts.scoreHome > opts.scoreAway ? "home"
     : opts.scoreAway > opts.scoreHome ? "away"
     : "draw";
   try {
-    await db
-      .insert(matchOutcomes)
-      .values({ fixtureId: opts.fixtureId, outcome, scoreHome: opts.scoreHome, scoreAway: opts.scoreAway })
-      .onConflictDoUpdate({
-        target: matchOutcomes.fixtureId,
-        set: { outcome, scoreHome: opts.scoreHome, scoreAway: opts.scoreAway, recordedAt: new Date() },
-      });
-    return true;
+    const result = await pool.query(
+      `INSERT INTO match_outcomes (fixture_id, outcome, score_home, score_away)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (fixture_id) DO UPDATE
+         SET outcome = EXCLUDED.outcome,
+             score_home = EXCLUDED.score_home,
+             score_away = EXCLUDED.score_away,
+             recorded_at = NOW()
+       WHERE ROW(match_outcomes.outcome, match_outcomes.score_home, match_outcomes.score_away)
+             IS DISTINCT FROM ROW(EXCLUDED.outcome, EXCLUDED.score_home, EXCLUDED.score_away)
+       RETURNING fixture_id`,
+      [opts.fixtureId, outcome, opts.scoreHome, opts.scoreAway],
+    );
+    return { saved: true, changed: (result.rowCount ?? 0) > 0 };
   } catch (err) {
     logger.warn({ err, fixtureId: opts.fixtureId }, "predictionStore: failed to save outcome");
-    return false;
+    return { saved: false, changed: false };
   }
 }
 

@@ -2,7 +2,7 @@ import { db, backgroundJobRuns, betTracker, deepMatchStats, pool, type PoolClien
 import { desc, eq, sql } from "drizzle-orm";
 import { getAllMatches, getMatchesByIds, type Match } from "./soccerService";
 import { createCanonicalPrediction } from "./canonicalPredictionService";
-import { getUnsettledPredictionFixtureIds, saveOutcome, savePrediction, getCalibrationReport } from "./predictionStore";
+import { getUnsettledPredictionFixtureIds, saveOutcomeWithStatus, savePrediction, getCalibrationReport } from "./predictionStore";
 import { runTrainingPipeline, saveLiveAlert, savePredictionSnapshot, settleTrackedBet } from "./predictionPlatformService";
 import { logger } from "./logger";
 import { analyzeCircumstanceInfluence, getCircumstanceLearningReport } from "./circumstanceLearningService";
@@ -12,6 +12,7 @@ import { collectPlayerStatsForFixture } from "./playerService.js";
 import { runBatchAIPlayerAnalysis } from "./playerAIAnalysisService.js";
 import { isTrackedLeague } from "./leagueConfig";
 import { MIN_SAMPLE_FOR_WEIGHT_UPDATE, runAdaptiveLearningCycle } from "./adaptiveLearningEngine";
+import { quarantineResultMismatches } from "./predictionAccuracyAuditService";
 
 type JobStatus = "idle" | "running" | "disabled";
 
@@ -29,8 +30,6 @@ const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(
 const TRAINING_ADVISORY_LOCK = 7_310_250_001;
 const LIVE_ADVISORY_LOCK = 7_310_250_002;
 const SETTLEMENT_ADVISORY_LOCK = 7_310_250_003;
-
-const processedFinishedFixtures = new Set<number>();
 
 let started = false;
 let liveStatus:     JobStatus = ENABLED ? "idle" : "disabled";
@@ -245,6 +244,8 @@ export async function runFinishedSettlement() {
   let checked = 0;
   let settled = 0;
   let voided = 0;
+  let playerRecovered = 0;
+  let playerDeferred = 0;
   let lockClient: PoolClient | null = null;
   try {
     lockClient = await pool.connect();
@@ -253,20 +254,33 @@ export async function runFinishedSettlement() {
     // The normal match window starts today. Resolve outstanding prediction IDs
     // directly so a late result missed before midnight is caught automatically.
     const pendingFixtureIds = await getUnsettledPredictionFixtureIds(30);
-    // A result may already be settled while its player feed was temporarily
-    // incomplete. Persistently recover those fixtures instead of relying on an
-    // in-memory retry set which disappears on restart.
-    const incompletePlayerRows = await pool.query<{ fixture_id: number }>(`
+    // Result settlement always has priority. Player-data recovery uses its own
+    // persistent, bounded queue so an unavailable player feed cannot crowd out
+    // final scores or consume the same quota every ten minutes forever.
+    await pool.query(`
+      INSERT INTO player_stats_recovery_queue (fixture_id)
       SELECT mo.fixture_id
-      FROM match_outcomes mo
-      LEFT JOIN player_match_stats pms ON pms.fixture_id = mo.fixture_id
-      WHERE mo.recorded_at >= NOW() - INTERVAL '14 days'
-      GROUP BY mo.fixture_id
+        FROM match_outcomes mo
+        LEFT JOIN player_match_stats pms ON pms.fixture_id = mo.fixture_id
+       WHERE mo.recorded_at >= NOW() - INTERVAL '14 days'
+       GROUP BY mo.fixture_id
       HAVING COUNT(pms.id) < 14 OR COUNT(DISTINCT pms.team_id) < 2
-      ORDER BY MAX(mo.recorded_at) DESC
-      LIMIT 50
+      ON CONFLICT (fixture_id) DO NOTHING
     `);
-    const fixtureIds = [...new Set([...pendingFixtureIds, ...incompletePlayerRows.rows.map((row) => row.fixture_id)])];
+    const playerRetryRows = await pool.query<{ fixture_id: number; attempts: number }>(`
+      SELECT fixture_id, attempts
+        FROM player_stats_recovery_queue
+       WHERE completed_at IS NULL AND next_retry_at <= NOW()
+       ORDER BY next_retry_at ASC, fixture_id ASC
+       LIMIT 5
+    `);
+    const playerRetryByFixture = new Map(
+      playerRetryRows.rows.map((row) => [Number(row.fixture_id), Number(row.attempts)]),
+    );
+    const fixtureIds = [...new Set([
+      ...pendingFixtureIds,
+      ...playerRetryRows.rows.map((row) => Number(row.fixture_id)),
+    ])];
     const matches = await getMatchesByIds(fixtureIds);
 
     for (const match of matches) {
@@ -282,11 +296,15 @@ export async function runFinishedSettlement() {
           [match.id, `provider:${match.status_detail}`],
         );
         voided += result.rowCount ?? 0;
-        processedFinishedFixtures.add(match.id);
+        await pool.query(
+          `UPDATE player_stats_recovery_queue
+              SET completed_at = COALESCE(completed_at, NOW()), last_error = 'fixture cancelled'
+            WHERE fixture_id = $1`,
+          [match.id],
+        );
         continue;
       }
       if (match.status !== "finished") continue;
-      if (processedFinishedFixtures.has(match.id)) continue;
 
       // ── FIXED: Only process tracked leagues ────────────────────────────────
       if (!isTrackedLeague(match.league_id)) continue;
@@ -296,26 +314,60 @@ export async function runFinishedSettlement() {
       const away = match.score?.away;
       if (home == null || away == null) continue;
 
-      const outcomeSaved = await saveOutcome({ fixtureId: match.id, scoreHome: home, scoreAway: away });
-      if (!outcomeSaved) continue;
+      const outcomeStatus = await saveOutcomeWithStatus({ fixtureId: match.id, scoreHome: home, scoreAway: away });
+      if (!outcomeStatus.saved) continue;
+      if (outcomeStatus.changed) settled++;
+
+      await pool.query(
+        `INSERT INTO player_stats_recovery_queue (fixture_id)
+         VALUES ($1) ON CONFLICT (fixture_id) DO NOTHING`,
+        [match.id],
+      );
 
       const homeResult: "win" | "draw" | "loss" = home > away ? "win" : home < away ? "loss" : "draw";
-      let playerStatsComplete = false;
-      try {
-        playerStatsComplete = await collectPlayerStatsForFixture(
-          match.id,
-          match.league_id ?? 0,
-          new Date(match.kickoff ?? Date.now()),
-          match.home_team?.id ?? 0,
-          match.away_team?.id ?? 0,
-          homeResult,
-          home,
-          away
-        );
-        // Throttle between fixtures to avoid rate limit bursts
-        await new Promise(r => setTimeout(r, 2000));
-      } catch (err) {
-        logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
+      const shouldRecoverPlayers = outcomeStatus.changed || playerRetryByFixture.has(match.id);
+      if (shouldRecoverPlayers) {
+        let playerStatsComplete = false;
+        let playerError: string | null = null;
+        try {
+          playerStatsComplete = await collectPlayerStatsForFixture(
+            match.id,
+            match.league_id ?? 0,
+            new Date(match.kickoff ?? Date.now()),
+            match.home_team?.id ?? 0,
+            match.away_team?.id ?? 0,
+            homeResult,
+            home,
+            away
+          );
+          await new Promise(r => setTimeout(r, 2000));
+        } catch (err: any) {
+          playerError = String(err?.message ?? err);
+          logger.warn({ err, fixtureId: match.id }, "player stats collection failed");
+        }
+
+        if (playerStatsComplete) {
+          playerRecovered++;
+          await pool.query(
+            `UPDATE player_stats_recovery_queue
+                SET completed_at = NOW(), last_attempt_at = NOW(), last_error = NULL
+              WHERE fixture_id = $1`,
+            [match.id],
+          );
+        } else {
+          playerDeferred++;
+          const attempts = playerRetryByFixture.get(match.id) ?? 0;
+          const delayMs = Math.min(24 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(attempts, 7));
+          await pool.query(
+            `UPDATE player_stats_recovery_queue
+                SET attempts = attempts + 1,
+                    last_attempt_at = NOW(),
+                    next_retry_at = $2,
+                    last_error = $3
+              WHERE fixture_id = $1`,
+            [match.id, new Date(Date.now() + delayMs), playerError ?? "provider returned incomplete player coverage"],
+          );
+        }
       }
 
       const openBets = await db.select().from(betTracker)
@@ -334,15 +386,13 @@ export async function runFinishedSettlement() {
         await settleTrackedBet(bet.id, won ? "won" : "lost");
       }
 
-      // Incomplete player feeds remain eligible for the persistent recovery
-      // query on the next pass. Inserts/profile updates are idempotent.
-      if (playerStatsComplete) processedFinishedFixtures.add(match.id);
-      settled++;
     }
+
+    const quarantined = await quarantineResultMismatches();
 
     lastSettleRun = new Date();
     await recordJob("settle_finished", "success", checked, settled + voided);
-    return { checked, settled, voided, finishedAt: new Date() };
+    return { checked, settled, voided, quarantined, playerRecovered, playerDeferred, finishedAt: new Date() };
   } catch (err: any) {
     await recordJob("settle_finished", "error", checked, settled, String(err?.message ?? err));
     throw err;

@@ -59,7 +59,7 @@ type FutureFixture = {
   };
 };
 
-type AuditPrediction = {
+export type AuditPrediction = {
   home: number;
   draw: number;
   away: number;
@@ -68,10 +68,10 @@ type AuditPrediction = {
   homeXg: number | null;
   awayXg: number | null;
   confidence: number | null;
-  circumstanceScoreHome: number | null;
-  circumstanceScoreAway: number | null;
-  homeFormScore: number | null;
-  awayFormScore: number | null;
+  circumstanceScoreHome?: number | null;
+  circumstanceScoreAway?: number | null;
+  homeFormScore?: number | null;
+  awayFormScore?: number | null;
   dataTier: string;
 };
 
@@ -113,7 +113,7 @@ function float4(value: number) {
   return Math.fround(value);
 }
 
-function float4OrNull(value: number | null) {
+function float4OrNull(value: number | null | undefined) {
   return value == null ? null : Math.fround(value);
 }
 
@@ -404,10 +404,12 @@ async function existingCheckpointKeys(fixtureIds: number[]) {
   if (!fixtureIds.length) return new Set<string>();
   const result = await pool.query(
     `SELECT fixture_id, checkpoint
-       FROM prediction_audit_records
+      FROM prediction_audit_records
       WHERE fixture_id = ANY($1::int[])
         AND model_version = $2
-        AND engine_revision = $3`,
+        AND engine_revision = $3
+        AND audit_signature IS NOT NULL
+        AND signature_version IN ('hmac-sha256-v3', 'sha256-dev-v3')`,
     [fixtureIds, MODEL_VERSION, ENGINE_REVISION],
   );
   return new Set(
@@ -417,7 +419,12 @@ async function existingCheckpointKeys(fixtureIds: number[]) {
   );
 }
 
-async function insertAuditRecord(
+/**
+ * The single write path for prediction audit checkpoints. Every producer,
+ * including the early future-baseline worker, must use this function so a row
+ * cannot be inserted without its V3 seal.
+ */
+export async function insertSignedAuditRecord(
   match: Match,
   phase: "prematch" | "live",
   checkpoint: string,
@@ -494,11 +501,27 @@ async function insertAuditRecord(
         stored.awayFormScore,
       ],
     );
+    let inserted = result.rows[0];
     if ((result.rowCount ?? 0) === 0) {
-      await client.query("COMMIT");
-      return false;
+      // Releases before this shared writer inserted future-baseline rows
+      // without signing them. Repair only the exact conflicting, unsealed row;
+      // its prediction payload remains unchanged and is signed as stored.
+      const existing = await client.query(
+        `SELECT * FROM prediction_audit_records
+          WHERE fixture_id = $1 AND checkpoint = $2
+            AND model_version = $3 AND engine_revision = $4
+            AND audit_signature IS NULL
+            AND phase = $5
+            AND (phase <> 'prematch' OR captured_at < kickoff_at)
+          FOR UPDATE`,
+        [match.id, checkpoint, MODEL_VERSION, ENGINE_REVISION, phase],
+      );
+      inserted = existing.rows[0];
+      if (!inserted) {
+        await client.query("COMMIT");
+        return false;
+      }
     }
-    const inserted = result.rows[0];
     const auditSignature = signPayload(predictionSignaturePayload(inserted));
     const seal = await client.query(
       `UPDATE prediction_audit_records
@@ -552,7 +575,7 @@ async function capturePrematchCheckpoints(now: Date) {
       );
       if (
         prediction &&
-        (await insertAuditRecord(match, "prematch", checkpoint, prediction))
+        (await insertSignedAuditRecord(match, "prematch", checkpoint, prediction))
       ) {
         captured++;
       }
@@ -598,7 +621,7 @@ async function captureLiveCheckpoints() {
       const prediction = await computeAuditPrediction(match, true);
       if (
         prediction &&
-        (await insertAuditRecord(match, "live", checkpoint, prediction))
+        (await insertSignedAuditRecord(match, "live", checkpoint, prediction))
       ) {
         captured++;
       }
@@ -613,7 +636,27 @@ async function captureLiveCheckpoints() {
   return { candidates: due.length, captured, errors };
 }
 
+/** Preserve corrected-provider history without allowing an obsolete result to
+ * poison every verified row. The signed record remains append-only and visible,
+ * but is excluded from serving, metrics and learning. */
+export async function quarantineResultMismatches() {
+  const result = await pool.query(
+    `UPDATE prediction_audit_records a
+        SET voided_at = COALESCE(a.voided_at, NOW()),
+            void_reason = COALESCE(a.void_reason, 'provider-result-correction')
+       FROM match_outcomes o
+      WHERE o.fixture_id = a.fixture_id
+        AND a.settled_at IS NOT NULL
+        AND a.voided_at IS NULL
+        AND ROW(a.actual_outcome, a.score_home, a.score_away)
+            IS DISTINCT FROM ROW(o.outcome, o.score_home, o.score_away)`,
+  );
+  if ((result.rowCount ?? 0) > 0) integrityCache = null;
+  return result.rowCount ?? 0;
+}
+
 export async function settlePredictionAuditRecords() {
+  await quarantineResultMismatches();
   const pending = await pool.query(
     `SELECT a.id, a.home_win_prob, a.draw_prob, a.away_win_prob,
             a.over25_prob, a.btts_prob, a.predicted_outcome,
@@ -829,6 +872,7 @@ async function verifyPredictionAuditIntegrityUncached() {
   let latePrematch = 0;
   let invalidProbability = 0;
   let resultMismatch = 0;
+  let quarantined = 0;
 
   for (const row of result.rows) {
     if (!row.audit_signature) {
@@ -864,8 +908,9 @@ async function verifyPredictionAuditIntegrityUncached() {
       (row.kickoff_at != null &&
         new Date(row.captured_at).getTime() <
           new Date(row.kickoff_at).getTime());
+    const rowQuarantined = row.voided_at != null;
     const resultMatchesSource =
-      row.settled_at == null ||
+      rowQuarantined || row.settled_at == null ||
       (row.current_outcome === row.actual_outcome &&
         Number(row.current_score_home) === Number(row.score_home) &&
         Number(row.current_score_away) === Number(row.score_away));
@@ -874,14 +919,16 @@ async function verifyPredictionAuditIntegrityUncached() {
     if (!checkpointValid) latePrematch++;
     if (!resultMatchesSource) resultMismatch++;
     const cryptographicallyCertified = AUDIT_SIGNING_KEY != null;
-    if (
+    const recordValid =
       cryptographicallyCertified &&
       predictionValid &&
       settlementValid &&
       probabilitiesValid &&
       checkpointValid &&
-      resultMatchesSource
-    ) {
+      resultMatchesSource;
+    if (recordValid && rowQuarantined) {
+      quarantined++;
+    } else if (recordValid) {
       validIds.push(Number(row.id));
     } else if (cryptographicallyCertified) {
       invalid++;
@@ -906,15 +953,16 @@ async function verifyPredictionAuditIntegrityUncached() {
     latePrematch,
     invalidProbability,
     resultMismatch,
+    quarantined,
     currentSigned,
     currentSealCoveragePct: currentSigned
-      ? Math.round((validIds.length / currentSigned) * 10_000) / 100
+      ? Math.round(((validIds.length + quarantined) / currentSigned) * 10_000) / 100
       : 0,
     legacyArchiveCoveragePct: checked
-      ? Math.round((validIds.length / checked) * 10_000) / 100
+      ? Math.round(((validIds.length + quarantined) / checked) * 10_000) / 100
       : 0,
     coveragePct: checked
-      ? Math.round((validIds.length / checked) * 10_000) / 100
+      ? Math.round(((validIds.length + quarantined) / checked) * 10_000) / 100
       : 0,
     verifiedAt: new Date().toISOString(),
     validIds,

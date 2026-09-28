@@ -12,6 +12,7 @@ import {
   getCoreAiDataPolicyReport,
 } from "./aiDataProvenancePolicy";
 import { toUnitProbability } from "./probabilityScale";
+import { MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
 
 type Outcome = "home" | "draw" | "away";
 type FeatureVector = Record<string, number>;
@@ -410,12 +411,25 @@ export async function getAiAwarenessReport() {
       .limit(5),
   ]);
   const servingModel = models.find(
-    (model: any) => model.active && model.modelType === "adaptive-chronological-calibrator",
+    (model: any) => model.active &&
+      model.modelType === "adaptive-chronological-calibrator" &&
+      Math.max(
+        Number(model.trainingRows ?? 0),
+        Number(model.weightsJson?.sampleSize ?? 0),
+      ) >= MIN_SAMPLE_FOR_WEIGHT_UPDATE,
   ) ?? null;
   return {
     servingRole: "validated-calibration-only",
     activeModel: servingModel,
     latestModel: models[0] ?? null,
+    minimumPromotionSamples: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+    staleActiveModelsIgnored: models.filter(
+      (model: any) => model.active && model.modelType === "adaptive-chronological-calibrator" &&
+        Math.max(
+          Number(model.trainingRows ?? 0),
+          Number(model.weightsJson?.sampleSize ?? 0),
+        ) < MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+    ).length,
     legacyActiveModelsIgnored: models.filter(
       (model: any) => model.active && model.modelType !== "adaptive-chronological-calibrator",
     ).length,

@@ -7,6 +7,7 @@ import {
   REQUIRED_PREMATCH_FREEZE_MIGRATION,
   REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
   REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
+  REQUIRED_PREDICTION_RECOVERY_MIGRATION,
 } from "../databaseReadinessService";
 
 describe("database readiness", () => {
@@ -28,6 +29,7 @@ describe("database readiness", () => {
         REQUIRED_PREMATCH_FREEZE_MIGRATION,
         REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
         REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
+        REQUIRED_PREDICTION_RECOVERY_MIGRATION,
       ]);
       return {
         rows: [{
@@ -36,9 +38,11 @@ describe("database readiness", () => {
           prematch_freeze_migration_applied: true,
           wall_clock_freeze_migration_applied: true,
           safe_model_registry_migration_applied: true,
+          prediction_recovery_migration_applied: true,
           player_profiles_present: true,
           player_match_stats_present: true,
           player_ai_signals_present: true,
+          player_stats_recovery_queue_present: true,
           audit_boundary_trigger_present: true,
           prematch_update_trigger_present: true,
           prematch_insert_trigger_present: true,
@@ -54,6 +58,7 @@ describe("database readiness", () => {
       playerTablesPresent: true,
       auditBoundaryTriggerPresent: true,
       prematchFreezeTriggersPresent: true,
+      predictionRecoveryReady: true,
       auditSigningConfigured: true,
     });
   });
@@ -66,9 +71,11 @@ describe("database readiness", () => {
         prematch_freeze_migration_applied: false,
         wall_clock_freeze_migration_applied: false,
         safe_model_registry_migration_applied: false,
+        prediction_recovery_migration_applied: false,
         player_profiles_present: true,
         player_match_stats_present: false,
         player_ai_signals_present: true,
+        player_stats_recovery_queue_present: false,
         audit_boundary_trigger_present: true,
         prematch_update_trigger_present: false,
         prematch_insert_trigger_present: false,
@@ -97,12 +104,14 @@ describe("database readiness", () => {
         REQUIRED_PREMATCH_FREEZE_MIGRATION,
         REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
         REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
+        REQUIRED_PREDICTION_RECOVERY_MIGRATION,
       ],
       migrationApplied: false,
       migrationsApplied: false,
       playerTablesPresent: false,
       auditBoundaryTriggerPresent: false,
       prematchFreezeTriggersPresent: false,
+      predictionRecoveryReady: false,
       auditSigningRequired: false,
       auditSigningConfigured: false,
     });
@@ -116,9 +125,11 @@ describe("database readiness", () => {
         prematch_freeze_migration_applied: true,
         wall_clock_freeze_migration_applied: true,
         safe_model_registry_migration_applied: true,
+        prediction_recovery_migration_applied: true,
         player_profiles_present: true,
         player_match_stats_present: true,
         player_ai_signals_present: true,
+        player_stats_recovery_queue_present: true,
         audit_boundary_trigger_present: true,
         prematch_update_trigger_present: true,
         prematch_insert_trigger_present: true,

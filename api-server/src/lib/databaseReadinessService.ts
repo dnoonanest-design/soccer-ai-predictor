@@ -5,6 +5,7 @@ export const REQUIRED_AUDIT_BOUNDARY_MIGRATION = "013_reject_late_prematch_audit
 export const REQUIRED_PREMATCH_FREEZE_MIGRATION = "014_freeze_prematch_predictions.sql";
 export const REQUIRED_WALL_CLOCK_FREEZE_MIGRATION = "015_use_wall_clock_for_prematch_freeze.sql";
 export const REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION = "016_deactivate_unvalidated_ai_models.sql";
+export const REQUIRED_PREDICTION_RECOVERY_MIGRATION = "018_prediction_recovery_guards.sql";
 
 export interface DatabaseReadiness {
   ready: boolean;
@@ -18,6 +19,7 @@ export interface DatabaseReadiness {
   playerTablesPresent: boolean;
   auditBoundaryTriggerPresent: boolean;
   prematchFreezeTriggersPresent: boolean;
+  predictionRecoveryReady: boolean;
   auditSigningRequired: boolean;
   auditSigningConfigured: boolean;
 }
@@ -29,9 +31,11 @@ type QueryResult = {
     prematch_freeze_migration_applied: boolean;
     wall_clock_freeze_migration_applied: boolean;
     safe_model_registry_migration_applied: boolean;
+    prediction_recovery_migration_applied: boolean;
     player_profiles_present: boolean;
     player_match_stats_present: boolean;
     player_ai_signals_present: boolean;
+    player_stats_recovery_queue_present: boolean;
     audit_boundary_trigger_present: boolean;
     prematch_update_trigger_present: boolean;
     prematch_insert_trigger_present: boolean;
@@ -75,6 +79,7 @@ export async function getDatabaseReadiness(
     REQUIRED_PREMATCH_FREEZE_MIGRATION,
     REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
     REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
+    REQUIRED_PREDICTION_RECOVERY_MIGRATION,
   ];
   const auditSigningRequired = options.production ?? process.env.NODE_ENV === "production";
   const configuredSigningKey = Object.prototype.hasOwnProperty.call(options, "auditSigningKey")
@@ -93,6 +98,7 @@ export async function getDatabaseReadiness(
     playerTablesPresent: false,
     auditBoundaryTriggerPresent: false,
     prematchFreezeTriggersPresent: false,
+    predictionRecoveryReady: false,
     auditSigningRequired,
     auditSigningConfigured,
   };
@@ -117,9 +123,13 @@ export async function getDatabaseReadiness(
         EXISTS (
           SELECT 1 FROM schema_migrations WHERE filename = $5
         ) AS safe_model_registry_migration_applied,
+        EXISTS (
+          SELECT 1 FROM schema_migrations WHERE filename = $6
+        ) AS prediction_recovery_migration_applied,
         to_regclass('public.player_profiles') IS NOT NULL AS player_profiles_present,
         to_regclass('public.player_match_stats') IS NOT NULL AS player_match_stats_present,
         to_regclass('public.player_ai_signals') IS NOT NULL AS player_ai_signals_present,
+        to_regclass('public.player_stats_recovery_queue') IS NOT NULL AS player_stats_recovery_queue_present,
         EXISTS (
           SELECT 1 FROM pg_trigger
            WHERE tgname = 'trg_reject_late_prematch_audit' AND NOT tgisinternal
@@ -145,17 +155,19 @@ export async function getDatabaseReadiness(
       row?.audit_boundary_migration_applied &&
       row?.prematch_freeze_migration_applied &&
       row?.wall_clock_freeze_migration_applied &&
-      row?.safe_model_registry_migration_applied,
+      row?.safe_model_registry_migration_applied &&
+      row?.prediction_recovery_migration_applied,
     );
     const auditBoundaryTriggerPresent = Boolean(row?.audit_boundary_trigger_present);
     const prematchFreezeTriggersPresent = Boolean(
       row?.prematch_update_trigger_present && row?.prematch_insert_trigger_present,
     );
+    const predictionRecoveryReady = Boolean(row?.player_stats_recovery_queue_present);
     const signingReady = !auditSigningRequired || auditSigningConfigured;
     return {
       ready:
         migrationsApplied && playerTablesPresent && auditBoundaryTriggerPresent &&
-        prematchFreezeTriggersPresent && signingReady,
+        prematchFreezeTriggersPresent && predictionRecoveryReady && signingReady,
       connected: true,
       ...base,
       migrationApplied,
@@ -163,6 +175,7 @@ export async function getDatabaseReadiness(
       playerTablesPresent,
       auditBoundaryTriggerPresent,
       prematchFreezeTriggersPresent,
+      predictionRecoveryReady,
     };
   } catch {
     return { ready: false, connected: false, ...base };

@@ -6,7 +6,7 @@ import {
   type LiveMatchStatsInput,
 } from "./enhancedStatsService";
 import { applyDataQualityReliability } from "./predictionDataQuality";
-import { getOfflineFallbackModel, MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
+import { getOfflineFallbackModel, MIN_SAMPLE_FOR_OFFLINE_FALLBACK } from "./adaptiveLearningEngine";
 import { collectMatchCircumstances } from "./circumstanceLearningService";
 import { logger } from "./logger";
 
@@ -128,11 +128,11 @@ function featureUsage(stats: MatchStatsResult, raw: EnhancedPrediction, live: bo
 async function buildFallbackPrediction(match: Match): Promise<CanonicalPrediction> {
   const fallback = await getOfflineFallbackModel();
   const prior = fallback.leagueOutcomePriors[match.league_id] ?? fallback.globalPriors;
-  if (fallback.sampleSize < MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
+  if (fallback.sampleSize < MIN_SAMPLE_FOR_OFFLINE_FALLBACK) {
     throw new PredictionWarmupError(
       match.id,
       fallback.sampleSize,
-      MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+      MIN_SAMPLE_FOR_OFFLINE_FALLBACK,
     );
   }
   const probs = normaliseThreeWayPercent(prior.home, prior.draw, prior.away);

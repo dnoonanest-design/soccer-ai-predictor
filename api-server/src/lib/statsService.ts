@@ -32,12 +32,14 @@ let coverageEvaluations = 0;
 let sparseEvaluations = 0;
 let priorSeasonRollForwardEvaluations = 0;
 let lastSparseAt: string | null = null;
+const coverageByFixture = new Map<number, { leagueId: number; sparse: boolean; prior: boolean }>();
 
 export function getStatsCoverageStatus() {
   const fallbackRate = coverageEvaluations > 0
     ? Math.round((sparseEvaluations / coverageEvaluations) * 10_000) / 100
     : 0;
   return {
+    measurement: "unique-fixture-latest-observation",
     evaluations: coverageEvaluations,
     fullCompetitionHistory: coverageEvaluations - sparseEvaluations,
     sparseFallbacks: sparseEvaluations,
@@ -58,10 +60,23 @@ export function getStatsCoverageStatus() {
   };
 }
 
-function recordStatsCoverage(leagueId: number, home: TeamStats, away: TeamStats) {
+function recordStatsCoverage(fixtureId: number, leagueId: number, home: TeamStats, away: TeamStats) {
   const sparse = home.data_source !== "competition" || away.data_source !== "competition";
   const priorSeasonRollForward =
     (home.prior_season_matches_used ?? 0) > 0 || (away.prior_season_matches_used ?? 0) > 0;
+  const previous = coverageByFixture.get(fixtureId);
+  if (previous) {
+    const previousLeague = coverageByLeague.get(previous.leagueId);
+    if (previousLeague) {
+      previousLeague.evaluations = Math.max(0, previousLeague.evaluations - 1);
+      if (previous.sparse) previousLeague.sparse = Math.max(0, previousLeague.sparse - 1);
+      if (previous.prior) previousLeague.priorSeasonRollForwards = Math.max(0, previousLeague.priorSeasonRollForwards - 1);
+    }
+    coverageEvaluations = Math.max(0, coverageEvaluations - 1);
+    if (previous.sparse) sparseEvaluations = Math.max(0, sparseEvaluations - 1);
+    if (previous.prior) priorSeasonRollForwardEvaluations = Math.max(0, priorSeasonRollForwardEvaluations - 1);
+  }
+  coverageByFixture.set(fixtureId, { leagueId, sparse, prior: priorSeasonRollForward });
   coverageEvaluations++;
   if (sparse) {
     sparseEvaluations++;
@@ -770,7 +785,7 @@ export async function getMatchStats(
   };
 
   const sparseHistory = home.data_source !== "competition" || away.data_source !== "competition";
-  recordStatsCoverage(leagueId, home, away);
+  recordStatsCoverage(fixtureId, leagueId, home, away);
 
   const previousSparseLogAt = sparseLogAt.get(fixtureId) ?? 0;
   if (sparseHistory && Date.now() - previousSparseLogAt >= SPARSE_LOG_INTERVAL_MS) {

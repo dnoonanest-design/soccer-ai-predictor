@@ -22,6 +22,8 @@ describe("AI temporal data boundary", () => {
     expect(code).toContain("c.settled_at IS NOT NULL");
     expect(code).toContain("c.actual_outcome IN ('home','draw','away')");
     expect(code).toContain("x.updated_at <= c.captured_at");
+    expect(code).toContain("if (integrity.validIds.length === 0) return []");
+    expect(code).not.toContain('integrity.status !== "verified"');
   });
 
   it("keeps similar-match memory diagnostic-only", async () => {
@@ -75,5 +77,28 @@ describe("AI temporal data boundary", () => {
     expect(memory).toContain("MIN_SAMPLE_FOR_WEIGHT_UPDATE");
     expect(memory).not.toContain("sampleSize >= 60");
     expect(memory).not.toContain("maximumBrierForPromotion: 0.24");
+  });
+
+  it("keeps fallback readiness independent from the promotion gate", async () => {
+    const adaptive = await source("../adaptiveLearningEngine.ts");
+    const canonical = await source("../canonicalPredictionService.ts");
+    expect(adaptive).toContain("MIN_SAMPLE_FOR_OFFLINE_FALLBACK = 100");
+    expect(canonical).toContain("fallback.sampleSize < MIN_SAMPLE_FOR_OFFLINE_FALLBACK");
+    expect(canonical).not.toContain("fallback.sampleSize < MIN_SAMPLE_FOR_WEIGHT_UPDATE");
+  });
+
+  it("routes future baselines through the signed transactional audit writer", async () => {
+    const baseline = await source("../futurePredictionBaselineService.ts");
+    expect(baseline).toContain("insertSignedAuditRecord");
+    expect(baseline).not.toContain("INSERT INTO prediction_audit_records");
+    expect(baseline).toContain("audit_signature IS NOT NULL");
+  });
+
+  it("separates bounded player recovery from result settlement", async () => {
+    const background = await source("../backgroundLearnerService.ts");
+    expect(background).toContain("player_stats_recovery_queue");
+    expect(background).toContain("LIMIT 5");
+    expect(background).toContain("2 ** Math.min(attempts, 7)");
+    expect(background).not.toContain("LIMIT 50\n    `);");
   });
 });

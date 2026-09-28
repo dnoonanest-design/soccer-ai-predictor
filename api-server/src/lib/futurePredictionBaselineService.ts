@@ -7,9 +7,9 @@ import {
   PredictionWarmupError,
 } from "./canonicalPredictionService";
 import { savePrediction } from "./predictionStore";
-import { getConfidenceBand, getPredictedOutcome } from "./predictionAccuracyAuditService";
+import { insertSignedAuditRecord } from "./predictionAccuracyAuditService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
-import { getOfflineFallbackModel, MIN_SAMPLE_FOR_WEIGHT_UPDATE } from "./adaptiveLearningEngine";
+import { getOfflineFallbackModel, MIN_SAMPLE_FOR_OFFLINE_FALLBACK } from "./adaptiveLearningEngine";
 
 const ENABLED = process.env.FUTURE_PREDICTION_BASELINE_ENABLED !== "false";
 const WINDOW_HOURS = clamp(Number(process.env.FUTURE_PREDICTION_BASELINE_WINDOW_HOURS ?? 192), 168, 240);
@@ -210,7 +210,9 @@ async function existingKeys(fixtureIds: number[]) {
       WHERE fixture_id = ANY($1::int[])
         AND model_version = $2
         AND engine_revision = $3
-        AND checkpoint IN ('prematch_168h','prematch_72h','prematch_48h','prematch_24h')`,
+        AND checkpoint IN ('prematch_168h','prematch_72h','prematch_48h','prematch_24h')
+        AND audit_signature IS NOT NULL
+        AND signature_version IN ('hmac-sha256-v3', 'sha256-dev-v3')`,
     [fixtureIds, MODEL_VERSION, ENGINE_REVISION],
   );
   return new Set(result.rows.map((row) => `${Number(row.fixture_id)}:${String(row.checkpoint)}`));
@@ -232,46 +234,17 @@ async function computeBaseline(match: Match): Promise<BaselinePrediction | null>
 }
 
 async function insertBaselineAudit(match: Match, checkpoint: string, prediction: BaselinePrediction) {
-  const predictedOutcome = getPredictedOutcome(prediction.home, prediction.draw, prediction.away);
-  const pickConfidence = Math.max(prediction.home, prediction.draw, prediction.away);
-  const confidenceBand = getConfidenceBand(pickConfidence);
-
-  const result = await pool.query(
-    `INSERT INTO prediction_audit_records (
-       fixture_id, league_id, home_team, away_team, kickoff_at,
-       phase, checkpoint, minute, data_tier, model_version, engine_revision,
-       home_win_prob, draw_prob, away_win_prob, over25_prob, btts_prob,
-       home_xg, away_xg, confidence, pick_confidence, confidence_band,
-       predicted_outcome
-     ) VALUES (
-       $1,$2,$3,$4,$5,'prematch',$6,NULL,$20,$7,$8,
-       $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
-     )
-     ON CONFLICT (fixture_id, checkpoint, model_version, engine_revision) DO NOTHING`,
-    [
-      match.id,
-      match.league_id ?? null,
-      match.home_team.name,
-      match.away_team.name,
-      new Date(match.kickoff),
-      checkpoint,
-      MODEL_VERSION,
-      ENGINE_REVISION,
-      prediction.home,
-      prediction.draw,
-      prediction.away,
-      prediction.over25,
-      prediction.btts,
-      prediction.homeXg,
-      prediction.awayXg,
-      prediction.confidence,
-      pickConfidence,
-      confidenceBand,
-      predictedOutcome,
-      prediction.dataTier,
-    ],
-  );
-  return (result.rowCount ?? 0) > 0;
+  return insertSignedAuditRecord(match, "prematch", checkpoint, {
+    home: prediction.home,
+    draw: prediction.draw,
+    away: prediction.away,
+    over25: prediction.over25,
+    btts: prediction.btts,
+    homeXg: prediction.homeXg,
+    awayXg: prediction.awayXg,
+    confidence: prediction.confidence,
+    dataTier: prediction.dataTier,
+  });
 }
 
 export async function runFuturePredictionBaseline(): Promise<BaselineRunResult | { skipped: true; reason: string }> {
@@ -286,10 +259,10 @@ export async function runFuturePredictionBaseline(): Promise<BaselineRunResult |
     if (fallbackModel) {
       lastWarmupObservation = {
         currentSamples: fallbackModel.sampleSize,
-        requiredSamples: MIN_SAMPLE_FOR_WEIGHT_UPDATE,
+        requiredSamples: MIN_SAMPLE_FOR_OFFLINE_FALLBACK,
         observedAt: now.toISOString(),
       };
-      if (fallbackModel.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
+      if (fallbackModel.sampleSize >= MIN_SAMPLE_FOR_OFFLINE_FALLBACK) {
         warmupDeferrals.clear();
       }
     }

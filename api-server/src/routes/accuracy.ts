@@ -36,6 +36,7 @@ export const BALANCED_RECENT_LEDGER_SQL = `
          AND kickoff_at IS NOT NULL
          AND captured_at < kickoff_at
          AND settled_at IS NOT NULL
+         AND voided_at IS NULL
     ), pending_ranked AS (
       SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
              phase, checkpoint, data_tier, model_version, engine_revision,
@@ -53,6 +54,7 @@ export const BALANCED_RECENT_LEDGER_SQL = `
          AND kickoff_at IS NOT NULL
          AND captured_at < kickoff_at
          AND settled_at IS NULL
+         AND voided_at IS NULL
          AND NOT EXISTS (
            SELECT 1
              FROM prediction_audit_records settled
@@ -61,6 +63,7 @@ export const BALANCED_RECENT_LEDGER_SQL = `
               AND settled.kickoff_at IS NOT NULL
               AND settled.captured_at < settled.kickoff_at
               AND settled.settled_at IS NOT NULL
+              AND settled.voided_at IS NULL
          )
     ), recent_settled AS (
       SELECT * FROM settled_ranked
@@ -81,29 +84,28 @@ export const BALANCED_RECENT_LEDGER_SQL = `
     ORDER BY (settled_at IS NULL), COALESCE(settled_at, captured_at) DESC
   `;
 
-async function getBalancedRecentLedger(integrityStatus: string) {
+export function auditIntegrityStatus(row: any, validIds: ReadonlySet<number>) {
+  const id = Number(row.id);
+  if (validIds.has(id)) return "verified";
+  if (row.signature_version === "hmac-sha256-v3" && row.audit_signature) return "invalid";
+  return row.audit_signature ? "legacy-signed" : "legacy-unsigned";
+}
+
+async function getBalancedRecentLedger(validIds: ReadonlySet<number>) {
   const result = await pool.query(BALANCED_RECENT_LEDGER_SQL);
 
   return result.rows.map((row: any) => {
     const { fixture_rank: _fixtureRank, ...publicRow } = row;
-    const v3Sealed =
-      row.signature_version === "hmac-sha256-v3" &&
-      Boolean(row.audit_signature) &&
-      (row.settled_at == null || Boolean(row.settlement_signature));
+    const id = Number(row.id);
     return {
       ...publicRow,
-      id: Number(row.id),
+      id,
       fixture_id: Number(row.fixture_id),
       league_id: row.league_id == null ? null : Number(row.league_id),
       pick_confidence: row.pick_confidence == null ? null : Number(row.pick_confidence),
       brier_score: row.brier_score == null ? null : Number(row.brier_score),
       log_loss: row.log_loss == null ? null : Number(row.log_loss),
-      integrity_status:
-        integrityStatus === "verified" && v3Sealed
-          ? "verified"
-          : row.audit_signature
-            ? "legacy-signed"
-            : "legacy-unsigned",
+      integrity_status: auditIntegrityStatus(row, validIds),
     };
   });
 }
@@ -127,10 +129,13 @@ router.get("/accuracy/audit", async (_req, res) => {
     // immediately instead of waiting for the next scheduled audit pass.
     await settlePredictionAuditRecords();
     const report = await getPredictionAccuracyAuditReport();
+    // getPredictionAccuracyAuditReport performs a fresh verification and
+    // refreshes the short-lived cache, so this lookup is database-free.
+    const integrity = await verifyPredictionAuditIntegrity();
 
     // The public Performance ledger is fixture-level. The underlying audit keeps
     // every checkpoint for calibration, but users should see each match once.
-    const recent = await getBalancedRecentLedger(report.integrity.status);
+    const recent = await getBalancedRecentLedger(new Set(integrity.validIds));
     return res.json({ ...report, recent });
   } catch (err) {
     logger.error({ err }, "Failed to fetch prediction accuracy audit");
