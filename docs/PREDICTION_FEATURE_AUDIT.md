@@ -39,12 +39,12 @@ accuracy.
 | Component | May change probabilities? | Safeguard |
 |---|---:|---|
 | Statistical prediction engine | Yes | Canonical pipeline and timestamp boundary |
-| Adaptive learning engine | Yes, after promotion | At least 250 settled matches, at least 50 newest chronological holdout matches, and Brier improvement of at least 0.002 |
+| Adaptive learning engine | Yes, after promotion | At least 500 settled matches, at least 100 newest chronological holdout matches, Brier improvement of at least 0.002, log-loss improvement of at least 0.001, and no material accuracy regression |
 | Circumstance learning | No direct adjustment | Diagnostic until adaptive holdout validation promotes a non-duplicative effect |
 | Similar-match memory | No | Monitoring and recommendations only |
 | Generative player AI | No | Explanation text only; computed probabilities remain deterministic |
 | Market/odds intelligence | No | Separate value/evaluation layer |
-| Offline fallback | League priors only | Requires at least 250 settled matches and is labelled low-confidence fallback |
+| Offline fallback | League priors only | Requires at least 100 settled matches and is labelled low-confidence fallback; this serving fallback does not promote or change the active model |
 
 ## Consistency guarantees
 
