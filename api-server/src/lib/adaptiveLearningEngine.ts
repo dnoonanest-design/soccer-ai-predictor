@@ -1039,7 +1039,7 @@ export async function resolveImprovementQueue(): Promise<{
           const result = await learnFeatureWeights();
           if (result.improved) {
             action = `Retrained feature weights (n=${result.sampleSize}, Brier improved ${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)})`;
-            await persistLearnedWeights(result.weights, result.beforeBrier);
+            await persistLearnedWeights(result.weights, result);
           } else {
             action = `Retraining attempted but did not improve Brier (${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)}, n=${result.sampleSize}). Queued for review.`;
             actions.push(action);
@@ -1055,7 +1055,7 @@ export async function resolveImprovementQueue(): Promise<{
             actions.push(action);
             continue;
           }
-          await persistLearnedWeights(result.weights, result.beforeBrier);
+          await persistLearnedWeights(result.weights, result);
           action = `Validated draw recalibration (${result.beforeBrier.toFixed(4)} → ${result.afterBrier.toFixed(4)}).`;
           break;
         }
@@ -1127,7 +1127,20 @@ export async function resolveImprovementQueue(): Promise<{
 
 // ─── Persist learned weights to DB ───────────────────────────────────────────
 
-async function persistLearnedWeights(weights: LearnedFactorWeights, beforeBrier: number): Promise<void> {
+type PromotionMetrics = {
+  beforeBrier: number;
+  afterBrier: number;
+  beforeLogLoss: number;
+  afterLogLoss: number;
+  beforeAccuracy: number;
+  afterAccuracy: number;
+  sampleSize: number;
+};
+
+async function persistLearnedWeights(
+  weights: LearnedFactorWeights,
+  metrics: PromotionMetrics,
+): Promise<void> {
   const existingRuns = await db.select({ weightsJson: modelTrainingRuns.weightsJson })
     .from(modelTrainingRuns)
     .orderBy(desc(modelTrainingRuns.createdAt))
@@ -1152,7 +1165,7 @@ async function persistLearnedWeights(weights: LearnedFactorWeights, beforeBrier:
     brierScore:   weights.holdoutBrierScore,
     roiPct:       null,
     weightsJson:  JSON.stringify(merged),
-    notes:        `Adaptive learning run. Brier: ${beforeBrier.toFixed(4)} → ${weights.holdoutBrierScore.toFixed(4)}.` +
+    notes:        `Adaptive learning run. Brier: ${metrics.beforeBrier.toFixed(4)} → ${weights.holdoutBrierScore.toFixed(4)}.` +
                   ` drawNudge=${weights.drawNudgeWeight}, formScale=${weights.formFactorScale}, injuryScale=${weights.injuryFactorScale}.`,
   });
 
@@ -1166,10 +1179,16 @@ async function persistLearnedWeights(weights: LearnedFactorWeights, beforeBrier:
     featureSetJson: ["pre_kickoff_probabilities", "league_priors", "draw_calibration"],
     weightsJson: weights as any,
     metricsJson: {
-      metricDefinition: "multiclass_brier_sum",
-      beforeBrier,
+      metricDefinition: "multi_metric_chronological_holdout",
+      beforeBrier: metrics.beforeBrier,
       holdoutBrier: weights.holdoutBrierScore,
+      beforeLogLoss: metrics.beforeLogLoss,
+      holdoutLogLoss: metrics.afterLogLoss,
+      beforeAccuracy: metrics.beforeAccuracy,
+      holdoutAccuracy: metrics.afterAccuracy,
+      holdoutRows: Math.floor(metrics.sampleSize * 0.2),
       chronologicalHoldout: true,
+      promotionPolicyVersion: "v2-500-100-multimetric",
     } as any,
     trainingRows: Math.max(0, weights.sampleSize - Math.floor(weights.sampleSize * 0.2)),
     active: true,
@@ -1396,7 +1415,7 @@ export async function runAdaptiveLearningCycle(): Promise<{
   // Step 1+2: Feature weights
   const weightResult = await learnFeatureWeights();
   if (weightResult.improved && weightResult.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
-    await persistLearnedWeights(weightResult.weights, weightResult.beforeBrier);
+    await persistLearnedWeights(weightResult.weights, weightResult);
   } else if (weightResult.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE) {
     await persistShadowChallenger(weightResult.weights, {
       beforeBrier: weightResult.beforeBrier,

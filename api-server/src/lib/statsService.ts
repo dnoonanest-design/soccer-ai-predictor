@@ -6,6 +6,7 @@ import {
   manchesterRulePerformanceWeight,
 } from "./competitionStrength";
 import { configuredFootballSeason } from "./season";
+import { getTrackedCompetition } from "./leagueConfig";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -38,23 +39,45 @@ export function getStatsCoverageStatus() {
   const fallbackRate = coverageEvaluations > 0
     ? Math.round((sparseEvaluations / coverageEvaluations) * 10_000) / 100
     : 0;
+  const sparseFixtures = Array.from(coverageByFixture.values()).filter((value) => value.sparse);
+  const expectedCupFallbacks = sparseFixtures.filter(
+    (value) => getTrackedCompetition(value.leagueId)?.kind === "cup",
+  ).length;
+  const actionableSparseFallbacks = sparseFixtures.length - expectedCupFallbacks;
   return {
     measurement: "unique-fixture-latest-observation",
     evaluations: coverageEvaluations,
     fullCompetitionHistory: coverageEvaluations - sparseEvaluations,
     sparseFallbacks: sparseEvaluations,
     sparseFallbackRatePercent: fallbackRate,
+    expectedCupFallbacks,
+    actionableSparseFallbacks,
+    actionableSparseRatePercent: coverageEvaluations > 0
+      ? Math.round((actionableSparseFallbacks / coverageEvaluations) * 10_000) / 100
+      : 0,
     priorSeasonRollForwards: priorSeasonRollForwardEvaluations,
     lastSparseAt,
     minimumCompetitionMatches: MIN_COMPETITION_SAMPLE,
     leagues: Array.from(coverageByLeague.entries())
-      .map(([leagueId, value]) => ({
-        leagueId,
-        ...value,
-        sparseRatePercent: value.evaluations > 0
+      .map(([leagueId, value]) => {
+        const competition = getTrackedCompetition(leagueId);
+        const sparseRatePercent = value.evaluations > 0
           ? Math.round((value.sparse / value.evaluations) * 10_000) / 100
-          : 0,
-      }))
+          : 0;
+        return {
+          leagueId,
+          competition: competition?.name ?? `League ${leagueId}`,
+          competitionKind: competition?.kind ?? "unknown",
+          country: competition?.country ?? null,
+          ...value,
+          sparseRatePercent,
+          classification: value.sparse === 0
+            ? "full-competition-history"
+            : competition?.kind === "cup"
+              ? "expected-cup-fallback"
+              : "actionable-coverage-gap",
+        };
+      })
       .sort((a, b) => b.sparse - a.sparse)
       .slice(0, 20),
   };
