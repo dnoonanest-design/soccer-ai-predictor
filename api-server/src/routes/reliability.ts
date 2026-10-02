@@ -6,11 +6,22 @@ import {
   getFullMatchLifecycleReliabilityStatus,
   runFullMatchLifecycleReliabilityTest,
 } from "../lib/fullMatchLifecycleReliabilityService";
+import { getProductionAcceptanceReport } from "../lib/productionAcceptanceService";
 
 const router = Router();
 
 router.get("/reliability/full-match/status", (_req, res) => {
   return res.json(getFullMatchLifecycleReliabilityStatus());
+});
+
+router.get("/reliability/acceptance", async (_req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    return res.json(await getProductionAcceptanceReport());
+  } catch (err) {
+    logger.error({ err }, "production acceptance report failed");
+    return res.status(500).json({ error: "Failed to fetch production acceptance report" });
+  }
 });
 
 router.get("/reliability/full-match", async (req, res) => {

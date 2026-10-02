@@ -90,10 +90,14 @@ type SamplerResult = {
   finishedAt: string;
   fixturesInWindow: number;
   fixturesDue: number;
+  fixturesEligibleForOdds: number;
+  fixturesWithoutSportKey: number;
   sportKeysDue: number;
   oddsCalls: number;
   observations: number;
   fixturesCaptured: number;
+  fixtureCoverageRatePercent: number;
+  missingMarketRatePercent: number;
   dailyOddsCallsUsed: number;
   dailyOddsCallLimit: number;
   budgetExhausted: boolean;
@@ -192,6 +196,8 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
   let fixturesInWindow = 0;
   let fixturesDue = 0;
   let sportKeysDue = 0;
+  let fixturesEligibleForOdds = 0;
+  let fixturesWithoutSportKey = 0;
   let oddsCalls = 0;
   let observations = 0;
   let capturedFixtureCount = 0;
@@ -208,6 +214,8 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
         startedAt,
         fixturesInWindow,
         fixturesDue: 0,
+        fixturesEligibleForOdds: 0,
+        fixturesWithoutSportKey: 0,
         sportKeysDue: 0,
         oddsCalls: 0,
         observations: 0,
@@ -232,6 +240,9 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
     });
 
     fixturesDue = dueFixtures.length;
+    fixturesWithoutSportKey = dueFixtures.filter(
+      (fixture) => !getOddsSportKeyForLeague(fixture.league.id),
+    ).length;
 
     const bySportKey = new Map<string, FutureFixture[]>();
     for (const fixture of dueFixtures) {
@@ -264,6 +275,10 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       });
 
     sportKeysDue = groups.length;
+    fixturesEligibleForOdds = groups.reduce(
+      (total, group) => total + group.fixtures.length,
+      0,
+    );
 
     const remainingDailyBudget = Math.max(
       0,
@@ -298,6 +313,8 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       startedAt,
       fixturesInWindow,
       fixturesDue,
+      fixturesEligibleForOdds,
+      fixturesWithoutSportKey,
       sportKeysDue,
       oddsCalls,
       observations,
@@ -579,6 +596,8 @@ async function finishRun(input: {
   startedAt: Date;
   fixturesInWindow: number;
   fixturesDue: number;
+  fixturesEligibleForOdds: number;
+  fixturesWithoutSportKey: number;
   sportKeysDue: number;
   oddsCalls: number;
   observations: number;
@@ -586,15 +605,24 @@ async function finishRun(input: {
   budgetExhausted: boolean;
 }): Promise<SamplerResult> {
   const finishedAt = new Date();
+  const coverageRate = input.fixturesEligibleForOdds > 0
+    ? Math.round((input.fixturesCaptured / input.fixturesEligibleForOdds) * 10_000) / 100
+    : 0;
   const result: SamplerResult = {
     startedAt: input.startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     fixturesInWindow: input.fixturesInWindow,
     fixturesDue: input.fixturesDue,
+    fixturesEligibleForOdds: input.fixturesEligibleForOdds,
+    fixturesWithoutSportKey: input.fixturesWithoutSportKey,
     sportKeysDue: input.sportKeysDue,
     oddsCalls: input.oddsCalls,
     observations: input.observations,
     fixturesCaptured: input.fixturesCaptured,
+    fixtureCoverageRatePercent: coverageRate,
+    missingMarketRatePercent: input.fixturesEligibleForOdds > 0
+      ? Math.max(0, Math.round((100 - coverageRate) * 100) / 100)
+      : 0,
     dailyOddsCallsUsed: oddsCallsToday,
     dailyOddsCallLimit: MAX_ODDS_CALLS_PER_DAY,
     budgetExhausted: input.budgetExhausted,

@@ -6,6 +6,7 @@ export const REQUIRED_PREMATCH_FREEZE_MIGRATION = "014_freeze_prematch_predictio
 export const REQUIRED_WALL_CLOCK_FREEZE_MIGRATION = "015_use_wall_clock_for_prematch_freeze.sql";
 export const REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION = "016_deactivate_unvalidated_ai_models.sql";
 export const REQUIRED_PREDICTION_RECOVERY_MIGRATION = "018_prediction_recovery_guards.sql";
+export const REQUIRED_MODEL_PROMOTION_GUARD_MIGRATION = "019_enforce_ai_model_promotion.sql";
 
 export interface DatabaseReadiness {
   ready: boolean;
@@ -20,6 +21,7 @@ export interface DatabaseReadiness {
   auditBoundaryTriggerPresent: boolean;
   prematchFreezeTriggersPresent: boolean;
   predictionRecoveryReady: boolean;
+  modelPromotionGuardPresent: boolean;
   auditSigningRequired: boolean;
   auditSigningConfigured: boolean;
 }
@@ -32,6 +34,7 @@ type QueryResult = {
     wall_clock_freeze_migration_applied: boolean;
     safe_model_registry_migration_applied: boolean;
     prediction_recovery_migration_applied: boolean;
+    model_promotion_guard_migration_applied: boolean;
     player_profiles_present: boolean;
     player_match_stats_present: boolean;
     player_ai_signals_present: boolean;
@@ -39,6 +42,7 @@ type QueryResult = {
     audit_boundary_trigger_present: boolean;
     prematch_update_trigger_present: boolean;
     prematch_insert_trigger_present: boolean;
+    model_promotion_guard_trigger_present: boolean;
   }>;
 };
 
@@ -80,6 +84,7 @@ export async function getDatabaseReadiness(
     REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
     REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
     REQUIRED_PREDICTION_RECOVERY_MIGRATION,
+    REQUIRED_MODEL_PROMOTION_GUARD_MIGRATION,
   ];
   const auditSigningRequired = options.production ?? process.env.NODE_ENV === "production";
   const configuredSigningKey = Object.prototype.hasOwnProperty.call(options, "auditSigningKey")
@@ -99,6 +104,7 @@ export async function getDatabaseReadiness(
     auditBoundaryTriggerPresent: false,
     prematchFreezeTriggersPresent: false,
     predictionRecoveryReady: false,
+    modelPromotionGuardPresent: false,
     auditSigningRequired,
     auditSigningConfigured,
   };
@@ -126,6 +132,9 @@ export async function getDatabaseReadiness(
         EXISTS (
           SELECT 1 FROM schema_migrations WHERE filename = $6
         ) AS prediction_recovery_migration_applied,
+        EXISTS (
+          SELECT 1 FROM schema_migrations WHERE filename = $7
+        ) AS model_promotion_guard_migration_applied,
         to_regclass('public.player_profiles') IS NOT NULL AS player_profiles_present,
         to_regclass('public.player_match_stats') IS NOT NULL AS player_match_stats_present,
         to_regclass('public.player_ai_signals') IS NOT NULL AS player_ai_signals_present,
@@ -141,7 +150,11 @@ export async function getDatabaseReadiness(
         EXISTS (
           SELECT 1 FROM pg_trigger
            WHERE tgname = 'trg_reject_started_prematch_prediction_insert' AND NOT tgisinternal
-        ) AS prematch_insert_trigger_present
+        ) AS prematch_insert_trigger_present,
+        EXISTS (
+          SELECT 1 FROM pg_trigger
+           WHERE tgname = 'trg_enforce_ai_model_promotion_policy' AND NOT tgisinternal
+        ) AS model_promotion_guard_trigger_present
     `, requiredMigrations);
     const row = result.rows[0];
     const playerTablesPresent = Boolean(
@@ -156,18 +169,21 @@ export async function getDatabaseReadiness(
       row?.prematch_freeze_migration_applied &&
       row?.wall_clock_freeze_migration_applied &&
       row?.safe_model_registry_migration_applied &&
-      row?.prediction_recovery_migration_applied,
+      row?.prediction_recovery_migration_applied &&
+      row?.model_promotion_guard_migration_applied,
     );
     const auditBoundaryTriggerPresent = Boolean(row?.audit_boundary_trigger_present);
     const prematchFreezeTriggersPresent = Boolean(
       row?.prematch_update_trigger_present && row?.prematch_insert_trigger_present,
     );
     const predictionRecoveryReady = Boolean(row?.player_stats_recovery_queue_present);
+    const modelPromotionGuardPresent = Boolean(row?.model_promotion_guard_trigger_present);
     const signingReady = !auditSigningRequired || auditSigningConfigured;
     return {
       ready:
         migrationsApplied && playerTablesPresent && auditBoundaryTriggerPresent &&
-        prematchFreezeTriggersPresent && predictionRecoveryReady && signingReady,
+        prematchFreezeTriggersPresent && predictionRecoveryReady &&
+        modelPromotionGuardPresent && signingReady,
       connected: true,
       ...base,
       migrationApplied,
@@ -176,6 +192,7 @@ export async function getDatabaseReadiness(
       auditBoundaryTriggerPresent,
       prematchFreezeTriggersPresent,
       predictionRecoveryReady,
+      modelPromotionGuardPresent,
     };
   } catch {
     return { ready: false, connected: false, ...base };

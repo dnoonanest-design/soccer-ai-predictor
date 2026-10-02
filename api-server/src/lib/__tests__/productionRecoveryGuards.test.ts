@@ -36,6 +36,34 @@ describe("production recovery guards", () => {
     const runner = await source("../../../../lib/db/scripts/migrate.mjs");
 
     expect(runner).toContain('\"018_prediction_recovery_guards.sql\"');
+    expect(runner).toContain('\"019_enforce_ai_model_promotion.sql\"');
+  });
+
+  it("enforces adaptive promotion gates at the database boundary", async () => {
+    const sql = await source("../../../../lib/db/019_enforce_ai_model_promotion.sql");
+    const adaptive = await source("../adaptiveLearningEngine.ts");
+
+    expect(sql).toContain("trg_enforce_ai_model_promotion_policy");
+    expect(sql).toContain("sample_size < 500");
+    expect(sql).toContain("holdout_rows < 100");
+    expect(sql).toContain("before_brier - after_brier < 0.002");
+    expect(sql).toContain("before_log_loss - after_log_loss < 0.001");
+    expect(sql).toContain("after_accuracy < before_accuracy - 0.01");
+    expect(adaptive).toContain('promotionPolicyVersion: "v2-500-100-multimetric"');
+    expect(adaptive).toContain("holdoutRows: Math.floor(metrics.sampleSize * 0.2)");
+  });
+
+  it("exposes one production acceptance report for lifecycle and market evidence", async () => {
+    const service = await source("../productionAcceptanceService.ts");
+    const route = await source("../../routes/reliability.ts");
+    const workflow = await source("../../../../.github/workflows/market-intelligence-ci.yml");
+
+    expect(service).toContain("realMatchLifecycle");
+    expect(service).toContain("missingMarketRatePercent");
+    expect(service).toContain("invalidActiveModels");
+    expect(route).toContain('/reliability/acceptance');
+    expect(workflow).toContain("needs: [build, macos-compatibility]");
+    expect(workflow).toContain("Create Railway release marker");
   });
 
   it("measures coverage by each fixture's latest observation", async () => {

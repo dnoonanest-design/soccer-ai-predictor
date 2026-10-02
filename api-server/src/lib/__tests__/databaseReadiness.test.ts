@@ -8,6 +8,7 @@ import {
   REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
   REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
   REQUIRED_PREDICTION_RECOVERY_MIGRATION,
+  REQUIRED_MODEL_PROMOTION_GUARD_MIGRATION,
 } from "../databaseReadinessService";
 
 describe("database readiness", () => {
@@ -30,6 +31,7 @@ describe("database readiness", () => {
         REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
         REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
         REQUIRED_PREDICTION_RECOVERY_MIGRATION,
+        REQUIRED_MODEL_PROMOTION_GUARD_MIGRATION,
       ]);
       return {
         rows: [{
@@ -39,6 +41,7 @@ describe("database readiness", () => {
           wall_clock_freeze_migration_applied: true,
           safe_model_registry_migration_applied: true,
           prediction_recovery_migration_applied: true,
+          model_promotion_guard_migration_applied: true,
           player_profiles_present: true,
           player_match_stats_present: true,
           player_ai_signals_present: true,
@@ -46,6 +49,7 @@ describe("database readiness", () => {
           audit_boundary_trigger_present: true,
           prematch_update_trigger_present: true,
           prematch_insert_trigger_present: true,
+          model_promotion_guard_trigger_present: true,
         }],
       };
     }, { production: true, auditSigningKey: "test-signing-key" });
@@ -59,6 +63,7 @@ describe("database readiness", () => {
       auditBoundaryTriggerPresent: true,
       prematchFreezeTriggersPresent: true,
       predictionRecoveryReady: true,
+      modelPromotionGuardPresent: true,
       auditSigningConfigured: true,
     });
   });
@@ -72,6 +77,7 @@ describe("database readiness", () => {
         wall_clock_freeze_migration_applied: false,
         safe_model_registry_migration_applied: false,
         prediction_recovery_migration_applied: false,
+        model_promotion_guard_migration_applied: false,
         player_profiles_present: true,
         player_match_stats_present: false,
         player_ai_signals_present: true,
@@ -79,6 +85,7 @@ describe("database readiness", () => {
         audit_boundary_trigger_present: true,
         prematch_update_trigger_present: false,
         prematch_insert_trigger_present: false,
+        model_promotion_guard_trigger_present: false,
       }],
     }));
 
@@ -105,6 +112,7 @@ describe("database readiness", () => {
         REQUIRED_WALL_CLOCK_FREEZE_MIGRATION,
         REQUIRED_SAFE_MODEL_REGISTRY_MIGRATION,
         REQUIRED_PREDICTION_RECOVERY_MIGRATION,
+        REQUIRED_MODEL_PROMOTION_GUARD_MIGRATION,
       ],
       migrationApplied: false,
       migrationsApplied: false,
@@ -112,6 +120,7 @@ describe("database readiness", () => {
       auditBoundaryTriggerPresent: false,
       prematchFreezeTriggersPresent: false,
       predictionRecoveryReady: false,
+      modelPromotionGuardPresent: false,
       auditSigningRequired: false,
       auditSigningConfigured: false,
     });
@@ -126,6 +135,7 @@ describe("database readiness", () => {
         wall_clock_freeze_migration_applied: true,
         safe_model_registry_migration_applied: true,
         prediction_recovery_migration_applied: true,
+        model_promotion_guard_migration_applied: true,
         player_profiles_present: true,
         player_match_stats_present: true,
         player_ai_signals_present: true,
@@ -133,6 +143,7 @@ describe("database readiness", () => {
         audit_boundary_trigger_present: true,
         prematch_update_trigger_present: true,
         prematch_insert_trigger_present: true,
+        model_promotion_guard_trigger_present: true,
       }],
     }), { production: true, auditSigningKey: null });
 
