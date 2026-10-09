@@ -31,3 +31,24 @@ export function findValueBets(
     .filter((c) => c.delta >= threshold && c.market > 0)
     .sort((a, b) => b.delta - a.delta);
 }
+
+
+export type ModelEdge = Omit<ValueBet, "history"> & {
+  modelProbability: number;
+};
+
+/** Compare prematch model probabilities with the market in percentage points. */
+export function findModelEdges(
+  market: { home_win?: number | null; draw?: number | null; away_win?: number | null },
+  model: { home_win: number; draw: number; away_win: number },
+  threshold: number,
+): ModelEdge[] {
+  return findValueBets(market, {
+    home_win_pct: model.home_win,
+    draw_pct: model.draw,
+    away_win_pct: model.away_win,
+  }, threshold).map(({ history, ...edge }) => ({
+    ...edge,
+    modelProbability: history,
+  }));
+}
