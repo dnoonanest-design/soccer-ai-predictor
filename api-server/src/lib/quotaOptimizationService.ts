@@ -144,8 +144,14 @@ export function getQuotaOptimizationStatus() {
     providerRemaining,
     providerQuotaObservedAt,
     effectiveUsedToday: used,
+    effectiveUsageSource: providerLimit != null && providerRemaining != null
+      ? "provider_rate_limit_headers"
+      : "local_process_request_count",
+    providerQuotaCreditsUsedToday: providerLimit != null && providerRemaining != null
+      ? Math.max(0, providerLimit - providerRemaining)
+      : null,
+    providerRequestsSentToday: providerCallsToday,
     utilisationPct: effectiveBudget > 0 ? round2((used / effectiveBudget) * 100) : 0,
-    providerCallsToday,
     cacheHits,
     bundleCacheHits,
     bundledProviderCalls,
