@@ -1,12 +1,9 @@
 import {
   useGetMatches,
   getGetMatchesQueryKey,
-  useGetBacktest,
-  getGetBacktestQueryKey,
   useGetXg,
   getGetXgQueryKey,
   Match,
-  BacktestScenario,
   XGPrediction,
 } from "@workspace/api-client-react";
 import { useState, useMemo } from "react";
@@ -17,7 +14,7 @@ import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays } from "lucide-r
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { decimalToFractional, findValueBets, ValueBet } from "@/lib/odds";
+import { decimalToFractional, findModelEdges, ModelEdge } from "@/lib/odds";
 
 function Tip({ children, text }: { children: React.ReactNode; text: string }) {
   return (
@@ -30,29 +27,35 @@ function Tip({ children, text }: { children: React.ReactNode; text: string }) {
   );
 }
 
-const OUTCOME_LABELS: Record<ValueBet["outcome"], string> = {
+function LeagueLogo({ src, name, className }: { src?: string | null; name: string; className: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) return <Trophy aria-label={`${name} logo unavailable`} className={`${className} text-muted-foreground`} />;
+  return <img src={src} alt={name} className={className} onError={() => setFailed(true)} />;
+}
+
+const OUTCOME_LABELS: Record<ModelEdge["outcome"], string> = {
   HOME: "HOME",
   DRAW: "DRAW",
   AWAY: "AWAY",
 };
 
-const OUTCOME_COLORS: Record<ValueBet["outcome"], string> = {
+const OUTCOME_COLORS: Record<ModelEdge["outcome"], string> = {
   HOME: "text-primary",
   DRAW: "text-yellow-400",
   AWAY: "text-chart-2",
 };
 
-function ValueBadge({ bets }: { bets: ValueBet[] }) {
+function ValueBadge({ bets }: { bets: ModelEdge[] }) {
   if (bets.length === 0) return null;
   const top = bets[0];
   return (
     <div
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-black uppercase tracking-widest bg-yellow-400/10 border border-yellow-400/30 text-yellow-400"
       data-testid="badge-value-bet"
-      title={`History says ${OUTCOME_LABELS[top.outcome]} is ${top.history.toFixed(1)}% likely vs market's ${top.market.toFixed(1)}%`}
+      title={`Prematch model estimates ${OUTCOME_LABELS[top.outcome]} at ${top.modelProbability.toFixed(1)}%; market implies ${top.market.toFixed(1)}%. This is a probability gap, not expected profit.`}
     >
       <Zap className="w-2.5 h-2.5" />
-      {OUTCOME_LABELS[top.outcome]} +{Math.round(top.delta)}%
+      {OUTCOME_LABELS[top.outcome]} +{Math.round(top.delta)} pp
     </div>
   );
 }
@@ -83,7 +86,7 @@ function MatchStatus({ status, detail, minute }: { status: string; detail: strin
   return <div className="text-primary/80 font-mono font-bold text-xs">{detail}</div>;
 }
 
-function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ValueBet[]; xg?: XGPrediction }) {
+function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdge[]; xg?: XGPrediction }) {
   const isLive = match.status === "live";
   const hasValue = valueBets.length > 0;
 
@@ -156,7 +159,7 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ValueBet
                 {valueBets.map((vb) => (
                   <span key={vb.outcome} className={`${OUTCOME_COLORS[vb.outcome]} flex items-center gap-0.5`}>
                     <Zap className="w-2 h-2" />
-                    {OUTCOME_LABELS[vb.outcome]}: hist {vb.history.toFixed(0)}% vs mkt {vb.market.toFixed(0)}%
+                    {OUTCOME_LABELS[vb.outcome]}: model {vb.modelProbability.toFixed(0)}% vs market {vb.market.toFixed(0)}%
                   </span>
                 ))}
               </div>
@@ -183,7 +186,7 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ValueBet
               <span className="flex gap-3"><span className="text-primary">{xg.home_win.toFixed(1)}%</span><span className="text-muted-foreground">{xg.draw.toFixed(1)}%</span><span className="text-chart-2">{xg.away_win.toFixed(1)}%</span></span>
             </div>
             <ProbabilityBar home={xg.home_win} draw={xg.draw} away={xg.away_win}/>
-          </div> : <div className="flex items-center justify-between font-mono text-[10px] text-amber-300"><span>PREDICTION PENDING</span><span className="text-muted-foreground">building team baseline</span></div>}
+          </div> : <div className="flex items-center justify-between font-mono text-[10px] text-amber-300"><span>{isLive ? "LIVE PREDICTION UNAVAILABLE" : "PREDICTION PENDING"}</span><span className="text-muted-foreground">{isLive ? "no live forecast received" : "building team baseline"}</span></div>}
         </div>
       </Card>
     </Link>
@@ -249,25 +252,19 @@ export default function Dashboard() {
   const [filter, setFilter] = useState<Filter>("all");
   const [threshold, setThreshold] = useState<Threshold>(10);
 
-  // For value tab we still need all live matches to scan — so never pass "value" as status
+  // Model edges are evaluated only for upcoming fixtures; never pass "value" as status
   const apiStatus = filter === "all" || filter === "value" ? undefined : filter;
   const scopeLabel: Record<Filter, string> = {
     all: "TODAY + NEXT 7 DAYS",
     live: "LIVE NOW",
     upcoming: "NEXT 8 DAYS",
     finished: "TODAY'S RESULTS",
-    value: "LIVE VALUE",
+    value: "UPCOMING MODEL EDGES",
   };
 
   const { data: matches, isLoading } = useGetMatches(
     { status: apiStatus },
     { query: { refetchInterval: 15000, queryKey: getGetMatchesQueryKey({ status: apiStatus }) } }
-  );
-
-  // Fetch backtest scenarios — cached on backend, fast after first load
-  const { data: backtest } = useGetBacktest(
-    {},
-    { query: { queryKey: getGetBacktestQueryKey({}) } }
   );
 
   // Bulk xG predictions — one call, 5-min cache
@@ -288,7 +285,10 @@ export default function Dashboard() {
   const xgMap = useMemo<Map<number, XGPrediction>>(() => {
     const map = new Map<number, XGPrediction>();
     for (const prediction of xgData?.predictions ?? []) map.set(prediction.match_id, prediction);
+    const liveMatchIds = new Set((matches ?? []).filter((match) => match.status === "live").map((match) => match.id));
     for (const fixture of storedData?.fixtures ?? []) {
+      // Saved forecasts are frozen prematch; never replace a live forecast.
+      if (liveMatchIds.has(fixture.fixture_id)) continue;
       map.set(fixture.fixture_id, {
         match_id: fixture.fixture_id,
         home_xg: fixture.prediction.home_xg ?? 0,
@@ -299,37 +299,22 @@ export default function Dashboard() {
       });
     }
     return map;
-  }, [xgData, storedData]);
+  }, [xgData, storedData, matches]);
 
-  // Build a scenario lookup map: "htHome-htAway" → scenario
-  const scenarioMap = useMemo<Map<string, BacktestScenario>>(() => {
-    if (!backtest?.scenarios) return new Map();
-    return new Map(backtest.scenarios.map((s) => [s.halftime_score, s]));
-  }, [backtest]);
-
-  // Compute value bets per match
-  const valueBetMap = useMemo<Map<number, ValueBet[]>>(() => {
+  // A halftime-only backtest cannot price a live match state.
+  const valueBetMap = useMemo<Map<number, ModelEdge[]>>(() => {
     if (!matches) return new Map();
-    const map = new Map<number, ValueBet[]>();
+    const map = new Map<number, ModelEdge[]>();
     for (const match of matches) {
-      const isSecondHalf =
-        match.status === "live" &&
-        ["2H", "ET", "BT", "HT"].includes(match.status_detail);
-      const htHome = (match as Match & { score_ht?: { home: number | null; away: number | null } | null }).score_ht?.home;
-      const htAway = (match as Match & { score_ht?: { home: number | null; away: number | null } | null }).score_ht?.away;
-      if (!isSecondHalf || htHome == null || htAway == null || !match.odds) {
+      const prediction = xgMap.get(match.id);
+      if (match.status !== "upcoming" || !match.odds || !prediction) {
         map.set(match.id, []);
         continue;
       }
-      const scenario = scenarioMap.get(`${htHome}-${htAway}`);
-      if (!scenario) {
-        map.set(match.id, []);
-        continue;
-      }
-      map.set(match.id, findValueBets(match.odds, scenario, threshold));
+      map.set(match.id, findModelEdges(match.odds, prediction, threshold));
     }
     return map;
-  }, [matches, scenarioMap, threshold]);
+  }, [matches, xgMap, threshold]);
 
   const totalValueBets = useMemo(() => {
     let count = 0;
@@ -388,7 +373,7 @@ export default function Dashboard() {
               data-testid="badge-total-value-bets"
             >
               <Zap className="w-3 h-3" />
-              {totalValueBets} value {totalValueBets === 1 ? "bet" : "bets"} flagged
+              {totalValueBets} model {totalValueBets === 1 ? "edge" : "edges"} flagged
             </div>
           )}
         </div>
@@ -408,7 +393,7 @@ export default function Dashboard() {
                     threshold === t ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  {t}%
+                  {t} pp
                 </button>
               ))}
             </div>
@@ -438,7 +423,7 @@ export default function Dashboard() {
               }`}
             >
               <Zap className="w-3 h-3" />
-              Value
+              Model edge
               {totalValueBets > 0 && (
                 <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-400 text-black text-[9px] font-black">
                   {totalValueBets}
@@ -466,13 +451,13 @@ export default function Dashboard() {
         valueSortedMatches.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-yellow-400/20 rounded-lg">
             <Zap className="w-12 h-12 mb-4 opacity-20 text-yellow-400" />
-            <p className="font-mono text-sm">No value bets found at ≥{threshold}% threshold.</p>
-            <p className="text-xs mt-1">Try lowering the threshold or check back when more matches are in the 2nd half.</p>
+            <p className="font-mono text-sm">No upcoming model edges at ≥{threshold} percentage-point threshold.</p>
+            <p className="text-xs mt-1">Edges compare the prematch model probability with the market-implied probability.</p>
           </div>
         ) : (
           <div className="space-y-3">
             <p className="text-xs font-mono text-muted-foreground">
-              {valueSortedMatches.length} {valueSortedMatches.length === 1 ? "match" : "matches"} · ranked by largest divergence · ≥{threshold}% threshold
+              {valueSortedMatches.length} upcoming {valueSortedMatches.length === 1 ? "match" : "matches"} · model minus market · ≥{threshold} percentage points
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {valueSortedMatches.map((match, idx) => {
@@ -485,13 +470,11 @@ export default function Dashboard() {
                       <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-400 text-black text-[9px] font-black shadow">
                         {idx + 1}
                       </span>
-                      <span className="text-[9px] font-mono font-bold text-yellow-400">+{topDelta.toFixed(0)}%</span>
+                      <span className="text-[9px] font-mono font-bold text-yellow-400">+{topDelta.toFixed(0)} pp</span>
                     </div>
                     {/* League label */}
                     <div className="flex items-center gap-1.5 mb-1.5 pl-5">
-                      {match.league_logo ? (
-                        <img src={match.league_logo} alt={match.league_name} className="w-3.5 h-3.5 object-contain" />
-                      ) : null}
+                      <LeagueLogo src={match.league_logo} name={match.league_name} className="w-3.5 h-3.5 object-contain" />
                       <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider truncate">
                         {match.league_name} · {match.country}
                       </span>
@@ -524,11 +507,7 @@ export default function Dashboard() {
             <section key={`${dateGroup.date}-${group.leagueId}`} className={`relative overflow-hidden rounded-xl border border-border/50 border-l-4 ${theme.accent} bg-card/35 p-4 sm:p-5 shadow-sm`}>
               <div className={`pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b ${theme.glow} to-transparent`} />
               <div className="relative flex items-center gap-3 mb-4">
-                {group.logo ? (
-                  <div className="rounded-lg bg-background/80 border border-border/60 p-1.5 shadow-sm"><img src={group.logo} alt={group.name} className="w-7 h-7 object-contain" /></div>
-                ) : (
-                  <Trophy className="w-5 h-5 text-muted-foreground" />
-                )}
+                <div className="rounded-lg bg-background/80 border border-border/60 p-1.5 shadow-sm"><LeagueLogo src={group.logo} name={group.name} className="w-7 h-7 object-contain" /></div>
                 <div className="min-w-0">
                   <h2 className="text-lg font-semibold tracking-tight truncate">{group.name}</h2>
                   <div className="mt-1 flex flex-wrap gap-1.5">
