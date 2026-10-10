@@ -757,7 +757,20 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
   // matches, the quota layer uses this request to replace stale schedule rows
   // (including matches that have just reached FT). Reading the date/window
   // cache first can otherwise render an old NS snapshot for the whole request.
-  const liveFixtures = await getLiveFixtures();
+  let liveFixtures: ApiFootballFixture[] = [];
+  try {
+    liveFixtures = await getLiveFixtures();
+  } catch (err) {
+    if (!isApiFootballProviderError(err)) throw err;
+    // The live-only endpoint must not take down the full Match Center. Keep
+    // building the fixture list from the cached daily/weekly schedule while
+    // the provider is rate-limited or temporarily unavailable.
+    logger.warn(
+      { err },
+      "live fixture feed unavailable; continuing with scheduled fixtures",
+    );
+  }
+
   const todayFixtures = mode === "daily"
     ? await getTodayFixtures()
     : await getFixtureWindow(8);
