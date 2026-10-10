@@ -93,7 +93,7 @@ export function classifyApiFootballFailure(
   if (/free plans?|subscription|plan does not|do not have access|account.*access/.test(text)) {
     return { kind: "subscription", state: "offline" };
   }
-  if (httpStatus === 429 || /rate.?limit|too many requests|quota/.test(text)) {
+  if (httpStatus === 429 || /rate.?limit|request.?limit|daily.?limit|too many requests|quota/.test(text)) {
     return { kind: "rate_limit", state: "degraded" };
   }
   if (httpStatus != null && httpStatus >= 500) {

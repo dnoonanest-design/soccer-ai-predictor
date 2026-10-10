@@ -27,6 +27,14 @@ describe("API-Football reliability classification", () => {
     ).toEqual({ kind: "subscription", state: "offline" });
   });
 
+  it("classifies daily request-limit responses as rate limits", () => {
+    expect(
+      classifyApiFootballFailure(
+        "You have reached the request limit for the day. Go to the dashboard to upgrade your plan.",
+      ),
+    ).toEqual({ kind: "rate_limit", state: "degraded" });
+  });
+
   it("treats quota and transient provider failures as degraded rather than empty data", () => {
     expect(classifyApiFootballFailure("Too many requests", 429)).toEqual({
       kind: "rate_limit",
