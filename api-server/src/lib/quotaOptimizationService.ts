@@ -98,6 +98,7 @@ let lastScheduleAttemptAt = 0;
 let providerCallsToday = 0;
 let providerLimit: number | null = null;
 let providerRemaining: number | null = null;
+let providerDailyLimitReached = false;
 let providerQuotaObservedAt: string | null = null;
 let budgetDate = utcDay();
 let cacheHits = 0;
@@ -142,6 +143,7 @@ export function getQuotaOptimizationStatus() {
     effectiveDailyBudget: effectiveBudget,
     providerDailyLimit: providerLimit,
     providerRemaining,
+    providerDailyLimitReached,
     providerQuotaObservedAt,
     effectiveUsedToday: used,
     effectiveUsageSource: providerLimit != null && providerRemaining != null
@@ -326,6 +328,7 @@ async function providerFailureOrFallback(init?: RequestInit): Promise<Response> 
 }
 
 async function ensureSchedule(init?: RequestInit): Promise<void> {
+  if (providerDailyLimitReached || providerRemaining === 0) return;
   if (scheduleFetchedAt > 0 && Date.now() - scheduleFetchedAt < SCHEDULE_REFRESH_MS) return;
   if (lastScheduleError && schedule.size === 0 && Date.now() - lastScheduleAttemptAt < SCHEDULE_FAILURE_BACKOFF_MS) return;
   if (!requestAllowed("normal") && schedule.size > 0) return;
@@ -542,7 +545,7 @@ function cacheTtl(parsed: URL): number {
 
 function priorityFor(parsed: URL): Priority {
   if (parsed.pathname === "/fixtures" && (parsed.searchParams.has("ids") || parsed.searchParams.has("id"))) return "live";
-  if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return "live";
+  if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return "background";
   if (parsed.pathname === "/fixtures" && parsed.searchParams.has("date")) return "normal";
   if (parsed.pathname === "/fixtures/lineups" || parsed.pathname === "/injuries") return "normal";
   if (["/teams/statistics", "/standings", "/fixtures/headtohead", "/players", "/leagues"].includes(parsed.pathname)) return "background";
@@ -550,6 +553,7 @@ function priorityFor(parsed: URL): Priority {
 }
 
 function requestAllowed(priority: Priority): boolean {
+  if (providerDailyLimitReached || providerRemaining === 0) return false;
   const mode = quotaMode();
   if (mode === "full") return true;
   if (mode === "conserve") return priority !== "background";
@@ -632,11 +636,17 @@ function synthetic(parsed: URL, response: unknown[]): Response {
 async function store(response: Response): Promise<StoredResponse> {
   const headers: Record<string, string> = {};
   response.headers.forEach((value, key) => { headers[key] = value; });
+  const body = await response.text();
+  if (hasDailyQuotaError(body)) {
+    providerDailyLimitReached = true;
+    providerRemaining = 0;
+    providerQuotaObservedAt = new Date().toISOString();
+  }
   return {
     status: response.status,
     statusText: response.statusText,
     headers,
-    body: await response.text(),
+    body,
     fetchedAt: Date.now(),
   };
 }
@@ -674,6 +684,15 @@ function normalizeErrors(errors: unknown): string[] {
   return [];
 }
 
+function hasDailyQuotaError(body: string): boolean {
+  try {
+    const errors = normalizeErrors((JSON.parse(body) as ApiEnvelope).errors).join(" ").toLowerCase();
+    return /request limit.{0,40}(day|daily)|daily.{0,30}(request )?limit|daily quota/.test(errors);
+  } catch {
+    return false;
+  }
+}
+
 function rollBudgetDate(): void {
   const today = utcDay();
   if (today === budgetDate) return;
@@ -681,6 +700,7 @@ function rollBudgetDate(): void {
   providerCallsToday = 0;
   providerLimit = null;
   providerRemaining = null;
+  providerDailyLimitReached = false;
   providerQuotaObservedAt = null;
   blockedCalls = 0;
 }
