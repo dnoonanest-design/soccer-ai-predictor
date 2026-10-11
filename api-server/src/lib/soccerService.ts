@@ -5,6 +5,7 @@ import { waitForRateLimit } from "./rateLimiter";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
 import {
   isApiFootballProviderError,
+  assertApiFootballQuotaAvailable,
   markApiFootballFailure,
   markApiFootballSuccess,
 } from "./apiFootballReliability";
@@ -177,6 +178,10 @@ export async function fetchFootball(path: string): Promise<unknown> {
       state: "offline",
     });
   }
+
+  // Share a provider-wide cooldown after quota exhaustion rather than allowing
+  // independent background workers to retry the same failed request every minute.
+  assertApiFootballQuotaAvailable(path);
 
   const url = `${API_FOOTBALL_BASE}${path}`;
   const startMs = Date.now();
