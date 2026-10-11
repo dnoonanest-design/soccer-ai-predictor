@@ -60,7 +60,22 @@ export function getApiFootballProviderHealth(): ApiFootballProviderHealth {
   return { ...providerHealth };
 }
 
+// A provider-side daily quota error applies to all callers, not just one job.
+// Cool down centrally to avoid repeated failed requests from background workers.
+let quotaCooldownUntil = 0;
+const QUOTA_COOLDOWN_MS = 15 * 60_000;
+
+export function assertApiFootballQuotaAvailable(path: string): void {
+  if (Date.now() < quotaCooldownUntil) {
+    throw new ApiFootballProviderError(
+      "API-Football quota cooldown active; retry deferred",
+      { path, kind: "rate_limit" },
+    );
+  }
+}
+
 export function markApiFootballSuccess(path: string): void {
+  quotaCooldownUntil = 0;
   const now = new Date().toISOString();
   providerHealth = {
     ...providerHealth,
@@ -119,6 +134,9 @@ export function markApiFootballFailure(options: {
   );
   const kind = options.kind ?? classified.kind;
   const state = options.state ?? classified.state;
+  if (kind === "rate_limit") {
+    quotaCooldownUntil = Math.max(quotaCooldownUntil, Date.now() + QUOTA_COOLDOWN_MS);
+  }
 
   providerHealth = {
     ...providerHealth,
