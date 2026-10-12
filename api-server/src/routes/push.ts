@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { isSafeUrl } from "../lib/security";
 
 type PushSubscriptionRecord = {
   endpoint: string;
@@ -17,14 +18,32 @@ router.get("/push/config", (_req, res) => {
   });
 });
 
+// Subscriptions are held in memory until web-push delivery is built, so cap
+// the store and accept only well-formed browser push endpoints.
+const MAX_SUBSCRIPTIONS = 2000;
+const MAX_ENDPOINT_LENGTH = 1024;
+const MAX_KEY_LENGTH = 256;
+
 router.post("/push/subscribe", (req, res) => {
-  const subscription = req.body as PushSubscriptionRecord | undefined;
-  if (!subscription?.endpoint) {
-    res.status(400).json({ error: "Push subscription endpoint is required" });
+  const body = req.body as Partial<PushSubscriptionRecord> | undefined;
+  const endpoint = typeof body?.endpoint === "string" ? body.endpoint : "";
+  if (!endpoint || endpoint.length > MAX_ENDPOINT_LENGTH || !isSafeUrl(endpoint)) {
+    res.status(400).json({ error: "A valid https push subscription endpoint is required" });
     return;
   }
-  subscriptions.set(subscription.endpoint, { ...subscription, createdAt: new Date().toISOString() });
-  res.json({ ok: true, saved: true, subscriptions: subscriptions.size });
+  const keys: Record<string, string> = {};
+  for (const name of ["p256dh", "auth"]) {
+    const value = body?.keys?.[name];
+    if (typeof value === "string" && value.length <= MAX_KEY_LENGTH) keys[name] = value;
+  }
+  if (!subscriptions.has(endpoint) && subscriptions.size >= MAX_SUBSCRIPTIONS) {
+    // Drop the oldest subscription (Map keeps insertion order).
+    const oldest = subscriptions.keys().next().value;
+    if (oldest !== undefined) subscriptions.delete(oldest);
+  }
+  subscriptions.delete(endpoint);
+  subscriptions.set(endpoint, { endpoint, keys, createdAt: new Date().toISOString() });
+  res.json({ ok: true, saved: true });
 });
 
 router.post("/push/test", (req, res) => {

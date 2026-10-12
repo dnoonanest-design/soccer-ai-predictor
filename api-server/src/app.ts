@@ -61,8 +61,11 @@ const adminMutationPaths = [
   /^\/tracker$/,
   /^\/tracker\/\d+\/settle$/,
   /^\/live\/alerts$/,
-  /^\/watchlist$/,
-  /^\/watchlist\/\d+$/,
+];
+
+// Read-only endpoints that export bulk internal data.
+const adminReadPaths = [
+  /^\/training\/dataset$/,
 ];
 
 app.use("/api", (req, res, next) => {
@@ -85,6 +88,12 @@ app.use("/api", (req, res, next) => {
   if (
     ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) &&
     adminMutationPaths.some((pattern) => pattern.test(routePath))
+  ) {
+    return adminRateLimit(req, res, () => requireAdminKey(req, res, next));
+  }
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    adminReadPaths.some((pattern) => pattern.test(routePath))
   ) {
     return adminRateLimit(req, res, () => requireAdminKey(req, res, next));
   }

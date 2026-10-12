@@ -1,10 +1,11 @@
 import { db, backgroundJobRuns, betTracker, deepMatchStats, pool, type PoolClient } from "@workspace/db";
 import { desc, eq, sql } from "drizzle-orm";
-import { getAllMatches, getMatchesByIds, type Match } from "./soccerService";
+import { getAllMatches, getMatchesByIds, settlementScore, type Match } from "./soccerService";
 import { createCanonicalPrediction } from "./canonicalPredictionService";
 import { getUnsettledPredictionFixtureIds, saveOutcomeWithStatus, savePrediction, getCalibrationReport } from "./predictionStore";
 import { runTrainingPipeline, saveLiveAlert, savePredictionSnapshot, settleTrackedBet } from "./predictionPlatformService";
 import { logger } from "./logger";
+import { valueEdge } from "./mathUtils";
 import { analyzeCircumstanceInfluence, getCircumstanceLearningReport } from "./circumstanceLearningService";
 import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningService";
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
@@ -70,12 +71,7 @@ function num(v: unknown): number | null {
 }
 
 function buildValueEdges(match: Match, home: number, draw: number, away: number) {
-  const edge = (modelPct: number, decimalOdds: number | null) => {
-    if (!decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
-    const fairOdds = Math.round((100 / modelPct) * 100) / 100;
-    const edgePct = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
-    return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
-  };
+  const edge = valueEdge;
   return {
     home: edge(home, match.odds?.home_odds ?? null),
     draw: edge(draw, match.odds?.draw_odds ?? null),
@@ -374,8 +370,9 @@ export async function runFinishedSettlement() {
       }
 
       checked++;
-      const home = match.score?.home;
-      const away = match.score?.away;
+      const finalScore = settlementScore(match);
+      const home = finalScore.home;
+      const away = finalScore.away;
       if (home == null || away == null) {
         const attempts = playerRetryByFixture.get(match.id);
         if (attempts != null) await deferPlayerRecovery(match.id, attempts, "finished fixture has no score");

@@ -982,24 +982,32 @@ export async function verifyPredictionAuditIntegrity(options: { fresh?: boolean 
   return value;
 }
 
+function totalsFromRow(raw: Record<string, unknown>) {
+  return {
+    captured: Number(raw.captured ?? 0),
+    fixtures: Number(raw.fixtures ?? 0),
+    settled: Number(raw.settled ?? 0),
+    pending: Number(raw.pending ?? 0),
+    voided: Number(raw.voided ?? 0),
+    accuracy: toMetricNumber(raw.accuracy),
+    brierScore: toMetricNumber(raw.brier_score),
+    logLoss: toMetricNumber(raw.log_loss),
+    over25Accuracy: toMetricNumber(raw.over25_accuracy),
+    bttsAccuracy: toMetricNumber(raw.btts_accuracy),
+  };
+}
+
 export async function getPredictionAccuracyAuditReport() {
   const integrityResult = await verifyPredictionAuditIntegrity({ fresh: true });
   const certifiedIds = integrityResult.validIds;
   const certifiedFilter = "id = ANY($1::bigint[])";
   const canonicalCte = canonicalPrematchAuditCte("$1");
-  const [
-    overall,
-    certified,
-    byPhase,
-    byLeague,
-    byCheckpoint,
-    byConfidence,
-    byModel,
-    byPredictedOutcome,
-    circumstanceEdge,
-    recent,
-  ] = await Promise.all([
-    pool.query(`
+  // Pre-match and in-play forecasts answer different questions. An in-play
+  // snapshot at 90' is almost always right, so mixing it into pre-match
+  // figures inflates accuracy. Every block below is one phase only:
+  //   - pre-match breakdowns use canonical_prematch (one frozen row per fixture)
+  //   - in-play breakdowns use phase = 'live' checkpoint rows
+  const totals = (from: string) => `
       SELECT
         COUNT(*)::int AS captured,
         COUNT(DISTINCT fixture_id)::int AS fixtures,
@@ -1011,110 +1019,88 @@ export async function getPredictionAccuracyAuditReport() {
         AVG(log_loss) FILTER (WHERE settled_at IS NOT NULL) AS log_loss,
         AVG(over25_correct::int) FILTER (WHERE over25_correct IS NOT NULL) AS over25_accuracy,
         AVG(btts_correct::int) FILTER (WHERE btts_correct IS NOT NULL) AS btts_accuracy
-      FROM prediction_audit_records
-    `),
-    pool.query(
-      `
-      WITH ${canonicalCte}
-      SELECT COUNT(*)::int AS captured,
-             COUNT(DISTINCT fixture_id)::int AS fixtures,
-             COUNT(*) FILTER (WHERE settled_at IS NOT NULL)::int AS settled,
-             COUNT(*) FILTER (WHERE settled_at IS NULL)::int AS pending,
-             COUNT(*) FILTER (WHERE voided_at IS NOT NULL)::int AS voided,
-             AVG(correct::int) FILTER (WHERE settled_at IS NOT NULL) AS accuracy,
-             AVG(brier_score) FILTER (WHERE settled_at IS NOT NULL) AS brier_score,
-             AVG(log_loss) FILTER (WHERE settled_at IS NOT NULL) AS log_loss,
-             AVG(over25_correct::int) FILTER (WHERE over25_correct IS NOT NULL) AS over25_accuracy,
-             AVG(btts_correct::int) FILTER (WHERE btts_correct IS NOT NULL) AS btts_accuracy
+      ${from}`;
+  const metrics = `COUNT(*)::int AS samples,
+             AVG(correct::int) AS accuracy,
+             AVG(brier_score) AS brier_score,
+             AVG(log_loss) AS log_loss,
+             AVG(pick_confidence) AS average_confidence`;
+  const prematchGrouped = (groupColumns: string, orderBy: string) => pool.query(
+    `WITH ${canonicalCte}
+      SELECT ${groupColumns}, ${metrics}
         FROM canonical_prematch
-    `,
+       WHERE settled_at IS NOT NULL
+       GROUP BY ${groupColumns}
+       ORDER BY ${orderBy}`,
+    [certifiedIds],
+  );
+  const recentColumns = `id, fixture_id, league_id, home_team, away_team, kickoff_at,
+             phase, checkpoint, data_tier, model_version, engine_revision,
+             home_win_prob, draw_prob, away_win_prob, predicted_outcome,
+             pick_confidence, confidence_band, actual_outcome, score_home, score_away,
+             correct, brier_score, log_loss, over25_correct, btts_correct,
+             captured_at, settled_at, audit_signature, signature_version,
+             settlement_signature`;
+  const [
+    overall,
+    inPlayTotals,
+    certified,
+    byPhase,
+    byLeague,
+    byCheckpoint,
+    inPlayByCheckpoint,
+    byConfidence,
+    byModel,
+    byPredictedOutcome,
+    inPlayByPredictedOutcome,
+    circumstanceEdge,
+    recent,
+    recentInPlay,
+  ] = await Promise.all([
+    // All pre-match checkpoints (diagnostic; several rows per fixture).
+    pool.query(totals(`FROM prediction_audit_records WHERE phase = 'prematch'`)),
+    pool.query(totals(`FROM prediction_audit_records WHERE phase = 'live'`)),
+    pool.query(
+      `WITH ${canonicalCte}
+      ${totals("FROM canonical_prematch")}`,
       [certifiedIds],
     ),
     pool.query(
-      `
-      SELECT phase, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
+      `SELECT phase, ${metrics}
         FROM prediction_audit_records
        WHERE settled_at IS NOT NULL AND ${certifiedFilter}
-       GROUP BY phase ORDER BY phase
-    `,
+       GROUP BY phase ORDER BY phase`,
       [certifiedIds],
     ),
+    prematchGrouped("league_id", "samples DESC"),
     pool.query(
-      `
-      SELECT league_id, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
+      `SELECT phase, checkpoint, data_tier, ${metrics}
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL AND ${certifiedFilter}
-       GROUP BY league_id
-       ORDER BY samples DESC
-    `,
-      [certifiedIds],
-    ),
-    pool.query(
-      `
-      SELECT phase, checkpoint, data_tier, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
-        FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL AND ${certifiedFilter}
+       WHERE settled_at IS NOT NULL AND phase = 'prematch' AND ${certifiedFilter}
        GROUP BY phase, checkpoint, data_tier
-       ORDER BY phase, checkpoint
-    `,
+       ORDER BY phase, checkpoint`,
       [certifiedIds],
     ),
     pool.query(
-      `
-      SELECT confidence_band, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
+      `SELECT phase, checkpoint, data_tier, ${metrics}
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL AND ${certifiedFilter}
-       GROUP BY confidence_band
-       ORDER BY average_confidence DESC
-    `,
+       WHERE settled_at IS NOT NULL AND phase = 'live' AND ${certifiedFilter}
+       GROUP BY phase, checkpoint, data_tier
+       ORDER BY phase, checkpoint`,
       [certifiedIds],
     ),
+    prematchGrouped("confidence_band", "average_confidence DESC"),
+    prematchGrouped("model_version, engine_revision", "samples DESC"),
+    prematchGrouped("predicted_outcome", "predicted_outcome"),
     pool.query(
-      `
-      SELECT model_version, engine_revision, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
+      `SELECT predicted_outcome, ${metrics}
         FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL AND ${certifiedFilter}
-       GROUP BY model_version, engine_revision
-       ORDER BY samples DESC
-    `,
+       WHERE settled_at IS NOT NULL AND phase = 'live' AND ${certifiedFilter}
+       GROUP BY predicted_outcome ORDER BY predicted_outcome`,
       [certifiedIds],
     ),
     pool.query(
-      `
-      SELECT predicted_outcome, COUNT(*)::int AS samples,
-             AVG(correct::int) AS accuracy,
-             AVG(brier_score) AS brier_score,
-             AVG(log_loss) AS log_loss,
-             AVG(pick_confidence) AS average_confidence
-        FROM prediction_audit_records
-       WHERE settled_at IS NOT NULL AND ${certifiedFilter}
-       GROUP BY predicted_outcome
-       ORDER BY predicted_outcome
-    `,
-      [certifiedIds],
-    ),
-    pool.query(
-      `
+      `WITH ${canonicalCte}
       SELECT
         CASE
           WHEN circumstance_score_home IS NULL OR circumstance_score_away IS NULL THEN 'unknown'
@@ -1122,105 +1108,37 @@ export async function getPredictionAccuracyAuditReport() {
           WHEN circumstance_score_away - circumstance_score_home >= 5 THEN 'away_edge'
           ELSE 'balanced'
         END AS circumstance_edge,
-        COUNT(*)::int AS samples,
-        AVG(correct::int) AS accuracy,
-        AVG(brier_score) AS brier_score,
-        AVG(log_loss) AS log_loss,
-        AVG(pick_confidence) AS average_confidence
-      FROM prediction_audit_records
-      WHERE settled_at IS NOT NULL AND ${certifiedFilter}
+        ${metrics}
+      FROM canonical_prematch
+      WHERE settled_at IS NOT NULL
       GROUP BY circumstance_edge
-      ORDER BY samples DESC
-    `,
+      ORDER BY samples DESC`,
+      [certifiedIds],
+    ),
+    // Frozen pre-match ledger: one verified pre-kickoff row per fixture.
+    pool.query(
+      `WITH ${canonicalCte}
+      SELECT ${recentColumns}
+        FROM canonical_prematch
+       ORDER BY captured_at DESC
+       LIMIT 40`,
       [certifiedIds],
     ),
     pool.query(`
-      SELECT id, fixture_id, league_id, home_team, away_team, kickoff_at,
-             phase, checkpoint, data_tier, model_version, engine_revision,
-             home_win_prob, draw_prob, away_win_prob, predicted_outcome,
-             pick_confidence, confidence_band, actual_outcome, score_home, score_away,
-             correct, brier_score, log_loss, over25_correct, btts_correct,
-             captured_at, settled_at, audit_signature, signature_version,
-             settlement_signature
+      SELECT ${recentColumns}
         FROM prediction_audit_records
-       WHERE voided_at IS NULL
+       WHERE voided_at IS NULL AND phase = 'live'
        ORDER BY captured_at DESC
        LIMIT 40
     `),
   ]);
-
   const rawOverall = overall.rows[0] ?? {};
   const rawCertified = certified.rows[0] ?? {};
   const settled = Number(rawCertified.settled ?? 0);
   const dataMaturity =
     settled >= 1000 ? "mature" : settled >= 250 ? "developing" : "collecting";
 
-  return {
-    generatedAt: new Date().toISOString(),
-    worker: getPredictionAccuracyAuditStatus(),
-    methodology: {
-      bookmakerOddsFeedCorePrediction: false,
-      scoreScale: {
-        pickAccuracy: "higher is better",
-        brierScore:
-          "lower is better; 3-way random baseline is approximately 0.667",
-        logLoss: "lower is better",
-      },
-      prematchCheckpoints: ["24h", "6h", "90m", "15m"],
-      liveCheckpoints: [15, 30, 45, 60, 75, 90],
-      circumstanceDataFrom: "90 minutes before kickoff and in-play",
-      headlineMetrics:
-        "latest integrity-verified pre-kickoff prediction; one row per fixture",
-      diagnosticBreakdowns:
-        "all integrity-verified checkpoints; may contain multiple rows per fixture",
-    },
-    dataMaturity,
-    integrity: (({ validIds: _validIds, ...publicIntegrity }) =>
-      publicIntegrity)(integrityResult),
-    certified: {
-      captured: Number(rawCertified.captured ?? 0),
-      fixtures: Number(rawCertified.fixtures ?? 0),
-      settled,
-      pending: Number(rawCertified.pending ?? 0),
-      voided: Number(rawCertified.voided ?? 0),
-      accuracy: toMetricNumber(rawCertified.accuracy),
-      brierScore: toMetricNumber(rawCertified.brier_score),
-      logLoss: toMetricNumber(rawCertified.log_loss),
-      over25Accuracy: toMetricNumber(rawCertified.over25_accuracy),
-      bttsAccuracy: toMetricNumber(rawCertified.btts_accuracy),
-    },
-    overall: {
-      captured: Number(rawOverall.captured ?? 0),
-      fixtures: Number(rawOverall.fixtures ?? 0),
-      settled: Number(rawOverall.settled ?? 0),
-      pending: Number(rawOverall.pending ?? 0),
-      voided: Number(rawOverall.voided ?? 0),
-      accuracy: toMetricNumber(rawOverall.accuracy),
-      brierScore: toMetricNumber(rawOverall.brier_score),
-      logLoss: toMetricNumber(rawOverall.log_loss),
-      over25Accuracy: toMetricNumber(rawOverall.over25_accuracy),
-      bttsAccuracy: toMetricNumber(rawOverall.btts_accuracy),
-    },
-    byPhase: mapMetricRows(byPhase.rows),
-    byLeague: mapMetricRows(byLeague.rows).map((row) => ({
-      ...row,
-      leagueId: row.league_id == null ? null : Number(row.league_id),
-      league:
-        row.league_id == null
-          ? "Unknown"
-          : (getTrackedCompetition(Number(row.league_id))?.name ??
-            `League ${row.league_id}`),
-      country:
-        row.league_id == null
-          ? null
-          : (getTrackedCompetition(Number(row.league_id))?.country ?? null),
-    })),
-    byCheckpoint: mapMetricRows(byCheckpoint.rows),
-    byConfidence: mapMetricRows(byConfidence.rows),
-    byModel: mapMetricRows(byModel.rows),
-    byPredictedOutcome: mapMetricRows(byPredictedOutcome.rows),
-    circumstanceEdge: mapMetricRows(circumstanceEdge.rows),
-    recent: recent.rows.map((row) => {
+  const toPublicRecord = (row: any) => {
       const {
         audit_signature: auditSignature,
         settlement_signature: _settlementSignature,
@@ -1243,7 +1161,73 @@ export async function getPredictionAccuracyAuditReport() {
               ? "legacy-signed"
               : "legacy-unsigned",
       };
-    }),
+    };
+
+  return {
+    generatedAt: new Date().toISOString(),
+    worker: getPredictionAccuracyAuditStatus(),
+    methodology: {
+      bookmakerOddsFeedCorePrediction: false,
+      scoreScale: {
+        pickAccuracy: "higher is better",
+        brierScore:
+          "lower is better; 3-way random baseline is approximately 0.667",
+        logLoss: "lower is better",
+      },
+      prematchCheckpoints: ["24h", "6h", "90m", "15m"],
+      liveCheckpoints: [15, 30, 45, 60, 75, 90],
+      circumstanceDataFrom: "90 minutes before kickoff and in-play",
+      headlineMetrics:
+        "latest integrity-verified pre-kickoff prediction; one row per fixture",
+      prematchBreakdowns:
+        "byLeague, byConfidence, byModel, byPredictedOutcome and circumstanceEdge use the same one-row-per-fixture pre-kickoff records as the headline",
+      inPlayBreakdowns:
+        "inPlay, inPlayByCheckpoint, inPlayByPredictedOutcome and recentInPlay contain only in-play checkpoints and are never mixed into pre-match figures",
+      diagnosticBreakdowns:
+        "overall and byCheckpoint cover every pre-match checkpoint, so they may contain several rows per fixture",
+    },
+    dataMaturity,
+    integrity: (({ validIds: _validIds, ...publicIntegrity }) =>
+      publicIntegrity)(integrityResult),
+    certified: {
+      captured: Number(rawCertified.captured ?? 0),
+      fixtures: Number(rawCertified.fixtures ?? 0),
+      settled,
+      pending: Number(rawCertified.pending ?? 0),
+      voided: Number(rawCertified.voided ?? 0),
+      accuracy: toMetricNumber(rawCertified.accuracy),
+      brierScore: toMetricNumber(rawCertified.brier_score),
+      logLoss: toMetricNumber(rawCertified.log_loss),
+      over25Accuracy: toMetricNumber(rawCertified.over25_accuracy),
+      bttsAccuracy: toMetricNumber(rawCertified.btts_accuracy),
+    },
+    // All pre-match checkpoints (several rows per fixture). Never in-play.
+    overall: totalsFromRow(rawOverall),
+    // In-play checkpoints only, reported separately from every pre-match figure.
+    inPlay: totalsFromRow(inPlayTotals.rows[0] ?? {}),
+    byPhase: mapMetricRows(byPhase.rows),
+    byLeague: mapMetricRows(byLeague.rows).map((row) => ({
+      ...row,
+      leagueId: row.league_id == null ? null : Number(row.league_id),
+      league:
+        row.league_id == null
+          ? "Unknown"
+          : (getTrackedCompetition(Number(row.league_id))?.name ??
+            `League ${row.league_id}`),
+      country:
+        row.league_id == null
+          ? null
+          : (getTrackedCompetition(Number(row.league_id))?.country ?? null),
+    })),
+    byCheckpoint: mapMetricRows(byCheckpoint.rows),
+    inPlayByCheckpoint: mapMetricRows(inPlayByCheckpoint.rows),
+    byConfidence: mapMetricRows(byConfidence.rows),
+    byModel: mapMetricRows(byModel.rows),
+    byPredictedOutcome: mapMetricRows(byPredictedOutcome.rows),
+    inPlayByPredictedOutcome: mapMetricRows(inPlayByPredictedOutcome.rows),
+    circumstanceEdge: mapMetricRows(circumstanceEdge.rows),
+    recent: recent.rows.map(toPublicRecord),
+    recentInPlay: recentInPlay.rows.map(toPublicRecord),
   };
 }
 

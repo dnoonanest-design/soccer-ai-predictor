@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_22", "pnpm", "postgresql"]
 
 [phases.install]
-cmds = ["corepack enable", "corepack prepare pnpm@9.15.9 --activate", "pnpm install --frozen-lockfile"]
+cmds = ["corepack enable", "corepack prepare pnpm@11.19.0 --activate", "pnpm install --frozen-lockfile"]
 
 [phases.build]
 cmds = ["pnpm run railway:build"]

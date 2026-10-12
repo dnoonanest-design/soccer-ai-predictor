@@ -42,7 +42,6 @@ describe("AI temporal data boundary", () => {
   it("routes every production forecast through one canonical pipeline", async () => {
     const files = [
       "../../routes/stats.ts",
-      "../../routes/premium.ts",
       "../backgroundLearnerService.ts",
       "../futurePredictionBaselineService.ts",
       "../predictionAccuracyAuditService.ts",

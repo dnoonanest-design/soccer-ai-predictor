@@ -244,22 +244,35 @@ export interface AccuracyStats {
 }
 
 export async function getAccuracyStats(): Promise<AccuracyStats> {
-  const rows = await db
-    .select({
-      fixtureId:   matchPredictions.fixtureId,
-      homeTeam:    matchPredictions.homeTeam,
-      awayTeam:    matchPredictions.awayTeam,
-      homeWinProb: matchPredictions.homeWinProb,
-      drawProb:    matchPredictions.drawProb,
-      awayWinProb: matchPredictions.awayWinProb,
-      kickoffAt:   matchPredictions.kickoffAt,
-      outcome:     matchOutcomes.outcome,
-      recordedAt:  matchOutcomes.recordedAt,
-    })
-    .from(matchPredictions)
-    .innerJoin(matchOutcomes, eq(matchPredictions.fixtureId, matchOutcomes.fixtureId))
-    .where(eq(matchPredictions.isLive, false))
-    .orderBy(desc(sql`COALESCE(${matchPredictions.kickoffAt}, ${matchOutcomes.recordedAt})`));
+  // Pre-match only, one frozen integrity-verified prediction per fixture —
+  // the same records as the Performance page headline. The legacy
+  // match_predictions table predates the kickoff freeze, so rows in it may
+  // have been updated after kickoff and must not be reported as accuracy.
+  const { verifyPredictionAuditIntegrity } = await import("./predictionAccuracyAuditService");
+  const { canonicalPrematchAuditCte } = await import("./canonicalPrematchAudit");
+  const integrity = await verifyPredictionAuditIntegrity();
+  const result: { rows: any[] } = integrity.validIds.length === 0 ? { rows: [] } : await pool.query(
+    `WITH ${canonicalPrematchAuditCte("$1")}
+     SELECT c.fixture_id, c.home_team, c.away_team,
+            c.home_win_prob, c.draw_prob, c.away_win_prob,
+            c.kickoff_at, c.actual_outcome AS outcome, c.settled_at
+       FROM canonical_prematch c
+      WHERE c.settled_at IS NOT NULL
+        AND c.actual_outcome IN ('home','draw','away')
+      ORDER BY c.kickoff_at DESC`,
+    [integrity.validIds],
+  );
+  const rows = result.rows.map((row: any) => ({
+    fixtureId:   Number(row.fixture_id),
+    homeTeam:    String(row.home_team),
+    awayTeam:    String(row.away_team),
+    homeWinProb: Number(row.home_win_prob),
+    drawProb:    Number(row.draw_prob),
+    awayWinProb: Number(row.away_win_prob),
+    kickoffAt:   row.kickoff_at ? new Date(row.kickoff_at) : null,
+    outcome:     String(row.outcome),
+    recordedAt:  new Date(row.settled_at),
+  }));
 
   const byOutcome = {
     home: { predicted: 0, actual: 0, correct: 0 },

@@ -1,5 +1,6 @@
 import { isTrackedLeague } from "./leagueConfig";
 import { logger } from "./logger";
+import { setBounded, PROVIDER_RESPONSE_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 type FetchInput = Parameters<typeof globalThis.fetch>[0];
 
@@ -255,7 +256,7 @@ async function realRequest(
 
   const stored = await store(response);
   if (stored.status >= 200 && stored.status < 300) {
-    responseCache.set(url, stored);
+    setBounded(responseCache, url, stored, PROVIDER_RESPONSE_CACHE_MAX_ENTRIES);
     updateFixtureCaches(parsed, stored);
   }
   return stored;
@@ -370,7 +371,7 @@ async function refreshSchedule(init?: RequestInit): Promise<void> {
       providerCallsToday++;
       lastProviderCallAt = new Date().toISOString();
       const stored = await store(response);
-      responseCache.set(url, stored);
+      setBounded(responseCache, url, stored, PROVIDER_RESPONSE_CACHE_MAX_ENTRIES);
       const json = JSON.parse(stored.body) as ApiEnvelope;
       const errors = normalizeErrors(json.errors);
       if (stored.status < 200 || stored.status >= 300 || errors.length > 0 || !Array.isArray(json.response)) {
@@ -431,7 +432,7 @@ async function refreshBundles(ids: number[], init?: RequestInit): Promise<Stored
       bundledProviderCalls++;
       lastProviderCallAt = new Date().toISOString();
       const stored = await store(response);
-      responseCache.set(url, stored);
+      setBounded(responseCache, url, stored, PROVIDER_RESPONSE_CACHE_MAX_ENTRIES);
       if (responseHasProviderFailure(stored)) {
         cachedProviderFailure = stored;
         return stored;
@@ -521,7 +522,7 @@ function updateFixtureCaches(parsed: URL, stored: StoredResponse): void {
       fixture.lineups !== undefined ||
       fixture.players !== undefined
     ) {
-      bundles.set(id, { fixture, fetchedAt: stored.fetchedAt });
+      setBounded(bundles, id, { fixture, fetchedAt: stored.fetchedAt }, DEFAULT_CACHE_MAX_ENTRIES);
     }
   }
 }

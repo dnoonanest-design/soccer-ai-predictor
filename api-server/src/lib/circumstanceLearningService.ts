@@ -4,6 +4,7 @@ import type { Match } from "./soccerService";
 import { getMatchEvents, type MatchEvent } from "./eventsService";
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -19,7 +20,7 @@ function getCached<T>(key: string): T | null {
   if (Date.now() - entry.fetchedAt > CIRCUMSTANCE_CACHE_MS) return null;
   return entry.data;
 }
-function setCached<T>(key: string, data: T) { cache.set(key, { data, fetchedAt: Date.now() }); }
+function setCached<T>(key: string, data: T) { setBounded(cache, key, { data, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES); }
 
 async function fetchFootball<T>(path: string, fallback: T): Promise<T> {
   const cached = getCached<T>(path);

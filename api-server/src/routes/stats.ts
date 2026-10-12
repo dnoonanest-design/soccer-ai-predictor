@@ -7,16 +7,11 @@ import { logger } from "../lib/logger";
 import { savePrediction } from "../lib/predictionStore";
 import { saveLiveAlert, savePredictionSnapshot } from "../lib/predictionPlatformService";
 import { createCanonicalPrediction } from "../lib/canonicalPredictionService";
+import { valueEdge } from "../lib/mathUtils";
 
 const router = Router();
 
 
-function valueEdge(modelPct: number, decimalOdds: number | null) {
-  if (!Number.isFinite(modelPct) || !decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
-  const fairOdds = Math.round((100 / modelPct) * 100) / 100;
-  const edgePct = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
-  return { bookmaker_odds: decimalOdds, fair_odds: fairOdds, edge_pct: edgePct, is_value: edgePct >= 5 };
-}
 
 router.get("/xg", async (_req, res) => {
   try {

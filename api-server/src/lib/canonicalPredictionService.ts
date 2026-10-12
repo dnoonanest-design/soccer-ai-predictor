@@ -9,6 +9,7 @@ import { applyDataQualityReliability } from "./predictionDataQuality";
 import { getOfflineFallbackModel, MIN_SAMPLE_FOR_OFFLINE_FALLBACK } from "./adaptiveLearningEngine";
 import { collectMatchCircumstances } from "./circumstanceLearningService";
 import { logger } from "./logger";
+import { normalizeThreeWayPercent } from "./mathUtils";
 
 export const CANONICAL_PREDICTION_PIPELINE_VERSION = "canonical-v2-player-participation";
 
@@ -62,14 +63,8 @@ export class PredictionWarmupError extends Error {
   }
 }
 
-export function normaliseThreeWayPercent(home: number, draw: number, away: number): ThreeWay {
-  const safe = [home, draw, away].map((value) => Number.isFinite(value) && value > 0 ? value : 0);
-  const total = safe[0] + safe[1] + safe[2];
-  if (total <= 0) return { home: 33.34, draw: 33.33, away: 33.33 };
-  const h = Math.round((safe[0] / total) * 10_000) / 100;
-  const d = Math.round((safe[1] / total) * 10_000) / 100;
-  return { home: h, draw: d, away: Math.round(Math.max(0, 100 - h - d) * 100) / 100 };
-}
+/** Kept as a named export for existing callers; the single implementation lives in mathUtils. */
+export const normaliseThreeWayPercent: (home: number, draw: number, away: number) => ThreeWay = normalizeThreeWayPercent;
 
 function modelStatsPayload(stats: MatchStatsResult): LiveMatchStatsInput {
   // Strength index/sample size are pre-match features carried on TeamStats;

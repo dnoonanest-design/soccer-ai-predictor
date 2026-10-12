@@ -1,4 +1,5 @@
 import { fetchFootball, resolveSeasonForCompetition, type Match } from "./soccerService";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 export interface PresentationPlayer {
   id: number;
@@ -171,7 +172,7 @@ async function fetchTeamPlayers(teamId: number, leagueId: number, season: number
       if (batch.length < 20) break;
     }
   }
-  playerCache.set(cacheKey, { value: rows, fetchedAt: Date.now() });
+  setBounded(playerCache, cacheKey, { value: rows, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
   return rows;
 }
 
@@ -203,6 +204,6 @@ export async function getMatchPresentation(match: Match): Promise<MatchPresentat
     home: buildTeam(match.home_team, homeLineup, homeRows),
     away: buildTeam(match.away_team, awayLineup, awayRows),
   };
-  cache.set(match.id, { value, fetchedAt: Date.now() });
+  setBounded(cache, match.id, { value, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
   return value;
 }

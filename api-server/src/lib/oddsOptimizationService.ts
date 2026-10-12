@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 type FetchInput = Parameters<typeof globalThis.fetch>[0];
 
@@ -172,10 +173,10 @@ async function oddsOptimizedFetch(input: FetchInput, init?: RequestInit): Promis
   try {
     const result = await work;
     if (result.response.status >= 200 && result.response.status < 300) {
-      cache.set(key, result);
+      setBounded(cache, key, result, DEFAULT_CACHE_MAX_ENTRIES);
       failureCache.delete(key);
     } else {
-      failureCache.set(key, result.response);
+      setBounded(failureCache, key, result.response, DEFAULT_CACHE_MAX_ENTRIES);
     }
     return restoreResponse(result.response, false);
   } finally {

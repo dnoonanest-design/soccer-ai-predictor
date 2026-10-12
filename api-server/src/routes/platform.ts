@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { logger } from "../lib/logger";
-import { getAllMatches } from "../lib/soccerService";
+import { getAllMatches, settlementScore } from "../lib/soccerService";
 import { createTrackedBet, getBetTrackerSummary, getLiveAlerts, getPredictionHistory, getTrainingRuns, runTrainingPipeline, saveLiveAlert, settleTrackedBet } from "../lib/predictionPlatformService";
 import { getCalibrationReport, getTrainingDataset, saveOutcome } from "../lib/predictionStore";
 
@@ -93,8 +93,9 @@ router.post("/outcomes/settle-finished", async (_req, res) => {
     let settled = 0;
     for (const match of matches) {
       if (match.status !== "finished") continue;
-      const home = match.score?.home;
-      const away = match.score?.away;
+      const finalScore = settlementScore(match);
+      const home = finalScore.home;
+      const away = finalScore.away;
       if (home == null || away == null) continue;
       await saveOutcome({ fixtureId: match.id, scoreHome: home, scoreAway: away });
       settled++;

@@ -44,9 +44,16 @@ export function fairOdds(probPct: number): number {
   return probPct > 0 ? round2(100 / probPct) : 0;
 }
 
+/** Minimum edge (percent) for a price to be flagged as value. Set VALUE_BET_MIN_EDGE_PCT to change it. */
+export function valueBetMinEdgePct(): number {
+  const configured = Number(process.env.VALUE_BET_MIN_EDGE_PCT);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 5;
+}
+
 /**
  * Compute the model-vs-bookmaker value edge for a single market leg.
- * Returns null when either input is missing/invalid.
+ * Returns null when either input is missing/invalid. edge_pct is rounded to
+ * two decimals (e.g. 7.25 means the price is 7.25% above fair value).
  */
 export function valueEdge(
   modelPct: number,
@@ -54,8 +61,8 @@ export function valueEdge(
 ): { bookmaker_odds: number; fair_odds: number; edge_pct: number; is_value: boolean } | null {
   if (!Number.isFinite(modelPct) || !decimalOdds || !Number.isFinite(decimalOdds) || modelPct <= 0) return null;
   const fair = round2(100 / modelPct);
-  const edge = round2(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
-  return { bookmaker_odds: decimalOdds, fair_odds: fair, edge_pct: edge, is_value: edge >= 5 };
+  const edge = Math.round(((decimalOdds * (modelPct / 100)) - 1) * 10000) / 100;
+  return { bookmaker_odds: decimalOdds, fair_odds: fair, edge_pct: edge, is_value: edge >= valueBetMinEdgePct() };
 }
 
 /** Convert a probability to unit scale (0-1). Handles legacy 0-100 storage. */
