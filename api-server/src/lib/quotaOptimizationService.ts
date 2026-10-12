@@ -501,6 +501,10 @@ function responseFromBundle(parsed: URL): Response | null {
 
 function updateFixtureCaches(parsed: URL, stored: StoredResponse): void {
   if (parsed.pathname !== "/fixtures") return;
+  // Whole-season downloads (team ratings) are history, not the live schedule:
+  // keep them out of the 8-day schedule store and the fixture bundles.
+  const p = parsed.searchParams;
+  if (p.has("season") && !["date", "from", "to", "ids", "id", "live"].some((key) => p.has(key))) return;
   let json: ApiEnvelope;
   try {
     json = JSON.parse(stored.body) as ApiEnvelope;
