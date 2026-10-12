@@ -271,6 +271,8 @@ export interface TrainingRow {
   baseHomeWin:   number | null;
   baseDraw:      number | null;
   baseAwayWin:   number | null;
+  /** Plan step 5: data-quality reliability applied when the forecast was served. */
+  baseReliability: number | null;
   homeXg:        number | null;
   awayXg:        number | null;
   outcome:       string;
@@ -313,9 +315,10 @@ export async function loadVerifiedTrainingRows(limit = 2000): Promise<TrainingRo
             c.home_xg,
             c.away_xg,
             COALESCE(c.kickoff_at, c.captured_at) AS created_at,
-            NULL::real AS base_home_win,
-            NULL::real AS base_draw,
-            NULL::real AS base_away_win,
+            rc.pre_prior_home AS base_home_win,
+            rc.pre_prior_draw AS base_draw,
+            rc.pre_prior_away AS base_away_win,
+            rc.reliability AS base_reliability,
             c.actual_outcome AS outcome,
             c.score_home,
             c.score_away,
@@ -330,6 +333,11 @@ export async function loadVerifiedTrainingRows(limit = 2000): Promise<TrainingRo
             COALESCE(c.circumstance_score_home, mc.circumstance_score_home) AS circumstance_score_home,
             COALESCE(c.circumstance_score_away, mc.circumstance_score_away) AS circumstance_score_away
        FROM canonical_prematch c
+       LEFT JOIN prediction_raw_components rc
+         ON rc.fixture_id = c.fixture_id
+        AND rc.checkpoint = c.checkpoint
+        AND rc.model_version = c.model_version
+        AND rc.engine_revision = c.engine_revision
        LEFT JOIN LATERAL (
          SELECT x.*
            FROM match_circumstances x
@@ -361,6 +369,7 @@ export async function loadVerifiedTrainingRows(limit = 2000): Promise<TrainingRo
     baseHomeWin:              r.base_home_win != null ? safeProb(r.base_home_win) : null,
     baseDraw:                 r.base_draw     != null ? safeProb(r.base_draw)     : null,
     baseAwayWin:              r.base_away_win != null ? safeProb(r.base_away_win) : null,
+    baseReliability:          r.base_reliability != null ? Number(r.base_reliability) : null,
     homeXg:                   r.home_xg != null ? Number(r.home_xg) : null,
     awayXg:                   r.away_xg != null ? Number(r.away_xg) : null,
     outcome:                  String(r.outcome),
@@ -588,10 +597,20 @@ export async function learnFeatureWeights(): Promise<{
 
   for (const r of holdoutRows) {
     const w = temporalWeight(r.createdAt, now);
-    const { h, d, a } = normalise3(r.homeWinProb, r.drawProb, r.awayWinProb);
-    const hN = (1 - drawNudgeWeight) * h + drawNudgeWeight * globalHomePrior;
-    const dN = (1 - drawNudgeWeight) * d + drawNudgeWeight * globalDrawPrior;
-    const aN = (1 - drawNudgeWeight) * a + drawNudgeWeight * globalAwayPrior;
+    // Plan step 5: when the raw, pre-blend forecast was stored, rebuild the
+    // candidate exactly as serving would (blend raw, then the same
+    // data-quality shrink). Older rows fall back to nudging the served value.
+    const hasRaw = r.baseHomeWin != null && r.baseDraw != null && r.baseAwayWin != null && r.baseReliability != null;
+    const { h, d, a } = hasRaw
+      ? normalise3(r.baseHomeWin!, r.baseDraw!, r.baseAwayWin!)
+      : normalise3(r.homeWinProb, r.drawProb, r.awayWinProb);
+    const hN0 = (1 - drawNudgeWeight) * h + drawNudgeWeight * globalHomePrior;
+    const dN0 = (1 - drawNudgeWeight) * d + drawNudgeWeight * globalDrawPrior;
+    const aN0 = (1 - drawNudgeWeight) * a + drawNudgeWeight * globalAwayPrior;
+    const rel = hasRaw ? Math.max(0, Math.min(1, r.baseReliability!)) : 1;
+    const hN = 1 / 3 + (hN0 - 1 / 3) * rel;
+    const dN = 1 / 3 + (dN0 - 1 / 3) * rel;
+    const aN = 1 / 3 + (aN0 - 1 / 3) * rel;
     const { h: hF, d: dF, a: aF } = normalise3(hN, dN, aN);
     afterBrier += w * (
       Math.pow(hF - (r.outcome === "home" ? 1 : 0), 2) +

@@ -61,6 +61,7 @@ const adminMutationPaths = [
   /^\/tracker$/,
   /^\/tracker\/\d+\/settle$/,
   /^\/live\/alerts$/,
+  /^\/model\/challengers\/(?:run|rollback)$/,
 ];
 
 // Read-only endpoints that export bulk internal data.
@@ -81,7 +82,7 @@ app.use("/api", (req, res, next) => {
   }
   if (
     req.method === "GET" &&
-    (/^\/matches\/\d+\/(?:stats|events|squad)$/.test(routePath) || routePath === "/xg")
+    (/^\/matches\/\d+\/(?:stats|events|squad|explanation)$/.test(routePath) || routePath === "/xg")
   ) {
     return statsRateLimit(req, res, next);
   }
