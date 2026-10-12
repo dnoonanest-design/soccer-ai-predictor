@@ -15,6 +15,7 @@ import aiRouter from "./ai";
 import marketIntelligenceRouter from "./marketIntelligence";
 import predictionsRouter from "./predictions";
 import reliabilityRouter from "./reliability";
+import modelRouter from "./model";
 
 const router: IRouter = Router();
 
@@ -34,5 +35,6 @@ router.use(aiRouter);
 router.use(marketIntelligenceRouter);
 router.use(predictionsRouter);
 router.use(reliabilityRouter);
+router.use(modelRouter);
 
 export default router;

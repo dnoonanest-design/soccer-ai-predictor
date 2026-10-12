@@ -1,7 +1,8 @@
 import { pool, type PoolClient } from "@workspace/db";
 import { logger } from "./logger";
 import { fetchFootball, getAllMatches, type Match } from "./soccerService";
-import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction } from "./canonicalPredictionService";
+import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction, type RawPredictionComponents } from "./canonicalPredictionService";
+import { recordChallengerPredictions } from "./modelChallengerService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
@@ -373,19 +374,32 @@ async function getUpcomingAuditMatches(now: Date): Promise<Match[]> {
   );
 }
 
+type AuditCapture = {
+  prediction: AuditPrediction;
+  stats: Awaited<ReturnType<typeof createCanonicalPrediction>>["stats"];
+  rawComponents: RawPredictionComponents | null;
+};
+
 async function computeAuditPrediction(
   match: Match,
   includeCircumstances: boolean,
 ): Promise<AuditPrediction | null> {
+  return (await computeAuditCapture(match, includeCircumstances))?.prediction ?? null;
+}
+
+async function computeAuditCapture(
+  match: Match,
+  includeCircumstances: boolean,
+): Promise<AuditCapture | null> {
   // Audits capture forecasts before/during play and settle them separately.
   // Recomputing here after full time would leak the result into the forecast.
   if (match.status === "finished") return null;
 
-  const { prediction: raw, circumstances } = await createCanonicalPrediction(match, {
+  const { prediction: raw, circumstances, stats } = await createCanonicalPrediction(match, {
     collectCircumstances: includeCircumstances,
   });
 
-  return {
+  const prediction: AuditPrediction = {
     home: raw.home_win,
     draw: raw.draw,
     away: raw.away_win,
@@ -402,6 +416,24 @@ async function computeAuditPrediction(
       ? `${raw.data_tier}+context-recorded`
       : raw.data_tier,
   };
+  return { prediction, stats, rawComponents: raw.raw_components ?? null };
+}
+
+/** Plan step 5: what the sealed champion forecast was built from. */
+async function storeRawComponents(match: Match, checkpoint: string, raw: RawPredictionComponents) {
+  try {
+    await pool.query(
+      `INSERT INTO prediction_raw_components
+         (fixture_id, checkpoint, model_version, engine_revision,
+          pre_prior_home, pre_prior_draw, pre_prior_away, prior_weight, reliability)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT DO NOTHING`,
+      [match.id, checkpoint, MODEL_VERSION, ENGINE_REVISION,
+        raw.pre_prior_home, raw.pre_prior_draw, raw.pre_prior_away, raw.prior_weight, raw.reliability],
+    );
+  } catch (err) {
+    logger.warn({ err, fixtureId: match.id }, "raw prediction components not stored");
+  }
 }
 
 async function existingCheckpointKeys(fixtureIds: number[]) {
@@ -573,15 +605,28 @@ async function capturePrematchCheckpoints(now: Date) {
       // provide a clean baseline for measuring how much circumstances help.
       const includeCircumstances =
         checkpoint === "prematch_90m" || checkpoint === "prematch_15m";
-      const prediction = await computeAuditPrediction(
+      const capture = await computeAuditCapture(
         match,
         includeCircumstances,
       );
       if (
-        prediction &&
-        (await insertSignedAuditRecord(match, "prematch", checkpoint, prediction))
+        capture &&
+        (await insertSignedAuditRecord(match, "prematch", checkpoint, capture.prediction))
       ) {
         captured++;
+        if (capture.rawComponents) await storeRawComponents(match, checkpoint, capture.rawComponents);
+        // Challengers are recorded beside the sealed champion forecast, before
+        // kickoff, and judged on the same fixtures after full time.
+        await recordChallengerPredictions(
+          match,
+          checkpoint,
+          {
+            home: capture.prediction.home / 100,
+            draw: capture.prediction.draw / 100,
+            away: capture.prediction.away / 100,
+          },
+          capture.stats,
+        ).catch((err) => logger.warn({ err, fixtureId: match.id }, "challenger capture failed"));
       }
     } catch (err) {
       errors++;

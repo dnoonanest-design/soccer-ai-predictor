@@ -3,8 +3,10 @@ import { getMatchStats, type MatchStatsResult } from "./statsService";
 import {
   getEnhancedPrediction,
   type EnhancedPrediction,
+  type EnhancedPredictionOverrides,
   type LiveMatchStatsInput,
 } from "./enhancedStatsService";
+import { shrinkTowardPriors } from "./teamRatings";
 import { applyDataQualityReliability } from "./predictionDataQuality";
 import { getOfflineFallbackModel, MIN_SAMPLE_FOR_OFFLINE_FALLBACK } from "./adaptiveLearningEngine";
 import { collectMatchCircumstances } from "./circumstanceLearningService";
@@ -37,6 +39,18 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
   pipeline_version: string;
   prediction_source: "statistical-model" | "offline-fallback";
   feature_usage: PredictionFeatureUsage;
+  /** Plan step 5: what the served numbers were built from (0-1 scale). */
+  raw_components?: RawPredictionComponents;
+  /** Which model produced the served 1X2 numbers ("legacy" or a promoted challenger). */
+  serving_model?: string;
+};
+
+export type RawPredictionComponents = {
+  pre_prior_home: number;
+  pre_prior_draw: number;
+  pre_prior_away: number;
+  prior_weight: number;
+  reliability: number;
 };
 
 export type CanonicalPredictionResult = {
@@ -48,7 +62,44 @@ export type CanonicalPredictionResult = {
 export type CanonicalPredictionOptions = {
   stats?: MatchStatsResult;
   collectCircumstances?: boolean;
+  /** Return the original formula even when a challenger has been promoted. */
+  legacyOnly?: boolean;
 };
+
+type UnitThreeWay = { home: number; draw: number; away: number };
+const toUnit = (p: ThreeWay): UnitThreeWay => {
+  const t = p.home + p.draw + p.away;
+  return t > 0 ? { home: p.home / t, draw: p.draw / t, away: p.away / t } : { home: 1 / 3, draw: 1 / 3, away: 1 / 3 };
+};
+
+/**
+ * A variant of the original formula for challenger evaluation (plan steps 1
+ * and 6). Uses the same stats and cached provider data as the champion, so it
+ * costs no extra API quota. Returns 0-1 probabilities, or null without stats.
+ *
+ * shrinkToward: null = the champion's own shrink toward 33/33/33; a set of
+ * league base rates = plan step 1 (same strength, better target).
+ */
+export async function computeLegacyVariant(
+  match: Match,
+  stats: MatchStatsResult,
+  overrides: EnhancedPredictionOverrides,
+  shrinkToward: UnitThreeWay | null,
+): Promise<UnitThreeWay | null> {
+  if (!stats.home || !stats.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) return null;
+  const raw = await getEnhancedPrediction(
+    match.id, "upcoming", match.home_team.id, match.away_team.id, match.league_id,
+    stats.home.goals_per_game, stats.home.conceded_per_game,
+    stats.away.goals_per_game, stats.away.conceded_per_game,
+    match.home_team.name, match.away_team.name, null, false, null, null,
+    stats.home.form, stats.away.form, modelStatsPayload(stats), overrides,
+  );
+  const serving = selectServingProbabilities(raw, false);
+  const quality = applyDataQualityReliability(serving, stats.home, stats.away, raw.confidence_score);
+  if (!shrinkToward) return toUnit(quality.probabilities);
+  const reliability = 0.52 + 0.48 * quality.score;
+  return shrinkTowardPriors(toUnit(serving), shrinkToward, 1 - reliability);
+}
 
 export class PredictionWarmupError extends Error {
   readonly code = "PREDICTION_HISTORY_WARMUP";
@@ -199,7 +250,7 @@ export async function createCanonicalPrediction(
     });
   }
 
-  return {
+  const result: CanonicalPredictionResult = {
     stats,
     circumstances,
     prediction: {
@@ -215,6 +266,24 @@ export async function createCanonicalPrediction(
       pipeline_version: CANONICAL_PREDICTION_PIPELINE_VERSION,
       prediction_source: "statistical-model",
       feature_usage: featureUsage(stats, raw, live),
+      raw_components: !live && raw.pre_prior_home_win != null && raw.pre_prior_draw != null && raw.pre_prior_away_win != null
+        ? {
+            pre_prior_home: raw.pre_prior_home_win,
+            pre_prior_draw: raw.pre_prior_draw,
+            pre_prior_away: raw.pre_prior_away_win,
+            prior_weight: raw.prior_weight ?? 0,
+            reliability: 0.52 + 0.48 * quality.score,
+          }
+        : undefined,
+      serving_model: "legacy",
     },
   };
+
+  // A challenger that has passed the promotion gate serves pre-match 1X2
+  // numbers in place of the original formula. In-play stays on the live model.
+  if (!live && !options.legacyOnly) {
+    const { applyServingChampion } = await import("./modelChallengerService");
+    return applyServingChampion(match, result);
+  }
+  return result;
 }

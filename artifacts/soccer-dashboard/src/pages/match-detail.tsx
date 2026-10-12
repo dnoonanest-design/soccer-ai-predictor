@@ -8,7 +8,7 @@ import {
   BacktestScenario, MatchEvent, H2HMatch, TeamStats, PresentationPlayer, PresentationTeam,
 } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -652,6 +652,11 @@ function XGPanel({
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">Fair H</div><div className="font-mono font-black">{enhanced.fair_home_odds}</div></div>
             </div>
             {enhanced.value_edges && (
+              <div className="text-[10px] text-muted-foreground" data-testid="value-experimental-note">
+                Value flags are experimental: bookmakers' closing odds have been more accurate than this model so far, so a gap is more often model error than real value.
+              </div>
+            )}
+            {enhanced.value_edges && (
               <div className="grid grid-cols-3 gap-2 text-center">
                 {[['Home', enhanced.value_edges.home], ['Draw', enhanced.value_edges.draw], ['Away', enhanced.value_edges.away]].map(([label, edge]: any) => edge && (
                   <div key={label} className={`rounded-lg p-2 ${edge.is_value ? 'bg-primary/15' : 'bg-muted/30'}`}>
@@ -1211,6 +1216,50 @@ function HalftimeOverlay({
   );
 }
 
+type MatchExplanation = {
+  servingModel: string;
+  flags: Array<{ code: string; severity: "info" | "warning"; message: string }>;
+  explanation: string;
+  explanationSource: "claude" | "template";
+};
+
+/** Plan step 8: plain-English reading of the forecast plus data checks. Never changes a number. */
+function ExplanationCard({ matchId, status }: { matchId: number; status: string }) {
+  const enabled = status === "upcoming" || status === "live";
+  const { data } = useQuery({
+    queryKey: ["match-explanation", matchId],
+    enabled,
+    staleTime: 15 * 60_000,
+    queryFn: async () => {
+      const res = await fetch(`/api/matches/${matchId}/explanation`, { headers: { Accept: "application/json" } });
+      if (!res.ok) return null;
+      return (await res.json()) as MatchExplanation;
+    },
+  });
+  if (!enabled || !data) return null;
+  return (
+    <Card className="p-4 border-border/60" data-testid="match-explanation">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h2 className="font-bold text-sm">Why this prediction</h2>
+        <span className="text-[10px] font-mono text-muted-foreground uppercase">
+          {data.explanationSource === "claude" ? "Explained by Claude" : "Summary"} · model {data.servingModel}
+        </span>
+      </div>
+      <p className="text-sm leading-relaxed">{data.explanation}</p>
+      {data.flags.length > 0 && (
+        <ul className="mt-3 space-y-1">
+          {data.flags.map((flag) => (
+            <li key={flag.code} className={`text-xs ${flag.severity === "warning" ? "text-amber-500" : "text-muted-foreground"}`}>
+              {flag.message}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-3 text-[10px] text-muted-foreground">Explanations describe the model's numbers; they never change them.</p>
+    </Card>
+  );
+}
+
 export default function MatchDetail() {
   const params = useParams();
   const matchId = Number(params.id);
@@ -1330,6 +1379,8 @@ export default function MatchDetail() {
           </div>
         </div>
       </Card>
+
+      <ExplanationCard matchId={match.id} status={match.status} />
 
       {/* Stats panel — always visible */}
       <MatchStatsPanel

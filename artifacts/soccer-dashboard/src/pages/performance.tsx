@@ -41,6 +41,14 @@ type PerformanceReport = {
   learningSafety: { minimumPromotionSamples: number; minimumResidualSamples: number; principle: string };
 };
 
+type ChallengerReport = {
+  champion: string;
+  championSince: string | null;
+  championDescription: string;
+  rules: { minMatches: number; minBrierImprovement: number; minTStat: number; minMarketMatches: number; autoPromote: boolean };
+  standings: Array<{ challenger: string; description: string; matches: number; brier: number | null; championBrier: number | null; brierGain: number | null; tStat: number | null; marketMatches: number; marketBrierGain: number | null; closingOddsBrier: number | null; eligible: boolean; reasons: string[] }>;
+};
+
 async function api<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
@@ -71,6 +79,7 @@ function BreakdownTable({ title, rows, label }: { title: string; rows: MetricRow
 
 export default function Performance() {
   const report = useQuery({ queryKey: ["prediction-accuracy-audit"], queryFn: () => api<AuditReport>("/api/accuracy/audit"), refetchInterval: 60_000, refetchOnWindowFocus: true });
+  const challengers = useQuery({ queryKey: ["model-challengers"], queryFn: () => api<ChallengerReport>("/api/model/challengers"), refetchInterval: 5 * 60_000 });
   const intelligence = useQuery({ queryKey: ["prediction-performance-intelligence", 14], queryFn: () => api<PerformanceReport>("/api/accuracy/performance?days=14"), refetchInterval: 60_000, refetchOnWindowFocus: true });
   if (report.isLoading) return <div className="min-h-[45vh] flex items-center justify-center text-muted-foreground"><RefreshCw className="h-5 w-5 animate-spin mr-2" /> Verifying performance ledger…</div>;
   if (report.isError || !report.data) return <Card className="p-6 border-destructive/50"><div className="flex items-center gap-2 font-bold text-destructive"><AlertTriangle className="h-5 w-5" />Performance verification unavailable</div><p className="text-sm text-muted-foreground mt-2">No figures are displayed because the audit source could not be verified.</p></Card>;
@@ -127,6 +136,15 @@ export default function Performance() {
         {data.recent.map((row) => <tr key={row.fixture_id} className="border-t border-border/40"><td className="py-2"><div className="font-medium">{row.home_team} v {row.away_team}</div><div className="text-[10px] text-muted-foreground font-mono">FIXTURE {row.fixture_id}</div></td><td className="text-center font-mono">{format(new Date(row.captured_at), "dd MMM HH:mm")}</td><td className="text-center font-mono">{row.checkpoint.replaceAll("_", " ")}</td><td className="text-center font-medium">{outcome(row.predicted_outcome)}</td><td className="text-center font-mono">{row.pick_confidence.toFixed(1)}%</td><td className="text-center">{outcome(row.actual_outcome)}</td><td className="text-center font-mono">{row.actual_outcome ? `${row.score_home ?? "—"}-${row.score_away ?? "—"}` : "—"}</td><td className={`text-center font-bold ${resultClass(row)}`}>{resultText(row)}</td><td className="text-center font-mono">{score(row.brier_score)}</td><td className="text-center">{row.integrity_status === "verified" ? <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" aria-label="Verified" /> : <AlertTriangle className="h-4 w-4 text-amber-500 mx-auto" aria-label={row.integrity_status} />}</td></tr>)}
       </tbody></table></div>
     </Card>
+
+    {challengers.data && <Card className="p-4 border-border/60" data-testid="model-challengers">
+      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-2 mb-3"><div><h2 className="font-bold">Model challengers</h2><p className="text-xs text-muted-foreground mt-1">New models run beside the live one on the same matches. One replaces it only after beating it on at least {challengers.data.rules.minMatches} unseen matches, by at least {challengers.data.rules.minBrierImprovement} Brier, and on matches with closing odds.</p></div><Badge variant="secondary" className="font-mono">LIVE MODEL: {challengers.data.champion}</Badge></div>
+      <div className="overflow-x-auto"><table className="w-full text-xs min-w-[760px]"><thead className="text-muted-foreground uppercase font-mono"><tr><th className="text-left py-2">Challenger</th><th>Matches</th><th>Brier</th><th>Live model</th><th>Gain</th><th>With odds</th><th>Closing odds</th><th className="text-left">Status</th></tr></thead><tbody>
+        {challengers.data.standings.map((row) => <tr key={row.challenger} className="border-t border-border/40 align-top"><td className="py-2"><div className="font-medium font-mono">{row.challenger}</div><div className="text-[10px] text-muted-foreground max-w-[260px]">{row.description}</div></td><td className="text-center font-mono">{row.matches}</td><td className="text-center font-mono">{score(row.brier)}</td><td className="text-center font-mono">{score(row.championBrier)}</td><td className={`text-center font-mono ${row.brierGain != null && row.brierGain > 0 ? "text-emerald-500" : ""}`}>{row.brierGain == null ? "—" : `${row.brierGain > 0 ? "+" : ""}${row.brierGain.toFixed(4)}`}</td><td className="text-center font-mono">{row.marketMatches}</td><td className="text-center font-mono">{score(row.closingOddsBrier)}</td><td className="text-[10px]">{row.eligible ? <span className="text-emerald-500 font-bold">Ready to promote</span> : <span className="text-muted-foreground">{row.reasons[0] ?? "Collecting"}</span>}</td></tr>)}
+        {!challengers.data.standings.length && <tr><td colSpan={8} className="py-6 text-center text-muted-foreground">Challengers are recording forecasts; results appear as matches finish.</td></tr>}
+      </tbody></table></div>
+      <p className="text-[11px] text-muted-foreground mt-2">Gain = how much lower the challenger's Brier score is than the live model's on the same matches (positive is better). Closing odds = bookmakers' Brier on the matches that have odds.</p>
+    </Card>}
 
     <div className="pt-2"><h2 className="text-lg font-black">In-play predictions</h2><p className="text-xs text-muted-foreground">Updated during matches as the score and clock change. Late checkpoints are naturally far more accurate, so they are reported separately and never mixed into pre-match results.</p></div>
     {data.inPlay && <div className="grid grid-cols-2 lg:grid-cols-4 gap-3"><Metric label="In-play checkpoints" value={data.inPlay.settled} note="Settled in-play snapshots" /><Metric label="Matches" value={data.inPlay.fixtures} note="With at least one in-play snapshot" /><Metric label="1X2 accuracy" value={pct(data.inPlay.accuracy)} note="All in-play checkpoints" /><Metric label="Brier score" value={score(data.inPlay.brierScore)} note="Lower is better" /></div>}

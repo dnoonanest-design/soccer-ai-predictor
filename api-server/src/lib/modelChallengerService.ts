@@ -1,0 +1,409 @@
+/**
+ * Champion/challenger model evaluation and promotion (analysis plan).
+ *
+ * Every pre-match audit capture also records each challenger's forecast for
+ * the same fixture and checkpoint, with the champion's forecast in the same
+ * row. After full time both are scored. A challenger replaces the champion
+ * only when it is better on enough unseen matches, by a margin that is
+ * unlikely to be luck, and also better on the matches that have closing odds
+ * (plan step 7). Nothing here lets generative AI touch a probability.
+ *
+ * Challengers (plan step in brackets):
+ *   step1-league-priors   original formula, fitted home edge, shrink toward league base rates [1]
+ *   step2-ratings         fitted attack/defence ratings + Dixon-Coles grid                    [2]
+ *   step3-ratings-xg      ratings fitted on a goals/xG blend where xG is stored                [3]
+ *   step4-calibrated      step 2 plus a 3-way calibration fitted on settled step-2 forecasts  [4]
+ *   step6-no-form         original formula without the form factor                             [6]
+ *   step6-no-h2h          original formula without the head-to-head blend                       [6]
+ *   step6-no-players      original formula without injury and lineup factors                    [6]
+ *   legacy                the original formula, recorded once another model is champion
+ */
+import { pool } from "@workspace/db";
+import type { Match } from "./soccerService";
+import type { MatchStatsResult } from "./statsService";
+import type { CanonicalPredictionResult } from "./canonicalPredictionService";
+import { computeLegacyVariant } from "./canonicalPredictionService";
+import { dixonColesOutcomes } from "./teamRatings";
+import { ensureTeamRatings, forecastFromRatings, getLeagueRatingSet, getTeamRatingsStatus } from "./teamRatingsProvider";
+import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type CalibrationParams, type Outcome } from "./outcomeCalibration";
+import { logger } from "./logger";
+
+type Unit = { home: number; draw: number; away: number };
+
+export const CHALLENGER_IDS = [
+  "step1-league-priors",
+  "step2-ratings",
+  "step3-ratings-xg",
+  "step4-calibrated",
+  "step6-no-form",
+  "step6-no-h2h",
+  "step6-no-players",
+  "legacy",
+] as const;
+export type ChallengerId = (typeof CHALLENGER_IDS)[number];
+
+const DESCRIPTIONS: Record<ChallengerId, string> = {
+  "step1-league-priors": "Original formula with fitted home advantage, shrunk toward league base rates instead of 33/33/33",
+  "step2-ratings": "Fitted attack/defence team ratings with a Dixon-Coles score grid",
+  "step3-ratings-xg": "Team ratings fitted on a 50/50 goals and expected-goals blend",
+  "step4-calibrated": "Team ratings plus a three-way calibration fitted on settled forecasts",
+  "step6-no-form": "Original formula without the last-5 form factor",
+  "step6-no-h2h": "Original formula without the head-to-head blend",
+  "step6-no-players": "Original formula without injury and lineup factors",
+  legacy: "The original formula",
+};
+
+export const PROMOTION_RULES = {
+  minMatches: Number(process.env.CHALLENGER_MIN_MATCHES ?? 300),
+  minBrierImprovement: Number(process.env.CHALLENGER_MIN_BRIER_GAIN ?? 0.003),
+  minTStat: 2,
+  minMarketMatches: Number(process.env.CHALLENGER_MIN_MARKET_MATCHES ?? 50),
+  minDaysBetweenPromotions: 7,
+  autoPromote: process.env.CHALLENGER_AUTO_PROMOTE !== "false",
+};
+
+let calibration: CalibrationParams = IDENTITY_CALIBRATION;
+let servingCache: { champion: string; since: Date | null; calibration: CalibrationParams | null; at: number } | null = null;
+let workerTimer: NodeJS.Timeout | null = null;
+let lastRun: { at: string; settled: number; promoted: string | null; error: string | null } | null = null;
+
+// ── Forecasts ────────────────────────────────────────────────────────────────
+
+function fromRatings(match: Match, useXg: boolean): Unit | null {
+  if (useXg) {
+    const set = getLeagueRatingSet(match.league_id);
+    // Without xG for this league the forecast would duplicate step 2.
+    if (set && !set.goalsXg) return null;
+  }
+  const f = forecastFromRatings(match.league_id, match.home_team.id, match.away_team.id, useXg);
+  if (!f) return null;
+  const p = dixonColesOutcomes(f.lambdaHome, f.lambdaAway);
+  return { home: p.home, draw: p.draw, away: p.away };
+}
+
+/** 0-1 forecast for one challenger, or null when it cannot forecast this match. */
+export async function computeChallenger(
+  id: string,
+  match: Match,
+  stats: MatchStatsResult | null,
+  calibrationOverride?: CalibrationParams | null,
+): Promise<Unit | null> {
+  switch (id) {
+    case "step2-ratings": return fromRatings(match, false);
+    case "step3-ratings-xg": return fromRatings(match, true);
+    case "step4-calibrated": {
+      const base = fromRatings(match, false);
+      return base ? applyCalibration(base, calibrationOverride ?? calibration) : null;
+    }
+    case "step1-league-priors": {
+      if (!stats) return null;
+      const set = getLeagueRatingSet(match.league_id);
+      const f = forecastFromRatings(match.league_id, match.home_team.id, match.away_team.id, false);
+      const priors = set?.priors ?? f?.priors;
+      if (!priors) return null;
+      return computeLegacyVariant(match, stats, set ? { homeAdvantage: Math.exp(set.goals.homeAdvantage) } : {}, priors);
+    }
+    case "step6-no-form": return stats ? computeLegacyVariant(match, stats, { disableForm: true }, null) : null;
+    case "step6-no-h2h": return stats ? computeLegacyVariant(match, stats, { disableH2H: true }, null) : null;
+    case "step6-no-players": return stats ? computeLegacyVariant(match, stats, { disablePlayerFactors: true }, null) : null;
+    case "legacy": return stats ? computeLegacyVariant(match, stats, {}, null) : null;
+    default: return null;
+  }
+}
+
+/**
+ * Record every challenger beside the champion for one pre-match checkpoint.
+ * Called by the audit worker right after it seals the champion's record.
+ */
+export async function recordChallengerPredictions(
+  match: Match,
+  checkpoint: string,
+  champion: Unit,
+  stats: MatchStatsResult | null,
+): Promise<number> {
+  if (!match.kickoff || new Date(match.kickoff).getTime() <= Date.now()) return 0;
+  await ensureTeamRatings();
+  const serving = await getServingState();
+  let recorded = 0;
+  for (const id of CHALLENGER_IDS) {
+    if (id === serving.champion) continue;
+    if (id === "legacy" && serving.champion === "legacy") continue;
+    try {
+      const p = await computeChallenger(id, match, stats);
+      if (!p || ![p.home, p.draw, p.away].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) continue;
+      const result = await pool.query(
+        `INSERT INTO model_challenger_predictions
+           (fixture_id, league_id, challenger, checkpoint, kickoff_at,
+            home_win_prob, draw_prob, away_win_prob,
+            champion_home_prob, champion_draw_prob, champion_away_prob, details)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (fixture_id, challenger, checkpoint) DO NOTHING`,
+        [match.id, match.league_id, id, checkpoint, new Date(match.kickoff),
+          p.home, p.draw, p.away, champion.home, champion.draw, champion.away,
+          JSON.stringify({ champion: serving.champion })],
+      );
+      recorded += result.rowCount ?? 0;
+    } catch (err) {
+      logger.warn({ err, fixtureId: match.id, challenger: id }, "challenger forecast not recorded");
+    }
+  }
+  return recorded;
+}
+
+// ── Settlement and scoring ───────────────────────────────────────────────────
+
+export async function settleChallengerPredictions(): Promise<number> {
+  const result = await pool.query(
+    `WITH scored AS (
+       SELECT c.id, o.outcome,
+              (CASE WHEN o.outcome = 'home' THEN 1 ELSE 0 END) AS yh,
+              (CASE WHEN o.outcome = 'draw' THEN 1 ELSE 0 END) AS yd,
+              (CASE WHEN o.outcome = 'away' THEN 1 ELSE 0 END) AS ya
+         FROM model_challenger_predictions c
+         JOIN match_outcomes o ON o.fixture_id = c.fixture_id
+        WHERE c.settled_at IS NULL AND o.outcome IN ('home','draw','away')
+     )
+     UPDATE model_challenger_predictions c
+        SET actual_outcome = s.outcome,
+            brier_score = POWER(c.home_win_prob - s.yh, 2) + POWER(c.draw_prob - s.yd, 2) + POWER(c.away_win_prob - s.ya, 2),
+            champion_brier_score = POWER(c.champion_home_prob - s.yh, 2) + POWER(c.champion_draw_prob - s.yd, 2) + POWER(c.champion_away_prob - s.ya, 2),
+            log_loss = -LN(GREATEST(1e-6, CASE s.outcome WHEN 'home' THEN c.home_win_prob WHEN 'draw' THEN c.draw_prob ELSE c.away_win_prob END)),
+            champion_log_loss = -LN(GREATEST(1e-6, CASE s.outcome WHEN 'home' THEN c.champion_home_prob WHEN 'draw' THEN c.champion_draw_prob ELSE c.champion_away_prob END)),
+            settled_at = NOW()
+       FROM scored s
+      WHERE c.id = s.id`,
+  );
+  return result.rowCount ?? 0;
+}
+
+/** Plan step 4: refit the calibration on settled step-2 forecasts (latest per fixture). */
+export async function refitCalibration(): Promise<CalibrationParams> {
+  const rows = await pool.query(
+    `SELECT DISTINCT ON (fixture_id) home_win_prob, draw_prob, away_win_prob, actual_outcome
+       FROM model_challenger_predictions
+      WHERE challenger = 'step2-ratings' AND settled_at IS NOT NULL
+      ORDER BY fixture_id, captured_at DESC
+      LIMIT 5000`,
+  );
+  calibration = fitCalibration(rows.rows.map((r: any) => ({
+    probs: { home: Number(r.home_win_prob), draw: Number(r.draw_prob), away: Number(r.away_win_prob) },
+    actual: String(r.actual_outcome) as Outcome,
+  })));
+  return calibration;
+}
+
+// ── Report and promotion gate ────────────────────────────────────────────────
+
+export type ChallengerStanding = {
+  challenger: string;
+  description: string;
+  matches: number;
+  brier: number | null;
+  championBrier: number | null;
+  brierGain: number | null;
+  tStat: number | null;
+  logLossGain: number | null;
+  marketMatches: number;
+  marketBrierGain: number | null;
+  closingOddsBrier: number | null;
+  eligible: boolean;
+  reasons: string[];
+};
+
+export async function getChallengerReport() {
+  const serving = await getServingState(true);
+  const since = serving.since ?? new Date(0);
+  const result = await pool.query(
+    `WITH latest AS (
+       SELECT DISTINCT ON (challenger, fixture_id) *
+         FROM model_challenger_predictions
+        WHERE settled_at IS NOT NULL AND captured_at >= $1
+        ORDER BY challenger, fixture_id, captured_at DESC
+     ), book_close AS (
+       SELECT DISTINCT ON (m.fixture_id, m.bookmaker_key)
+              m.fixture_id, m.implied_home_prob h, m.implied_draw_prob d, m.implied_away_prob a
+         FROM market_odds_snapshots m
+         JOIN (SELECT DISTINCT fixture_id, kickoff_at FROM latest) l ON l.fixture_id = m.fixture_id
+        WHERE m.observed_at < l.kickoff_at
+        ORDER BY m.fixture_id, m.bookmaker_key, m.observed_at DESC
+     ), closing AS (
+       SELECT fixture_id, AVG(h) / 100.0 h, AVG(d) / 100.0 d, AVG(a) / 100.0 a FROM book_close GROUP BY fixture_id
+     )
+     SELECT l.challenger,
+            COUNT(*)::int AS matches,
+            AVG(l.brier_score) AS brier,
+            AVG(l.champion_brier_score) AS champion_brier,
+            AVG(l.champion_brier_score - l.brier_score) AS gain,
+            STDDEV_SAMP(l.champion_brier_score - l.brier_score) AS gain_sd,
+            AVG(l.champion_log_loss - l.log_loss) AS ll_gain,
+            COUNT(c.fixture_id)::int AS market_matches,
+            AVG(l.champion_brier_score - l.brier_score) FILTER (WHERE c.fixture_id IS NOT NULL) AS market_gain,
+            AVG(POWER(c.h - CASE WHEN l.actual_outcome='home' THEN 1 ELSE 0 END, 2)
+              + POWER(c.d - CASE WHEN l.actual_outcome='draw' THEN 1 ELSE 0 END, 2)
+              + POWER(c.a - CASE WHEN l.actual_outcome='away' THEN 1 ELSE 0 END, 2)) AS closing_brier
+       FROM latest l
+       LEFT JOIN closing c ON c.fixture_id = l.fixture_id
+      GROUP BY l.challenger
+      ORDER BY gain DESC NULLS LAST`,
+    [since],
+  );
+  const n = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Math.round(Number(v) * 10_000) / 10_000);
+  const standings: ChallengerStanding[] = result.rows.map((r: any) => {
+    const matches = Number(r.matches ?? 0);
+    const gain = n(r.gain), sd = Number(r.gain_sd);
+    const tStat = gain != null && Number.isFinite(sd) && sd > 0 && matches > 1 ? Math.round((gain / (sd / Math.sqrt(matches))) * 100) / 100 : null;
+    const marketMatches = Number(r.market_matches ?? 0), marketGain = n(r.market_gain), llGain = n(r.ll_gain);
+    const reasons: string[] = [];
+    if (matches < PROMOTION_RULES.minMatches) reasons.push(`needs ${PROMOTION_RULES.minMatches} settled matches (has ${matches})`);
+    if (gain == null || gain < PROMOTION_RULES.minBrierImprovement) reasons.push(`Brier gain must be at least ${PROMOTION_RULES.minBrierImprovement}`);
+    if (tStat == null || tStat < PROMOTION_RULES.minTStat) reasons.push(`gain must be at least ${PROMOTION_RULES.minTStat} standard errors from zero`);
+    if (llGain == null || llGain <= 0) reasons.push("log loss must also improve");
+    if (marketMatches < PROMOTION_RULES.minMarketMatches) reasons.push(`needs ${PROMOTION_RULES.minMarketMatches} matches with closing odds (has ${marketMatches})`);
+    else if (marketGain == null || marketGain <= 0) reasons.push("must also improve on matches with closing odds (smaller gap to the market)");
+    return {
+      challenger: String(r.challenger),
+      description: DESCRIPTIONS[r.challenger as ChallengerId] ?? String(r.challenger),
+      matches, brier: n(r.brier), championBrier: n(r.champion_brier), brierGain: gain, tStat, logLossGain: llGain,
+      marketMatches, marketBrierGain: marketGain, closingOddsBrier: n(r.closing_brier),
+      eligible: reasons.length === 0, reasons,
+    };
+  });
+  return {
+    champion: serving.champion,
+    championSince: serving.since?.toISOString() ?? null,
+    championDescription: DESCRIPTIONS[serving.champion as ChallengerId] ?? serving.champion,
+    rules: PROMOTION_RULES,
+    calibration,
+    ratings: getTeamRatingsStatus(),
+    standings,
+    lastRun,
+    note: "Each challenger is compared with the champion on the same fixtures, using the latest forecast captured before kickoff.",
+  };
+}
+
+export async function runPromotionGate(): Promise<string | null> {
+  const report = await getChallengerReport();
+  const eligible = report.standings.filter((s) => s.eligible).sort((a, b) => (b.brierGain ?? 0) - (a.brierGain ?? 0));
+  if (!eligible.length || !PROMOTION_RULES.autoPromote) return null;
+  const recent = await pool.query(
+    `SELECT 1 FROM model_promotion_log WHERE decided_at > NOW() - ($1 || ' days')::interval LIMIT 1`,
+    [String(PROMOTION_RULES.minDaysBetweenPromotions)],
+  );
+  if (recent.rowCount) return null;
+  const winner = eligible[0];
+  const calibrationSnapshot = winner.challenger === "step4-calibrated" ? calibration : null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE model_serving_state SET champion = $1, calibration = $2, updated_at = NOW() WHERE id = 1`,
+      [winner.challenger, calibrationSnapshot ? JSON.stringify(calibrationSnapshot) : null],
+    );
+    await client.query(
+      `INSERT INTO model_promotion_log (previous_champion, new_champion, evidence) VALUES ($1, $2, $3)`,
+      [report.champion, winner.challenger, JSON.stringify({ ...winner, rules: PROMOTION_RULES })],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  servingCache = null;
+  logger.info({ previous: report.champion, champion: winner.challenger, evidence: winner }, "model challenger promoted");
+  return winner.challenger;
+}
+
+/** Admin rollback: serve the original formula again. */
+export async function rollbackToLegacy(reason: string) {
+  const current = await getServingState(true);
+  if (current.champion === "legacy") return false;
+  await pool.query(`UPDATE model_serving_state SET champion = 'legacy', calibration = NULL, updated_at = NOW() WHERE id = 1`);
+  await pool.query(
+    `INSERT INTO model_promotion_log (previous_champion, new_champion, evidence) VALUES ($1, 'legacy', $2)`,
+    [current.champion, JSON.stringify({ manualRollback: true, reason })],
+  );
+  servingCache = null;
+  return true;
+}
+
+// ── Serving ──────────────────────────────────────────────────────────────────
+
+async function getServingState(fresh = false) {
+  if (!fresh && servingCache && Date.now() - servingCache.at < 60_000) return servingCache;
+  try {
+    const result = await pool.query(`SELECT champion, calibration, updated_at FROM model_serving_state WHERE id = 1`);
+    const row = result.rows[0];
+    const champion = row?.champion ? String(row.champion) : "legacy";
+    const cal = row?.calibration ? (typeof row.calibration === "string" ? JSON.parse(row.calibration) : row.calibration) : null;
+    servingCache = { champion, since: champion === "legacy" ? null : new Date(row.updated_at), calibration: cal, at: Date.now() };
+  } catch {
+    // Migration not applied yet: behave exactly as before.
+    servingCache = { champion: "legacy", since: null, calibration: null, at: Date.now() };
+  }
+  return servingCache;
+}
+
+/**
+ * Replace the original formula's pre-match 1X2 numbers with the promoted
+ * champion's, when one has been promoted and it can forecast this match.
+ * Falls back to the original formula otherwise, so a missing rating never
+ * blanks a prediction.
+ */
+export async function applyServingChampion(match: Match, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
+  const serving = await getServingState();
+  if (serving.champion === "legacy") return result;
+  try {
+    if (serving.champion.startsWith("step2") || serving.champion.startsWith("step3") || serving.champion.startsWith("step4")) await ensureTeamRatings();
+    const p = await computeChallenger(serving.champion, match, result.stats, serving.calibration);
+    if (!p) return result;
+    const pct = (v: number) => Math.round(v * 10_000) / 100;
+    const home = pct(p.home), draw = pct(p.draw), away = Math.round((100 - home - draw) * 100) / 100;
+    const fair = (v: number) => (v > 0 ? Math.round((100 / v) * 100) / 100 : 0);
+    return {
+      ...result,
+      prediction: {
+        ...result.prediction,
+        home_win: home, draw, away_win: away,
+        fair_home_odds: fair(home), fair_draw_odds: fair(draw), fair_away_odds: fair(away),
+        serving_model: serving.champion,
+        pipeline_version: `${result.prediction.pipeline_version}+${serving.champion}`,
+        reasons: [`Served by ${serving.champion}, promoted after beating the previous model on unseen matches.`, ...(result.prediction.reasons ?? [])],
+      },
+    };
+  } catch (err) {
+    logger.warn({ err, fixtureId: match.id, champion: serving.champion }, "promoted champion unavailable; serving original formula");
+    return result;
+  }
+}
+
+// ── Worker ───────────────────────────────────────────────────────────────────
+
+export async function runChallengerCycle() {
+  let settled = 0, promoted: string | null = null, error: string | null = null;
+  try {
+    settled = await settleChallengerPredictions();
+    await refitCalibration();
+    promoted = await runPromotionGate();
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+    logger.warn({ err }, "challenger cycle failed");
+  }
+  lastRun = { at: new Date().toISOString(), settled, promoted, error };
+  return lastRun;
+}
+
+export function startChallengerWorker() {
+  if (workerTimer || process.env.MODEL_CHALLENGERS_ENABLED === "false") return;
+  const interval = Number(process.env.CHALLENGER_CYCLE_MS ?? 30 * 60_000);
+  const first = setTimeout(() => { void ensureTeamRatings(); void runChallengerCycle(); }, 90_000);
+  first.unref();
+  workerTimer = setInterval(() => { void runChallengerCycle(); }, interval);
+  workerTimer.unref();
+}
+
+export function stopChallengerWorker() {
+  if (workerTimer) clearInterval(workerTimer);
+  workerTimer = null;
+}

@@ -187,6 +187,21 @@ export interface LivePlayerPerformance {
   home: LivePlayerPerformanceRecord[];
   away: LivePlayerPerformanceRecord[];
 }
+/**
+ * Optional changes used only to compute challenger variants of the model
+ * (analysis plan steps 1 and 6). The served champion never passes these.
+ */
+export interface EnhancedPredictionOverrides {
+  /** Replace the hand-set league home edge with a fitted one. */
+  homeAdvantage?: number;
+  /** Leave out the last-5 form factor. */
+  disableForm?: boolean;
+  /** Leave out the head-to-head blend. */
+  disableH2H?: boolean;
+  /** Leave out injury and confirmed-lineup factors. */
+  disablePlayerFactors?: boolean;
+}
+
 export interface EnhancedPrediction {
   home_win: number;
   draw: number;
@@ -234,6 +249,12 @@ export interface EnhancedPrediction {
   away_spotlights?: TeamSpotlights;
   player_influence?: MatchPlayerInfluence;
   live_player_performance?: LivePlayerPerformance;
+  /** Probabilities (0-1) before the learned base-rate blend (plan step 5). */
+  pre_prior_home_win?: number;
+  pre_prior_draw?: number;
+  pre_prior_away_win?: number;
+  /** Weight of the learned base-rate blend actually applied (0 when off). */
+  prior_weight?: number;
 }
 
 type ApiPlayer = {
@@ -794,7 +815,8 @@ export async function getEnhancedPrediction(
   homeGpg: number, homeCpg: number, awayGpg: number, awayCpg: number,
   homeTeamName = "", awayTeamName = "", matchMinute: number | null = null, isLive = false,
   liveScoreHome: number | null = null, liveScoreAway: number | null = null,
-  homeForm = "", awayForm = "", liveStats?: LiveMatchStatsInput
+  homeForm = "", awayForm = "", liveStats?: LiveMatchStatsInput,
+  overrides: EnhancedPredictionOverrides = {},
 ): Promise<EnhancedPrediction> {
   if (matchStatus !== "upcoming" && matchStatus !== "live") {
     throw new Error(`Prediction generation blocked for non-forecast status: ${matchStatus}`);
@@ -802,9 +824,9 @@ export async function getEnhancedPrediction(
   // Only parameter sets that improved the newest chronological holdout are
   // persisted by the adaptive learner and therefore available here.
   const learnedWeights = await getLearnedWeights();
-  const homeAdv = getHomeAdvantage(leagueId, learnedWeights.leagueHomeAdvOverride);
-  const homeFormFactor = scaleMultiplicativeFactor(formFactor(homeForm), learnedWeights.formFactorScale);
-  const awayFormFactor = scaleMultiplicativeFactor(formFactor(awayForm), learnedWeights.formFactorScale);
+  const homeAdv = overrides.homeAdvantage ?? getHomeAdvantage(leagueId, learnedWeights.leagueHomeAdvOverride);
+  const homeFormFactor = overrides.disableForm ? 1 : scaleMultiplicativeFactor(formFactor(homeForm), learnedWeights.formFactorScale);
+  const awayFormFactor = overrides.disableForm ? 1 : scaleMultiplicativeFactor(formFactor(awayForm), learnedWeights.formFactorScale);
   const rawStrength = relativeStrengthAdjustment(
     liveStats?.home?.strength_index ?? 1,
     liveStats?.away?.strength_index ?? 1,
@@ -879,17 +901,27 @@ export async function getEnhancedPrediction(
       awayLineupFactor = scaleMultiplicativeFactor(legacyAway, learnedWeights.lineupFactorScale);
     }
   }
-  const adjHomeXG = baseHomeXG * homeFormFactor * homeLineupFactor * homeInjuryFactor;
-  const adjAwayXG = baseAwayXG * awayFormFactor * awayLineupFactor * awayInjuryFactor;
+  if (overrides.disablePlayerFactors) {
+    homeLineupFactor = 1; awayLineupFactor = 1;
+  }
+  const playerFactorOn = !overrides.disablePlayerFactors;
+  const adjHomeXG = baseHomeXG * homeFormFactor * homeLineupFactor * (playerFactorOn ? homeInjuryFactor : 1);
+  const adjAwayXG = baseAwayXG * awayFormFactor * awayLineupFactor * (playerFactorOn ? awayInjuryFactor : 1);
   const adjusted = poissonProbs(adjHomeXG, adjAwayXG);
   let finalHome = adjusted.homeWin, finalDraw = adjusted.draw, finalAway = adjusted.awayWin;
-  if (h2hResult && h2hResult.matches > 0) {
+  if (h2hResult && h2hResult.matches > 0 && !overrides.disableH2H) {
     const blended = blendH2H(finalHome, finalDraw, finalAway, h2hResult, learnedWeights.h2hWeightCap);
     finalHome = blended.home; finalDraw = blended.draw; finalAway = blended.away;
   }
+  // Plan step 5: keep the probabilities as they were before the learned
+  // base-rate blend, so the calibrator trains on what serving starts from.
+  const prePriorTotal = finalHome + finalDraw + finalAway;
+  const prePrior = { home: finalHome / prePriorTotal, draw: finalDraw / prePriorTotal, away: finalAway / prePriorTotal };
+  let priorWeightApplied = 0;
   const learnedPriors = learnedWeights.globalOutcomePriors;
   if (!isLive && learnedWeights.sampleSize >= MIN_SAMPLE_FOR_WEIGHT_UPDATE && learnedPriors) {
     const w = Math.max(0.05, Math.min(0.20, learnedWeights.drawNudgeWeight));
+    priorWeightApplied = w;
     finalHome = (1 - w) * finalHome + w * learnedPriors.home * 100;
     finalDraw = (1 - w) * finalDraw + w * learnedPriors.draw * 100;
     finalAway = (1 - w) * finalAway + w * learnedPriors.away * 100;
@@ -966,5 +998,7 @@ export async function getEnhancedPrediction(
     home_spotlights: buildSpotlights(homeSquadMap), away_spotlights: buildSpotlights(awaySquadMap),
     player_influence: playerInfluence ?? undefined,
     live_player_performance: currentPlayerPerformance,
+    pre_prior_home_win: prePrior.home, pre_prior_draw: prePrior.draw, pre_prior_away_win: prePrior.away,
+    prior_weight: priorWeightApplied,
   };
 }
