@@ -9,3 +9,8 @@ node_modules/
 coverage/
 .vite/
 *.tsbuildinfo
+
+# Build output regenerated on every deploy (vite outDir and esbuild bundle).
+dashboard-dist/
+api-server/dist/
+*.bak

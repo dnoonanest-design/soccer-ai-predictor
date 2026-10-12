@@ -8,6 +8,7 @@ import {
   BacktestScenario, MatchEvent, H2HMatch, TeamStats, PresentationPlayer, PresentationTeam,
 } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,6 +16,19 @@ import { Card } from "@/components/ui/card";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { decimalToFractional } from "@/lib/odds";
 import { computeXG, divergence } from "@/lib/xg";
+
+
+/**
+ * Poll while a match can still change; stop once it is finished or cancelled.
+ * Reads the match already cached by the page so panels need no extra request.
+ */
+function useMatchPollInterval(matchId: number, intervalMs: number) {
+  const queryClient = useQueryClient();
+  return () => {
+    const cached = queryClient.getQueryData(getGetMatchQueryKey(matchId)) as { status?: string } | undefined;
+    return cached?.status === "finished" || cached?.status === "cancelled" ? false : intervalMs;
+  };
+}
 
 function Tip({ children, text, side = "top" }: {
   children: React.ReactNode;
@@ -165,8 +179,9 @@ function MatchStatsPanel({ matchId, homeTeamName, awayTeamName }: {
   homeTeamName: string;
   awayTeamName: string;
 }) {
+  const statsPollInterval = useMatchPollInterval(matchId, 15000);
   const { data, isLoading } = useGetMatchStats(matchId, {
-    query: { refetchInterval: 15000, queryKey: getGetMatchStatsQueryKey(matchId) },
+    query: { refetchInterval: statsPollInterval, queryKey: getGetMatchStatsQueryKey(matchId) },
   });
   const liveHome = (data?.home ?? {}) as any;
   const liveAway = (data?.away ?? {}) as any;
@@ -501,8 +516,9 @@ function XGPanel({
   marketDraw?: number | null;
   marketAway?: number | null;
 }) {
+  const statsPollInterval = useMatchPollInterval(matchId, 15000);
   const { data, isLoading } = useGetMatchStats(matchId, {
-    query: { refetchInterval: 15000, queryKey: getGetMatchStatsQueryKey(matchId) },
+    query: { refetchInterval: statsPollInterval, queryKey: getGetMatchStatsQueryKey(matchId) },
   });
 
   if (isLoading) return null;
@@ -945,9 +961,10 @@ function MatchTimeline({ matchId, homeTeamName, awayTeamName }: {
   homeTeamName: string;
   awayTeamName: string;
 }) {
+  const eventsPollInterval = useMatchPollInterval(matchId, 30000);
   const { data, isLoading } = useGetMatchEvents(matchId, {
     query: {
-      refetchInterval: 30000,
+      refetchInterval: eventsPollInterval,
       queryKey: getGetMatchEventsQueryKey(matchId),
     },
   });
@@ -1201,7 +1218,10 @@ export default function MatchDetail() {
   const { data: match, isLoading, isError } = useGetMatch(matchId, {
     query: {
       enabled: !isNaN(matchId),
-      refetchInterval: 15000,
+      refetchInterval: (query) => {
+        const status = (query.state.data as { status?: string } | undefined)?.status;
+        return status === "finished" || status === "cancelled" ? false : 15000;
+      },
       queryKey: getGetMatchQueryKey(matchId),
     },
   });

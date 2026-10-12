@@ -9,6 +9,7 @@ import {
   type MatchPlayerInfluence,
   type PlayerInfluenceRecord,
 } from "./playerInfluenceService";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -33,7 +34,7 @@ function getCached<T>(key: string, ttl: number): T | null {
   return e.data;
 }
 function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, fetchedAt: Date.now() });
+  setBounded(cache, key, { data, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
 }
 async function apiFetch(path: string): Promise<unknown> {
   if (!API_FOOTBALL_KEY) return null;

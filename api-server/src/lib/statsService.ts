@@ -7,6 +7,7 @@ import {
 } from "./competitionStrength";
 import { configuredFootballSeason } from "./season";
 import { getTrackedCompetition } from "./leagueConfig";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -127,7 +128,7 @@ function getCached<T>(key: string, ttl: number): T | null {
   return entry.data;
 }
 function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, fetchedAt: Date.now() });
+  setBounded(cache, key, { data, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
 }
 
 async function fetchFootball(path: string): Promise<unknown> {

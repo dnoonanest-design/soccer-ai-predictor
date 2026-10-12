@@ -9,6 +9,7 @@ import { getBackgroundRuntimeStatus } from "../lib/backgroundLearnerService";
 import { getMatchSnapshotStatus } from "../lib/soccerService";
 import { getStatsCoverageStatus } from "../lib/statsService";
 import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaselineService";
+import { hasValidAdminKey } from "../lib/security";
 
 const router: IRouter = Router();
 
@@ -27,12 +28,17 @@ function getReleaseIdentity() {
 
 // Liveness: the web process is running. Do not restart the app solely because
 // an external data provider is unavailable; expose those dependencies separately.
-router.get("/healthz", (_req, res) => {
+// Public callers (Railway, uptime monitors, CI) get the status only. Quota
+// usage, commit hashes and worker internals need the X-Admin-Key header.
+router.get("/healthz", (req, res) => {
   const apiFootball = getApiFootballProviderHealth();
+  if (!hasValidAdminKey(req)) {
+    return res.json({ status: "ok", live_data_status: apiFootball.state });
+  }
   const footballQuota = getQuotaOptimizationStatus();
   const oddsQuota = getOddsOptimizationStatus();
   const liveDiscoveryGuard = getLiveDiscoveryConcurrencyGuardStatus();
-  res.json({
+  return res.json({
     status: "ok",
     live_data_status: apiFootball.state,
     providers: {
@@ -49,7 +55,7 @@ router.get("/healthz", (_req, res) => {
 // Readiness: whether the predictor can currently serve trustworthy live data.
 // Bookmaker odds remain an independent intelligence layer, so an odds-provider
 // quota state does not make the core football predictor unready.
-router.get("/health/readiness", async (_req, res) => {
+router.get("/health/readiness", async (req, res) => {
   const apiFootball = getApiFootballProviderHealth();
   const footballQuota = getQuotaOptimizationStatus();
   const oddsQuota = getOddsOptimizationStatus();
@@ -59,6 +65,15 @@ router.get("/health/readiness", async (_req, res) => {
   const providerReady = apiFootball.state === "healthy" || apiFootball.state === "unknown";
   const backgroundReady = process.env.NODE_ENV !== "production" || (background.enabled && background.started);
   const ready = providerReady && database.ready && backgroundReady;
+
+  if (!hasValidAdminKey(req)) {
+    return res.status(ready ? 200 : 503).json({
+      status: ready ? "ready" : "degraded",
+      live_data_status: apiFootball.state,
+      database_ready: database.ready,
+      background_ready: backgroundReady,
+    });
+  }
 
   return res.status(ready ? 200 : 503).json({
     status: ready ? "ready" : "degraded",

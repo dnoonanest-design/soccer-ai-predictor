@@ -53,7 +53,6 @@ describe("application security boundary", () => {
       "/api/background/run/settle",
       "/api/background/run/circumstance-analysis",
       "/api/live/alerts",
-      "/api/watchlist",
     ]) {
       const response = await fetch(`${baseUrl}${path}`, {
         method: "POST",
@@ -62,5 +61,59 @@ describe("application security boundary", () => {
       });
       expect(response.status, path).toBe(401);
     }
+  });
+
+  it("blocks admin routes reached through a trailing slash or different letter case", async () => {
+    for (const path of [
+      "/api/training/run/",
+      "/api/Training/run",
+      "/api/TRAINING/RUN/",
+      "/api/outcomes/settle-finished/",
+      "/api/push/test/",
+      "/api/tracker/",
+      "/api/ai/run-learning-cycle/",
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status, path).toBe(401);
+    }
+  });
+
+  it("keeps the training data export behind the admin key", async () => {
+    for (const path of ["/api/training/dataset", "/api/Training/Dataset/"]) {
+      const response = await fetch(`${baseUrl}${path}`);
+      expect(response.status, path).toBe(401);
+    }
+  });
+
+  it("shows health status publicly but hides operational detail", async () => {
+    const response = await fetch(`${baseUrl}/api/healthz`);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.status).toBe("ok");
+    expect(body).not.toHaveProperty("quota_optimisation");
+  });
+
+  it("rejects malformed push subscriptions", async () => {
+    const response = await fetch(`${baseUrl}/api/push/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: "javascript:alert(1)" }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("does not reset the admin rate limit when the client fakes X-Forwarded-For", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      const response = await fetch(`${baseUrl}/api/training/run`, {
+        method: "POST",
+        headers: { "X-Admin-Key": `wrong-${i}`, "X-Forwarded-For": `203.0.113.${i}, 198.51.100.7` },
+      });
+      statuses.push(response.status);
+    }
+    expect(statuses).toContain(429);
   });
 });

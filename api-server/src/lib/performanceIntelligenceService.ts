@@ -1,6 +1,7 @@
 import { pool } from "@workspace/db";
 import { getTrackedCompetition } from "./leagueConfig";
 import { verifyPredictionAuditIntegrity } from "./predictionAccuracyAuditService";
+import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
 
 function n(value: unknown): number | null {
   if (value == null) return null;
@@ -39,32 +40,49 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
     return pool.query(sql, [ids, cutoff, ...extra]);
   };
 
-  const [byLeague, byPick, byDataTier, byPhase, lineup, manchester, recentDays, warningRows, market] = await Promise.all([
-    query(`SELECT league_id, COUNT(*)::int samples, AVG(correct::int) accuracy,
-                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence
-             FROM prediction_audit_records
-            WHERE settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
+  // Every fixture-level breakdown below uses canonical_prematch: the latest
+  // integrity-verified prediction captured before kickoff, one row per
+  // fixture. In-play checkpoints are reported only in their own
+  // inPlayByCheckpoint block and never mixed into pre-match accuracy.
+  const canonical = `WITH ${canonicalPrematchAuditCte("$1")}`;
+  const metricColumns = `COUNT(*)::int samples, AVG(correct::int) accuracy,
+                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence`;
+  const [byLeague, byPick, byDataTier, byPhase, inPlayByCheckpoint, lineup, manchester, recentDays, warningRows, market] = await Promise.all([
+    query(`${canonical}
+           SELECT league_id, ${metricColumns}
+             FROM canonical_prematch
+            WHERE settled_at IS NOT NULL AND captured_at >= $2
             GROUP BY league_id ORDER BY samples DESC`),
-    query(`SELECT predicted_outcome AS group_name, COUNT(*)::int samples, AVG(correct::int) accuracy,
-                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence
-             FROM prediction_audit_records
-            WHERE settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
+    query(`${canonical}
+           SELECT predicted_outcome AS group_name, ${metricColumns}
+             FROM canonical_prematch
+            WHERE settled_at IS NOT NULL AND captured_at >= $2
             GROUP BY predicted_outcome ORDER BY samples DESC`),
-    query(`SELECT data_tier AS group_name, COUNT(*)::int samples, AVG(correct::int) accuracy,
-                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence
-             FROM prediction_audit_records
-            WHERE settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
+    query(`${canonical}
+           SELECT data_tier AS group_name, ${metricColumns}
+             FROM canonical_prematch
+            WHERE settled_at IS NOT NULL AND captured_at >= $2
             GROUP BY data_tier ORDER BY samples DESC`),
-    query(`SELECT phase AS group_name, COUNT(*)::int samples, AVG(correct::int) accuracy,
-                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence
+    // Phase comparison: pre-match uses one row per fixture; in-play uses all
+    // in-play checkpoints. The two rows are shown side by side, never summed.
+    query(`${canonical}
+           SELECT 'prematch' AS group_name, ${metricColumns}
+             FROM canonical_prematch
+            WHERE settled_at IS NOT NULL AND captured_at >= $2
+           UNION ALL
+           SELECT 'live' AS group_name, ${metricColumns}
              FROM prediction_audit_records
-            WHERE settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
-            GROUP BY phase ORDER BY phase`),
-    query(`SELECT CASE WHEN COALESCE(mc.home_starting_xi_count,0) >= 11 AND COALESCE(mc.away_starting_xi_count,0) >= 11
+            WHERE phase = 'live' AND settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2`),
+    query(`SELECT checkpoint AS group_name, ${metricColumns}
+             FROM prediction_audit_records
+            WHERE phase = 'live' AND settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
+            GROUP BY checkpoint ORDER BY checkpoint`),
+    query(`${canonical}
+           SELECT CASE WHEN COALESCE(mc.home_starting_xi_count,0) >= 11 AND COALESCE(mc.away_starting_xi_count,0) >= 11
                        THEN 'confirmed-lineups' ELSE 'lineups-not-confirmed' END AS group_name,
                   COUNT(*)::int samples, AVG(a.correct::int) accuracy, AVG(a.brier_score) brier_score,
                   AVG(a.log_loss) log_loss, AVG(a.pick_confidence) average_confidence
-             FROM prediction_audit_records a
+             FROM canonical_prematch a
              LEFT JOIN LATERAL (
                SELECT x.home_starting_xi_count, x.away_starting_xi_count
                  FROM match_circumstances x
@@ -73,23 +91,24 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
                 ORDER BY x.updated_at DESC
                 LIMIT 1
              ) mc ON TRUE
-            WHERE a.settled_at IS NOT NULL AND a.id = ANY($1::bigint[]) AND a.captured_at >= $2
+            WHERE a.settled_at IS NOT NULL AND a.captured_at >= $2
             GROUP BY group_name ORDER BY samples DESC`),
-    query(`SELECT CASE WHEN EXISTS (
+    query(`${canonical}
+           SELECT CASE WHEN EXISTS (
                          SELECT 1 FROM prediction_snapshots ps
                           WHERE ps.fixture_id = a.fixture_id
-                            AND ps.created_at <= COALESCE(a.kickoff_at, a.captured_at)
+                            AND ps.created_at <= a.captured_at
                             AND COALESCE(ps.reasons_json,'') ILIKE '%Manchester Rule:%'
                        ) THEN 'manchester-rule-tagged' ELSE 'not-tagged' END AS group_name,
                   COUNT(*)::int samples, AVG(a.correct::int) accuracy, AVG(a.brier_score) brier_score,
                   AVG(a.log_loss) log_loss, AVG(a.pick_confidence) average_confidence
-             FROM prediction_audit_records a
-            WHERE a.settled_at IS NOT NULL AND a.id = ANY($1::bigint[]) AND a.captured_at >= $2
+             FROM canonical_prematch a
+            WHERE a.settled_at IS NOT NULL AND a.captured_at >= $2
             GROUP BY group_name ORDER BY samples DESC`),
-    query(`SELECT DATE(captured_at) AS day, COUNT(*)::int samples, AVG(correct::int) accuracy,
-                  AVG(brier_score) brier_score, AVG(log_loss) log_loss, AVG(pick_confidence) average_confidence
-             FROM prediction_audit_records
-            WHERE settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
+    query(`${canonical}
+           SELECT DATE(captured_at) AS day, ${metricColumns}
+             FROM canonical_prematch
+            WHERE settled_at IS NOT NULL AND captured_at >= $2
             GROUP BY DATE(captured_at) ORDER BY day`),
     pool.query(`SELECT verdict, missing_required_json, advisory_json, COUNT(*)::int samples
                   FROM lifecycle_reliability_fixtures
@@ -97,26 +116,48 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
                    AND COALESCE(last_evaluated_at, updated_at) >= $1
                  GROUP BY verdict, missing_required_json, advisory_json
                  ORDER BY samples DESC`, [cutoff]),
-    query(`WITH audited AS (
-             SELECT DISTINCT ON (fixture_id) fixture_id, home_win_prob, draw_prob, away_win_prob, captured_at
-               FROM prediction_audit_records
-              WHERE phase='prematch' AND settled_at IS NOT NULL AND id = ANY($1::bigint[]) AND captured_at >= $2
-              ORDER BY fixture_id, captured_at DESC
-           ), market_edges AS (
-             SELECT m.fixture_id,
-                    (ARRAY_AGG(m.implied_home_prob ORDER BY m.observed_at ASC))[1] first_home,
-                    (ARRAY_AGG(m.implied_draw_prob ORDER BY m.observed_at ASC))[1] first_draw,
-                    (ARRAY_AGG(m.implied_away_prob ORDER BY m.observed_at ASC))[1] first_away,
-                    (ARRAY_AGG(m.implied_home_prob ORDER BY m.observed_at DESC))[1] last_home,
-                    (ARRAY_AGG(m.implied_draw_prob ORDER BY m.observed_at DESC))[1] last_draw,
-                    (ARRAY_AGG(m.implied_away_prob ORDER BY m.observed_at DESC))[1] last_away
-               FROM market_odds_snapshots m JOIN audited a ON a.fixture_id=m.fixture_id
-              GROUP BY m.fixture_id
+    // Market benchmark on identical fixtures. "Closing" = each bookmaker's
+    // last no-vig price observed before kickoff, averaged across bookmakers.
+    // Odds are compared after the fact only; they never feed the model.
+    query(`${canonical}, audited AS (
+             SELECT fixture_id, kickoff_at, home_win_prob, draw_prob, away_win_prob,
+                    actual_outcome, correct, brier_score
+               FROM canonical_prematch
+              WHERE settled_at IS NOT NULL AND captured_at >= $2
+                AND actual_outcome IN ('home','draw','away')
+           ), book_close AS (
+             SELECT DISTINCT ON (m.fixture_id, m.bookmaker_key)
+                    m.fixture_id, m.implied_home_prob h, m.implied_draw_prob d, m.implied_away_prob aw
+               FROM market_odds_snapshots m
+               JOIN audited x ON x.fixture_id = m.fixture_id
+              WHERE m.observed_at < x.kickoff_at
+              ORDER BY m.fixture_id, m.bookmaker_key, m.observed_at DESC
+           ), book_open AS (
+             SELECT DISTINCT ON (m.fixture_id, m.bookmaker_key)
+                    m.fixture_id, m.implied_home_prob h, m.implied_draw_prob d, m.implied_away_prob aw
+               FROM market_odds_snapshots m
+               JOIN audited x ON x.fixture_id = m.fixture_id
+              WHERE m.observed_at < x.kickoff_at
+              ORDER BY m.fixture_id, m.bookmaker_key, m.observed_at ASC
+           ), closing AS (
+             SELECT fixture_id, AVG(h) h, AVG(d) d, AVG(aw) aw FROM book_close GROUP BY fixture_id
+           ), opening AS (
+             SELECT fixture_id, AVG(h) h, AVG(d) d, AVG(aw) aw FROM book_open GROUP BY fixture_id
            )
            SELECT COUNT(*)::int samples,
-                  AVG((ABS(last_home-first_home)+ABS(last_draw-first_draw)+ABS(last_away-first_away))/3.0) avg_market_movement,
-                  AVG((ABS(a.home_win_prob-last_home)+ABS(a.draw_prob-last_draw)+ABS(a.away_win_prob-last_away))/3.0) avg_model_market_gap
-             FROM audited a JOIN market_edges m ON m.fixture_id=a.fixture_id`),
+                  AVG((ABS(c.h-o.h)+ABS(c.d-o.d)+ABS(c.aw-o.aw))/3.0) avg_market_movement,
+                  AVG((ABS(x.home_win_prob-c.h)+ABS(x.draw_prob-c.d)+ABS(x.away_win_prob-c.aw))/3.0) avg_model_market_gap,
+                  AVG(x.correct::int) model_accuracy,
+                  AVG(x.brier_score) model_brier,
+                  AVG(POWER(c.h/100.0 - CASE WHEN x.actual_outcome='home' THEN 1 ELSE 0 END, 2)
+                    + POWER(c.d/100.0 - CASE WHEN x.actual_outcome='draw' THEN 1 ELSE 0 END, 2)
+                    + POWER(c.aw/100.0 - CASE WHEN x.actual_outcome='away' THEN 1 ELSE 0 END, 2)) market_brier,
+                  AVG(CASE WHEN (CASE WHEN c.h >= c.d AND c.h >= c.aw THEN 'home'
+                                      WHEN c.aw >= c.d THEN 'away' ELSE 'draw' END) = x.actual_outcome
+                           THEN 1 ELSE 0 END) market_accuracy
+             FROM audited x
+             JOIN closing c ON c.fixture_id = x.fixture_id
+             JOIN opening o ON o.fixture_id = x.fixture_id`),
   ]);
 
   const leagueRows = metricRows(byLeague.rows).map((row) => {
@@ -186,6 +227,11 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
     byPickSide: metricRows(byPick.rows),
     byDataQuality: metricRows(byDataTier.rows),
     byPhase: metricRows(byPhase.rows),
+    inPlayByCheckpoint: metricRows(inPlayByCheckpoint.rows),
+    scope: {
+      prematch: "byLeague, byCompetitionType, byPickSide, byDataQuality, byLineupState, manchesterRule, dailyTrend and marketBenchmark use one integrity-verified pre-kickoff prediction per fixture.",
+      inPlay: "inPlayByCheckpoint and the 'live' row of byPhase contain in-play checkpoints only and are never mixed into pre-match figures.",
+    },
     byLineupState: lineupMetrics,
     manchesterRule: manchesterMetrics,
     featureEvidence: {
@@ -200,6 +246,15 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
       samples: Number(marketRow.samples ?? 0),
       averageMarketMovementPctPoints: n(marketRow.avg_market_movement),
       averageModelMarketGapPctPoints: n(marketRow.avg_model_market_gap),
+      closing: "each bookmaker's last no-vig price before kickoff, averaged across bookmakers",
+      modelAccuracy: n(marketRow.model_accuracy),
+      marketAccuracy: n(marketRow.market_accuracy),
+      modelBrierScore: n(marketRow.model_brier),
+      marketBrierScore: n(marketRow.market_brier),
+      // Positive = the model beat the closing market on the same fixtures.
+      brierEdgeVsMarket: marketRow.model_brier == null || marketRow.market_brier == null
+        ? null
+        : n(Number(marketRow.market_brier) - Number(marketRow.model_brier)),
     },
     learningSafety: {
       minimumPromotionSamples: 500,

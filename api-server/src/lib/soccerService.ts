@@ -10,6 +10,7 @@ import {
   markApiFootballSuccess,
 } from "./apiFootballReliability";
 import { AsyncSnapshotCache } from "./asyncSnapshotCache";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -79,7 +80,7 @@ function getCached<T>(key: string, ttl: number): T | null {
 }
 
 function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, fetchedAt: Date.now() });
+  setBounded(cache, key, { data, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
 }
 /**
  * Resolve the active season for a given league/competition.
@@ -318,8 +319,27 @@ export interface Match {
   minute: number | null;
   score: Score;
   score_ht: Score | null;
+  /** Score after 90 minutes plus stoppage time, before any extra time. */
+  score_regular_time?: Score | null;
   kickoff: string;
   odds: Odds;
+}
+
+/**
+ * The score that settles 1X2, over/under and BTTS predictions. Those are
+ * 90-minute markets, so a cup tie decided in extra time or on penalties is
+ * settled on its regular-time score, not the extra-time total in `goals`.
+ */
+export function settlementScore(match: Pick<Match, "score" | "status_detail" | "score_regular_time">): Score {
+  const regular = match.score_regular_time;
+  if (
+    (match.status_detail === "AET" || match.status_detail === "PEN") &&
+    regular?.home != null &&
+    regular?.away != null
+  ) {
+    return regular;
+  }
+  return match.score;
 }
 
 export interface League {
@@ -578,14 +598,14 @@ async function reconcileStaleLiveFixture(
 
   const lastAttempt = staleLiveRefreshAt.get(fixtureId) ?? 0;
   if (Date.now() - lastAttempt < STALE_LIVE_RECHECK_MS) return cached;
-  staleLiveRefreshAt.set(fixtureId, Date.now());
+  setBounded(staleLiveRefreshAt, fixtureId, Date.now(), DEFAULT_CACHE_MAX_ENTRIES);
 
   try {
     const path = `/fixtures?id=${fixtureId}`;
     const rows = requireFixtureArray(await fetchFootball(path), path);
     const refreshed = rows.find((row) => row.fixture.id === fixtureId) ?? null;
     if (refreshed) {
-      staleLiveOverride.set(fixtureId, { data: refreshed, fetchedAt: Date.now() });
+      setBounded(staleLiveOverride, fixtureId, { data: refreshed, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
       const status = normaliseStatus(refreshed.fixture.status.short);
       if (status !== "live") {
         logger.info(
@@ -800,7 +820,7 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
 
       const lastLogged = staleLiveSuppressionLogAt.get(fixtureId) ?? 0;
       if (Date.now() - lastLogged >= STALE_LIVE_RECHECK_MS) {
-        staleLiveSuppressionLogAt.set(fixtureId, Date.now());
+        setBounded(staleLiveSuppressionLogAt, fixtureId, Date.now(), DEFAULT_CACHE_MAX_ENTRIES);
         logger.warn(
           {
             fixtureId,
@@ -955,6 +975,14 @@ function fixtureToMatch(
         ? {
             home: fixture.score.halftime.home,
             away: fixture.score.halftime.away,
+          }
+        : null,
+    score_regular_time:
+      fixture.score?.fulltime?.home != null &&
+      fixture.score?.fulltime?.away != null
+        ? {
+            home: fixture.score.fulltime.home,
+            away: fixture.score.fulltime.away,
           }
         : null,
     kickoff: fixture.fixture.date,

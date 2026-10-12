@@ -38,7 +38,7 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",        // inline scripts needed for the SPA
+      "script-src 'self'",                        // the Vite build has no inline scripts
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", // Tailwind + hosted font CSS
       "img-src 'self' data: https:",               // team/league logos from API
       "connect-src 'self' https://v3.football.api-sports.io https://api.the-odds-api.com",
@@ -118,12 +118,10 @@ const pruneRateLimitsTimer = setInterval(() => {
 pruneRateLimitsTimer.unref();
 
 function getClientId(req: Request): string {
-  // Prefer X-Forwarded-For (set by Railway's proxy), fall back to socket address
-  const forwarded = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0]?.trim())
-    ?? req.socket.remoteAddress
-    ?? "unknown";
-  return ip;
+  // req.ip honours app.set("trust proxy", 1): it takes the address Railway's
+  // proxy saw, not the left-most X-Forwarded-For entry, which the client can
+  // set to anything to get a fresh rate-limit bucket on every request.
+  return req.ip ?? req.socket.remoteAddress ?? "unknown";
 }
 
 function createRateLimiter(maxRequests: number, windowMs: number, message: string) {
@@ -200,6 +198,17 @@ export function requireAdminKey(req: Request, res: Response, next: NextFunction)
     return;
   }
   next();
+}
+
+/**
+ * True when the request carries the configured admin key. Used by read-only
+ * endpoints that are public in summary form but reveal operational detail
+ * (quota usage, commit hashes, worker state) only to the operator.
+ */
+export function hasValidAdminKey(req: Request): boolean {
+  if (!ADMIN_SECRET) return !IS_PRODUCTION;
+  const provided = req.headers["x-admin-key"];
+  return Boolean(provided) && timingSafeEqual(String(provided), ADMIN_SECRET);
 }
 
 /** Constant-time string comparison to prevent timing-based secret extraction. */
