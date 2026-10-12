@@ -66,21 +66,25 @@ const adminMutationPaths = [
 ];
 
 app.use("/api", (req, res, next) => {
-  if (req.method === "GET" && req.path === "/live/stream") {
+  // Express routes ignore letter case and accept a trailing slash, so match
+  // the guard against the same normalised path the router will dispatch on.
+  // Without this, POST /api/training/run/ or /api/Training/run skips the key.
+  const routePath = req.path.toLowerCase().replace(/\/+$/, "") || "/";
+  if (req.method === "GET" && routePath === "/live/stream") {
     return sseConnectionLimit(req, res, next);
   }
-  if (req.path === "/push/subscribe" && req.method === "POST") {
+  if (routePath === "/push/subscribe" && req.method === "POST") {
     return pushRateLimit(req, res, next);
   }
   if (
     req.method === "GET" &&
-    (/^\/matches\/\d+\/(?:stats|events|squad)$/.test(req.path) || req.path === "/xg")
+    (/^\/matches\/\d+\/(?:stats|events|squad)$/.test(routePath) || routePath === "/xg")
   ) {
     return statsRateLimit(req, res, next);
   }
   if (
     ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) &&
-    adminMutationPaths.some((pattern) => pattern.test(req.path))
+    adminMutationPaths.some((pattern) => pattern.test(routePath))
   ) {
     return adminRateLimit(req, res, () => requireAdminKey(req, res, next));
   }

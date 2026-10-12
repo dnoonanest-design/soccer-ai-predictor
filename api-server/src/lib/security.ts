@@ -118,12 +118,10 @@ const pruneRateLimitsTimer = setInterval(() => {
 pruneRateLimitsTimer.unref();
 
 function getClientId(req: Request): string {
-  // Prefer X-Forwarded-For (set by Railway's proxy), fall back to socket address
-  const forwarded = req.headers["x-forwarded-for"];
-  const ip = (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0]?.trim())
-    ?? req.socket.remoteAddress
-    ?? "unknown";
-  return ip;
+  // req.ip honours app.set("trust proxy", 1): it takes the address Railway's
+  // proxy saw, not the left-most X-Forwarded-For entry, which the client can
+  // set to anything to get a fresh rate-limit bucket on every request.
+  return req.ip ?? req.socket.remoteAddress ?? "unknown";
 }
 
 function createRateLimiter(maxRequests: number, windowMs: number, message: string) {

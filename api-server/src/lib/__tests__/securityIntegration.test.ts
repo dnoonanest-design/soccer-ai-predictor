@@ -63,4 +63,35 @@ describe("application security boundary", () => {
       expect(response.status, path).toBe(401);
     }
   });
+
+  it("blocks admin routes reached through a trailing slash or different letter case", async () => {
+    for (const path of [
+      "/api/training/run/",
+      "/api/Training/run",
+      "/api/TRAINING/RUN/",
+      "/api/outcomes/settle-finished/",
+      "/api/push/test/",
+      "/api/tracker/",
+      "/api/ai/run-learning-cycle/",
+    ]) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status, path).toBe(401);
+    }
+  });
+
+  it("does not reset the admin rate limit when the client fakes X-Forwarded-For", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      const response = await fetch(`${baseUrl}/api/training/run`, {
+        method: "POST",
+        headers: { "X-Admin-Key": `wrong-${i}`, "X-Forwarded-For": `203.0.113.${i}, 198.51.100.7` },
+      });
+      statuses.push(response.status);
+    }
+    expect(statuses).toContain(429);
+  });
 });
