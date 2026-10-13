@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dixonColesOutcomes, expectedGoalsFromRatings, fitTeamRatings, shrinkTowardPriors, type RatingMatch } from "../teamRatings";
+import { dixonColesMarkets, dixonColesOutcomes, expectedGoalsFromRatings, fitTeamRatings, shrinkTowardPriors, type RatingMatch } from "../teamRatings";
 import { applyCalibration, brier, fitCalibration, IDENTITY_CALIBRATION } from "../outcomeCalibration";
 
 // Deterministic pseudo-random numbers so the synthetic league is identical every run.
@@ -77,6 +77,16 @@ describe("score grid and shrinkage", () => {
     const p = dixonColesOutcomes(1.6, 1.1);
     expect(p.home + p.draw + p.away).toBeCloseTo(1, 6);
     expect(p.home).toBeGreaterThan(p.away);
+  });
+
+  it("gives goal markets from the same grid as the 1X2 numbers", () => {
+    const o = dixonColesOutcomes(1.6, 1.1);
+    const m = dixonColesMarkets(1.6, 1.1);
+    expect(m.over25).toBeCloseTo(o.over25 * 100, 1);
+    expect(m.btts).toBeCloseTo(o.btts * 100, 1);
+    expect(m.over15).toBeGreaterThan(m.over25);
+    expect(m.over25).toBeGreaterThan(m.over35);
+    expect(m.correctScores.length).toBe(6);
   });
 
   it("shrinks toward league base rates, not 33/33/33 (plan step 1)", () => {

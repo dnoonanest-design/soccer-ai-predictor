@@ -80,12 +80,32 @@ const toUnit = (p: ThreeWay): UnitThreeWay => {
  * shrinkToward: null = the champion's own shrink toward 33/33/33; a set of
  * league base rates = plan step 1 (same strength, better target).
  */
+export type VariantMarkets = {
+  homeXg: number;
+  awayXg: number;
+  over15: number | null;
+  over25: number | null;
+  over35: number | null;
+  btts: number | null;
+  correctScores: Array<{ score: string; probability: number }>;
+};
+
 export async function computeLegacyVariant(
   match: Match,
   stats: MatchStatsResult,
   overrides: EnhancedPredictionOverrides,
   shrinkToward: UnitThreeWay | null,
 ): Promise<UnitThreeWay | null> {
+  return (await computeLegacyVariantDetail(match, stats, overrides, shrinkToward))?.probs ?? null;
+}
+
+/** As computeLegacyVariant, plus the variant's own expected goals and goal markets. */
+export async function computeLegacyVariantDetail(
+  match: Match,
+  stats: MatchStatsResult,
+  overrides: EnhancedPredictionOverrides,
+  shrinkToward: UnitThreeWay | null,
+): Promise<{ probs: UnitThreeWay; markets: VariantMarkets } | null> {
   if (!stats.home || !stats.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) return null;
   const raw = await getEnhancedPrediction(
     match.id, "upcoming", match.home_team.id, match.away_team.id, match.league_id,
@@ -96,9 +116,14 @@ export async function computeLegacyVariant(
   );
   const serving = selectServingProbabilities(raw, false);
   const quality = applyDataQualityReliability(serving, stats.home, stats.away, raw.confidence_score);
-  if (!shrinkToward) return toUnit(quality.probabilities);
+  const markets: VariantMarkets = {
+    homeXg: raw.home_xg, awayXg: raw.away_xg,
+    over15: raw.over_15 ?? null, over25: raw.over_25 ?? null, over35: raw.over_35 ?? null, btts: raw.btts ?? null,
+    correctScores: raw.correct_scores ?? [],
+  };
+  if (!shrinkToward) return { probs: toUnit(quality.probabilities), markets };
   const reliability = 0.52 + 0.48 * quality.score;
-  return shrinkTowardPriors(toUnit(serving), shrinkToward, 1 - reliability);
+  return { probs: shrinkTowardPriors(toUnit(serving), shrinkToward, 1 - reliability), markets };
 }
 
 export class PredictionWarmupError extends Error {

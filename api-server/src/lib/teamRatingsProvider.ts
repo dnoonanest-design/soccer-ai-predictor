@@ -40,7 +40,10 @@ const PREVIOUS_SEASON_TTL_MS = 7 * 24 * 60 * 60_000;
 const FINISHED = new Set(["FT", "AET", "PEN"]);
 
 const domesticLeagues = TRACKED_COMPETITIONS.filter((c) => c.kind === "league").map((c) => c.id);
-const seasonCache = new Map<string, { fixtures: ApiFixture[]; fetchedAt: number }>();
+/** Only the fields the fit needs (about 10,000 fixtures across 28 league-seasons). */
+type SlimFixture = { id: number; date: string; home: number; away: number; homeGoals: number; awayGoals: number };
+/** fixtures = finished matches only; teams = every team on the season's schedule. */
+const seasonCache = new Map<string, { fixtures: SlimFixture[]; teams: number[]; fetchedAt: number }>();
 let ratingSets = new Map<number, LeagueRatingSet>();
 /** API-Football team id -> domestic league id it was rated in. */
 let teamLeague = new Map<number, number>();
@@ -48,15 +51,26 @@ let lastRefresh = 0;
 let refreshing: Promise<void> | null = null;
 let lastError: string | null = null;
 
-async function loadSeason(leagueId: number, season: number, current: boolean): Promise<ApiFixture[]> {
+async function loadSeason(leagueId: number, season: number, current: boolean): Promise<{ fixtures: SlimFixture[]; teams: number[] }> {
   const key = `${leagueId}:${season}`;
   const cached = seasonCache.get(key);
   const ttl = current ? REFRESH_MS : PREVIOUS_SEASON_TTL_MS;
-  if (cached && Date.now() - cached.fetchedAt < ttl) return cached.fixtures;
+  if (cached && Date.now() - cached.fetchedAt < ttl) return cached;
   const data = await fetchFootball(`/fixtures?league=${leagueId}&season=${season}`);
-  const fixtures = Array.isArray(data) ? (data as ApiFixture[]) : [];
-  seasonCache.set(key, { fixtures, fetchedAt: Date.now() });
-  return fixtures;
+  const raw = Array.isArray(data) ? (data as ApiFixture[]) : [];
+  const fixtures: SlimFixture[] = [];
+  const teams = new Set<number>();
+  for (const f of raw) {
+    if (f.teams?.home?.id != null) teams.add(f.teams.home.id);
+    if (f.teams?.away?.id != null) teams.add(f.teams.away.id);
+    const score = regularTimeScore(f);
+    const id = f.fixture?.id, home = f.teams?.home?.id, away = f.teams?.away?.id, date = f.fixture?.date;
+    if (!score || id == null || home == null || away == null || !date) continue;
+    fixtures.push({ id, date, home, away, homeGoals: score.home, awayGoals: score.away });
+  }
+  const entry = { fixtures, teams: [...teams], fetchedAt: Date.now() };
+  seasonCache.set(key, entry);
+  return entry;
 }
 
 /** Regular-time score, so extra time never leaks into 90-minute ratings. */
@@ -97,17 +111,12 @@ async function refreshAll(): Promise<void> {
   const nextTeamLeague = new Map<number, number>();
   for (const leagueId of domesticLeagues) {
     try {
-      const fixtures = [
-        ...(await loadSeason(leagueId, season - 1, false)),
-        ...(await loadSeason(leagueId, season, true)),
-      ];
-      const rows: Array<RatingMatch & { id: number }> = [];
-      for (const f of fixtures) {
-        const score = regularTimeScore(f);
-        const id = f.fixture?.id, home = f.teams?.home?.id, away = f.teams?.away?.id, date = f.fixture?.date;
-        if (!score || id == null || home == null || away == null || !date) continue;
-        rows.push({ id, home: String(home), away: String(away), homeGoals: score.home, awayGoals: score.away, date });
-      }
+      const previousSeason = await loadSeason(leagueId, season - 1, false);
+      const currentSeason = await loadSeason(leagueId, season, true);
+      const fixtures = [...previousSeason.fixtures, ...currentSeason.fixtures];
+      const rows: Array<RatingMatch & { id: number }> = fixtures.map((f) => ({
+        id: f.id, home: String(f.home), away: String(f.away), homeGoals: f.homeGoals, awayGoals: f.awayGoals, date: f.date,
+      }));
       if (rows.length < 50) continue;
       const xg = await storedFinalXg(rows.map((r) => r.id));
       const goals = fitTeamRatings(rows, now);
@@ -122,7 +131,9 @@ async function refreshAll(): Promise<void> {
       const t = h + d + a;
       nextSets.set(leagueId, { leagueId, goals, goalsXg, xgFixtures: xg.size, priors: { home: h / t, draw: d / t, away: a / t }, fittedAt: now });
       // Current-season membership wins over last season (promotion/relegation).
-      const currentTeams = new Set(fixtures.filter((f) => String(f.fixture?.date ?? "") >= `${season}-07-01`).flatMap((f) => [f.teams?.home?.id, f.teams?.away?.id]));
+      // Membership from the whole current-season schedule, including fixtures
+      // not yet played (a newly promoted side may have few results so far).
+      const currentTeams = new Set(currentSeason.teams);
       for (const id of currentTeams) if (id != null) nextTeamLeague.set(id, leagueId);
     } catch (err) {
       logger.warn({ err, leagueId }, "team ratings: league refresh failed; keeping previous fit");

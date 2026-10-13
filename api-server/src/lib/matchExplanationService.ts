@@ -87,7 +87,7 @@ Facts (JSON): ${JSON.stringify(facts)}`;
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514",
+        model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5",
         max_tokens: 300,
         messages: [{ role: "user", content: prompt }],
       }),
