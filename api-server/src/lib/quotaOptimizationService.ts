@@ -518,11 +518,20 @@ function updateFixtureCaches(parsed: URL, stored: StoredResponse): void {
   }
   if (!Array.isArray(json.response)) return;
 
+  // Older fixtures (e.g. the shot-statistics backfill fetching past matches by
+  // id) are history: keeping them in the schedule would make a date lookup for
+  // that day return only the few backfilled matches instead of the full day.
+  // Fixtures up to 14 days old stay in the bundle cache, which settlement and
+  // player-stat recovery reuse; older ones are only passed through.
+  const oldestScheduleKickoff = Date.now() - 36 * 60 * 60_000;
+  const oldestBundleKickoff = Date.now() - 14 * 24 * 60 * 60_000;
   for (const fixture of json.response as FixtureRecord[]) {
     const id = Number(fixture.fixture?.id);
     const leagueId = Number(fixture.league?.id);
     if (!Number.isInteger(id) || id <= 0 || !isTrackedLeague(leagueId)) continue;
-    schedule.set(id, fixture);
+    const kickoff = fixture.fixture?.date ? Date.parse(fixture.fixture.date) : NaN;
+    if (Number.isFinite(kickoff) && kickoff < oldestBundleKickoff) continue;
+    if (!Number.isFinite(kickoff) || kickoff >= oldestScheduleKickoff) schedule.set(id, fixture);
     if (
       parsed.searchParams.has("ids") ||
       parsed.searchParams.has("id") ||

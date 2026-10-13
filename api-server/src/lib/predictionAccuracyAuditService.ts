@@ -3,6 +3,7 @@ import { logger } from "./logger";
 import { fetchFootball, getAllMatches, type Match } from "./soccerService";
 import { CANONICAL_PREDICTION_PIPELINE_VERSION, createCanonicalPrediction, type RawPredictionComponents } from "./canonicalPredictionService";
 import { recordChallengerPredictions } from "./modelChallengerService";
+import { recordInPlayChallenger } from "./inPlayModelService";
 import { getTrackedCompetition, isTrackedLeague } from "./leagueConfig";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { canonicalPrematchAuditCte } from "./canonicalPrematchAudit";
@@ -378,14 +379,8 @@ type AuditCapture = {
   prediction: AuditPrediction;
   stats: Awaited<ReturnType<typeof createCanonicalPrediction>>["stats"];
   rawComponents: RawPredictionComponents | null;
+  inplayAlternative?: { model: string; home: number; draw: number; away: number };
 };
-
-async function computeAuditPrediction(
-  match: Match,
-  includeCircumstances: boolean,
-): Promise<AuditPrediction | null> {
-  return (await computeAuditCapture(match, includeCircumstances))?.prediction ?? null;
-}
 
 async function computeAuditCapture(
   match: Match,
@@ -416,7 +411,7 @@ async function computeAuditCapture(
       ? `${raw.data_tier}+context-recorded`
       : raw.data_tier,
   };
-  return { prediction, stats, rawComponents: raw.raw_components ?? null };
+  return { prediction, stats, rawComponents: raw.raw_components ?? null, inplayAlternative: raw.inplay_alternative };
 }
 
 /** Plan step 5: what the sealed champion forecast was built from. */
@@ -624,6 +619,8 @@ async function capturePrematchCheckpoints(now: Date) {
             home: capture.prediction.home / 100,
             draw: capture.prediction.draw / 100,
             away: capture.prediction.away / 100,
+            over25: capture.prediction.over25 == null ? null : capture.prediction.over25 / 100,
+            btts: capture.prediction.btts == null ? null : capture.prediction.btts / 100,
           },
           capture.stats,
         ).catch((err) => logger.warn({ err, fixtureId: match.id }, "challenger capture failed"));
@@ -667,12 +664,24 @@ async function captureLiveCheckpoints() {
   let errors = 0;
   for (const { match, checkpoint } of due) {
     try {
-      const prediction = await computeAuditPrediction(match, true);
+      const capture = await computeAuditCapture(match, true);
       if (
-        prediction &&
-        (await insertSignedAuditRecord(match, "live", checkpoint, prediction))
+        capture &&
+        (await insertSignedAuditRecord(match, "live", checkpoint, capture.prediction))
       ) {
         captured++;
+        // The model not serving in play is stored beside the sealed live
+        // checkpoint and judged on the same fixtures (in-play table only).
+        await recordInPlayChallenger(
+          match,
+          checkpoint,
+          {
+            home: capture.prediction.home / 100,
+            draw: capture.prediction.draw / 100,
+            away: capture.prediction.away / 100,
+          },
+          capture.inplayAlternative,
+        ).catch((err) => logger.warn({ err, fixtureId: match.id }, "in-play challenger capture failed"));
       }
     } catch (err) {
       errors++;

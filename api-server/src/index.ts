@@ -23,6 +23,8 @@ import {
 } from "./lib/fullMatchLifecycleReliabilityService";
 import { warmMatchSnapshot } from "./lib/soccerService";
 import { startChallengerWorker, stopChallengerWorker } from "./lib/modelChallengerService";
+import { startInPlayWorker, stopInPlayWorker } from "./lib/inPlayModelService";
+import { startShotStatisticsBackfill, stopShotStatisticsBackfill } from "./lib/teamRatingsProvider";
 
 // Install provider optimisers before any background worker starts. The football
 // layer owns schedule-aware fixture batching; the odds layer then wraps the
@@ -50,6 +52,8 @@ const server = app.listen(port, () => {
   startPredictionAccuracyAudit();
   startFullMatchLifecycleReliabilityTest();
   startChallengerWorker();
+  startInPlayWorker();
+  startShotStatisticsBackfill();
   if (process.env.MATCH_SNAPSHOT_PREWARM_ENABLED !== "false") {
     void warmMatchSnapshot()
       .then((result) => logger.info(result, "weekly dashboard snapshot prewarmed"))
@@ -64,6 +68,8 @@ server.on("error", (err) => {
 
 function shutdown() {
   stopChallengerWorker();
+  stopInPlayWorker();
+  stopShotStatisticsBackfill();
   stopFullMatchLifecycleReliabilityTest();
   stopPredictionAccuracyAudit();
   stopFuturePredictionBaseline();

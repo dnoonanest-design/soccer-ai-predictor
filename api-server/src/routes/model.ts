@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { logger } from "../lib/logger";
 import { getChallengerReport, rollbackToLegacy, runChallengerCycle } from "../lib/modelChallengerService";
-import { ensureTeamRatings, getTeamRatingsStatus } from "../lib/teamRatingsProvider";
+import { backfillShotStatistics, ensureTeamRatings, getTeamRatingsStatus } from "../lib/teamRatingsProvider";
+import { getInPlayReport, refitInPlayModel, rollbackInPlay, runInPlayCycle } from "../lib/inPlayModelService";
 import { explainMatch } from "../lib/matchExplanationService";
 import { getMatchById } from "../lib/soccerService";
 import { isTrackedLeague } from "../lib/leagueConfig";
@@ -20,6 +21,16 @@ router.get("/model/challengers", async (_req, res) => {
 });
 
 router.get("/model/ratings", (_req, res) => res.json(getTeamRatingsStatus()));
+
+/** In-play only: fitted in-play model vs the live model at the same checkpoints. */
+router.get("/model/inplay", async (_req, res) => {
+  try {
+    return res.json(await getInPlayReport());
+  } catch (err) {
+    logger.error({ err }, "in-play report failed");
+    return res.status(500).json({ error: "Failed to build in-play report" });
+  }
+});
 
 /** Plan step 8: plain-English explanation and data checks; never changes numbers. */
 router.get("/matches/:match_id/explanation", async (req, res) => {
@@ -56,6 +67,38 @@ router.post("/model/challengers/rollback", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "challenger rollback failed");
     return res.status(500).json({ error: "Failed to roll back" });
+  }
+});
+
+// Admin: refit the in-play multipliers now, then settle and run the in-play gate.
+router.post("/model/inplay/run", async (_req, res) => {
+  try {
+    const fit = await refitInPlayModel();
+    return res.json({ fit, cycle: await runInPlayCycle() });
+  } catch (err) {
+    logger.error({ err }, "in-play cycle failed");
+    return res.status(500).json({ error: "Failed to run in-play cycle" });
+  }
+});
+
+router.post("/model/inplay/rollback", async (req, res) => {
+  try {
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 500) : "manual rollback";
+    return res.json({ rolledBack: await rollbackInPlay(reason) });
+  } catch (err) {
+    logger.error({ err }, "in-play rollback failed");
+    return res.status(500).json({ error: "Failed to roll back" });
+  }
+});
+
+// Admin: fetch one batch of past-fixture shot statistics now (uses API quota).
+router.post("/model/ratings/backfill", async (req, res) => {
+  try {
+    const calls = Math.max(1, Math.min(200, Number(req.body?.calls ?? 50) || 50));
+    return res.json(await backfillShotStatistics(calls));
+  } catch (err) {
+    logger.error({ err }, "shot statistics backfill failed");
+    return res.status(500).json({ error: "Failed to backfill shot statistics" });
   }
 });
 

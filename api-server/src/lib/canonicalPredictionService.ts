@@ -43,6 +43,11 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
   raw_components?: RawPredictionComponents;
   /** Which model produced the served 1X2 numbers ("legacy" or a promoted challenger). */
   serving_model?: string;
+  /**
+   * In play only: the model not currently serving, scored beside the served
+   * numbers at live checkpoints (percentages).
+   */
+  inplay_alternative?: { model: string; home: number; draw: number; away: number };
 };
 
 export type RawPredictionComponents = {
@@ -305,10 +310,15 @@ export async function createCanonicalPrediction(
   };
 
   // A challenger that has passed the promotion gate serves pre-match 1X2
-  // numbers in place of the original formula. In-play stays on the live model.
+  // numbers in place of the original formula. In play, the fitted in-play
+  // model is computed beside the live model and serves only once promoted.
   if (!live && !options.legacyOnly) {
     const { applyServingChampion } = await import("./modelChallengerService");
     return applyServingChampion(match, result);
+  }
+  if (live && !options.legacyOnly) {
+    const { applyInPlayModel } = await import("./inPlayModelService");
+    return applyInPlayModel(match, result);
   }
   return result;
 }

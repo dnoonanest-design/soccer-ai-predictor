@@ -38,6 +38,15 @@ Pre-match and in-play predictions are stored and scored separately and never com
 
 Results settle on the 90-minute score; extra time and penalties are excluded.
 
+## Model challengers
+
+New models run beside the live one on the same matches and replace it only after passing a promotion gate (`GET /api/model/challengers`, `GET /api/model/inplay`).
+
+- **Pre-match**: challengers include fitted team ratings and `step7-shots-stacked` (ratings fitted on goals and on shots). A challenger must beat the live model on 1X2 Brier and log loss, on matches with closing odds, and must not make over 2.5 or BTTS log loss worse.
+- **In-play**: the live model's six multipliers are refitted on finished matches every 12 hours (`inplay-fitted`) and judged per match at the in-play checkpoints. In-play rows are kept in their own table.
+- **Shot data**: past-match shot statistics are fetched in batches (100 API calls every 2 hours, paused above 60% of the daily budget). `STATS_BACKFILL_ENABLED=false` turns this off.
+- **Explanations**: set `ANTHROPIC_API_KEY` to turn on plain-English match explanations (`ANTHROPIC_MODEL` overrides the default model). They never change a probability.
+
 ## Scaling note
 
 Rate limits, caches and background workers live in one process. Run a single Railway replica unless that state is moved to Postgres or Redis.

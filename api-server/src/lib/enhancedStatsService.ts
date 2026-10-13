@@ -768,7 +768,29 @@ export async function getLiveMomentumSnapshot(
   const events = await fetchMatchEvents(fixtureId, true).catch(() => [] as ApiEvent[]);
   return liveMomentumFromEvents(events, homeTeamId, awayTeamId, minute, 0, 0, liveStats);
 }
-export function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, adjHomeXG: number, adjAwayXG: number, liveStats?: LiveMatchStatsInput) {
+/**
+ * In-play multipliers. The defaults are the original hand-set values; the
+ * in-play challenger fits its own set on settled live snapshots.
+ */
+export type InPlayParams = {
+  /** Remaining-goal multiplier for the team behind. */
+  trailing: number;
+  /** Remaining-goal multiplier for the team ahead. */
+  leading: number;
+  /** Per red card against the team. */
+  redOwn: number;
+  /** Per red card against the opponent. */
+  redOpp: number;
+  /** Telemetry share effect: factor = 1 - spread/2 + spread × share. */
+  telemetrySpread: number;
+  /** Per unit of live-xG difference. */
+  liveXgSlope: number;
+};
+export const DEFAULT_INPLAY_PARAMS: Readonly<InPlayParams> = Object.freeze({
+  trailing: 1.18, leading: 0.85, redOwn: 0.68, redOpp: 1.12, telemetrySpread: 0.6, liveXgSlope: 0.12,
+});
+
+export function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: number, adjHomeXG: number, adjAwayXG: number, liveStats?: LiveMatchStatsInput, params: InPlayParams = DEFAULT_INPLAY_PARAMS) {
   const effectiveMax = minute >= 90 ? minute + 5 : 90;
   const remainFrac = Math.max(0, (effectiveMax - minute) / effectiveMax);
   if (remainFrac <= 0.01) return { homeWin: hGoals > aGoals ? 100 : 0, draw: hGoals === aGoals ? 100 : 0, awayWin: aGoals > hGoals ? 100 : 0 };
@@ -781,14 +803,15 @@ export function liveScoreAdjustedProbs(hGoals: number, aGoals: number, minute: n
   const awayLiveXg = Math.max(0, liveStats?.away?.expected_goals_live ?? 0);
   const homeRed = Math.max(0, liveStats?.home?.red_cards ?? 0);
   const awayRed = Math.max(0, liveStats?.away?.red_cards ?? 0);
-  const homeTelemetry = 0.7 + 0.6 * telemetryHomeShare;
-  const awayTelemetry = 0.7 + 0.6 * (1 - telemetryHomeShare);
-  const liveXgHomeFactor = Math.max(0.75, Math.min(1.3, 1 + (homeLiveXg - awayLiveXg) * 0.12));
-  const liveXgAwayFactor = Math.max(0.75, Math.min(1.3, 1 + (awayLiveXg - homeLiveXg) * 0.12));
-  const cardHomeFactor = Math.pow(0.68, homeRed) * Math.pow(1.12, awayRed);
-  const cardAwayFactor = Math.pow(0.68, awayRed) * Math.pow(1.12, homeRed);
-  const remHomeXG = Math.max(0.01, adjHomeXG * remainFrac * (scoreDiff < 0 ? 1.18 : scoreDiff > 0 ? 0.85 : 1) * homeTelemetry * liveXgHomeFactor * cardHomeFactor);
-  const remAwayXG = Math.max(0.01, adjAwayXG * remainFrac * (scoreDiff > 0 ? 1.18 : scoreDiff < 0 ? 0.85 : 1) * awayTelemetry * liveXgAwayFactor * cardAwayFactor);
+  const telemetryBase = 1 - params.telemetrySpread / 2;
+  const homeTelemetry = telemetryBase + params.telemetrySpread * telemetryHomeShare;
+  const awayTelemetry = telemetryBase + params.telemetrySpread * (1 - telemetryHomeShare);
+  const liveXgHomeFactor = Math.max(0.75, Math.min(1.3, 1 + (homeLiveXg - awayLiveXg) * params.liveXgSlope));
+  const liveXgAwayFactor = Math.max(0.75, Math.min(1.3, 1 + (awayLiveXg - homeLiveXg) * params.liveXgSlope));
+  const cardHomeFactor = Math.pow(params.redOwn, homeRed) * Math.pow(params.redOpp, awayRed);
+  const cardAwayFactor = Math.pow(params.redOwn, awayRed) * Math.pow(params.redOpp, homeRed);
+  const remHomeXG = Math.max(0.01, adjHomeXG * remainFrac * (scoreDiff < 0 ? params.trailing : scoreDiff > 0 ? params.leading : 1) * homeTelemetry * liveXgHomeFactor * cardHomeFactor);
+  const remAwayXG = Math.max(0.01, adjAwayXG * remainFrac * (scoreDiff > 0 ? params.trailing : scoreDiff < 0 ? params.leading : 1) * awayTelemetry * liveXgAwayFactor * cardAwayFactor);
   let homeWin = 0, draw = 0, awayWin = 0;
   for (let rh = 0; rh <= MAX_GOALS; rh++) for (let ra = 0; ra <= MAX_GOALS; ra++) {
     const joint = poisson(remHomeXG, rh) * poisson(remAwayXG, ra);
