@@ -194,6 +194,42 @@ export function dixonColesOutcomes(lambdaHome: number, lambdaAway: number, rho =
   return { home: home / total, draw: draw / total, away: away / total, over25: over25 / total, btts: btts / total };
 }
 
+export type GoalMarkets = {
+  /** Percentages (0-100), matching the app's served prediction fields. */
+  over15: number;
+  over25: number;
+  over35: number;
+  btts: number;
+  correctScores: Array<{ score: string; probability: number }>;
+};
+
+/**
+ * Goal markets from the same score grid as dixonColesOutcomes, so a promoted
+ * ratings model serves 1X2 and goal markets that agree with each other.
+ */
+export function dixonColesMarkets(lambdaHome: number, lambdaAway: number, rho = -0.13): GoalMarkets {
+  let total = 0, o15 = 0, o25 = 0, o35 = 0, btts = 0;
+  const scores: Array<{ score: string; p: number }> = [];
+  for (let i = 0; i <= MAX_GOALS; i++) {
+    const ph = poissonPmf(lambdaHome, i);
+    for (let j = 0; j <= MAX_GOALS; j++) {
+      const p = Math.max(0, ph * poissonPmf(lambdaAway, j) * dcTau(i, j, lambdaHome, lambdaAway, rho));
+      total += p;
+      if (i + j > 1.5) o15 += p;
+      if (i + j > 2.5) o25 += p;
+      if (i + j > 3.5) o35 += p;
+      if (i > 0 && j > 0) btts += p;
+      if (i <= 5 && j <= 5) scores.push({ score: `${i}-${j}`, p });
+    }
+  }
+  const pct = (v: number) => Math.round((v / total) * 10_000) / 100;
+  scores.sort((a, b) => b.p - a.p);
+  return {
+    over15: pct(o15), over25: pct(o25), over35: pct(o35), btts: pct(btts),
+    correctScores: scores.slice(0, 6).map((s) => ({ score: s.score, probability: pct(s.p) })),
+  };
+}
+
 /** Shrink a probability set toward league base rates (plan step 1), weight in 0-1. */
 export function shrinkTowardPriors(
   probs: { home: number; draw: number; away: number },

@@ -22,8 +22,8 @@ import { pool } from "@workspace/db";
 import type { Match } from "./soccerService";
 import type { MatchStatsResult } from "./statsService";
 import type { CanonicalPredictionResult } from "./canonicalPredictionService";
-import { computeLegacyVariant } from "./canonicalPredictionService";
-import { dixonColesOutcomes } from "./teamRatings";
+import { computeLegacyVariantDetail, type VariantMarkets } from "./canonicalPredictionService";
+import { dixonColesMarkets, dixonColesOutcomes } from "./teamRatings";
 import { ensureTeamRatings, forecastFromRatings, getLeagueRatingSet, getTeamRatingsStatus } from "./teamRatingsProvider";
 import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type CalibrationParams, type Outcome } from "./outcomeCalibration";
 import { logger } from "./logger";
@@ -56,7 +56,11 @@ const DESCRIPTIONS: Record<ChallengerId, string> = {
 export const PROMOTION_RULES = {
   minMatches: Number(process.env.CHALLENGER_MIN_MATCHES ?? 300),
   minBrierImprovement: Number(process.env.CHALLENGER_MIN_BRIER_GAIN ?? 0.003),
-  minTStat: 2,
+  // The gate re-checks every challenger every 30 minutes, so a lucky streak
+  // gets many chances. Replaying real results showed t >= 2 promotes a
+  // no-better model about 9% of the time within 900 matches (per challenger);
+  // t >= 3 cuts that to under 1%, at the cost of a longer wait.
+  minTStat: Number(process.env.CHALLENGER_MIN_TSTAT ?? 3),
   minMarketMatches: Number(process.env.CHALLENGER_MIN_MARKET_MATCHES ?? 50),
   minDaysBetweenPromotions: 7,
   autoPromote: process.env.CHALLENGER_AUTO_PROMOTE !== "false",
@@ -69,7 +73,9 @@ let lastRun: { at: string; settled: number; promoted: string | null; error: stri
 
 // ── Forecasts ────────────────────────────────────────────────────────────────
 
-function fromRatings(match: Match, useXg: boolean): Unit | null {
+type ChallengerDetail = { probs: Unit; markets: VariantMarkets };
+
+function fromRatings(match: Match, useXg: boolean): ChallengerDetail | null {
   if (useXg) {
     const set = getLeagueRatingSet(match.league_id);
     // Without xG for this league the forecast would duplicate step 2.
@@ -78,7 +84,45 @@ function fromRatings(match: Match, useXg: boolean): Unit | null {
   const f = forecastFromRatings(match.league_id, match.home_team.id, match.away_team.id, useXg);
   if (!f) return null;
   const p = dixonColesOutcomes(f.lambdaHome, f.lambdaAway);
-  return { home: p.home, draw: p.draw, away: p.away };
+  const g = dixonColesMarkets(f.lambdaHome, f.lambdaAway);
+  return {
+    probs: { home: p.home, draw: p.draw, away: p.away },
+    markets: {
+      homeXg: Math.round(f.lambdaHome * 100) / 100, awayXg: Math.round(f.lambdaAway * 100) / 100,
+      over15: g.over15, over25: g.over25, over35: g.over35, btts: g.btts, correctScores: g.correctScores,
+    },
+  };
+}
+
+/** Forecast plus the goal markets that go with it, or null when it cannot forecast this match. */
+export async function computeChallengerDetail(
+  id: string,
+  match: Match,
+  stats: MatchStatsResult | null,
+  calibrationOverride?: CalibrationParams | null,
+): Promise<ChallengerDetail | null> {
+  switch (id) {
+    case "step2-ratings": return fromRatings(match, false);
+    case "step3-ratings-xg": return fromRatings(match, true);
+    case "step4-calibrated": {
+      const base = fromRatings(match, false);
+      // Calibration adjusts 1X2 only; goal markets come from the same grid.
+      return base ? { ...base, probs: applyCalibration(base.probs, calibrationOverride ?? calibration) } : null;
+    }
+    case "step1-league-priors": {
+      if (!stats) return null;
+      const set = getLeagueRatingSet(match.league_id);
+      const f = forecastFromRatings(match.league_id, match.home_team.id, match.away_team.id, false);
+      const priors = set?.priors ?? f?.priors;
+      if (!priors) return null;
+      return computeLegacyVariantDetail(match, stats, set ? { homeAdvantage: Math.exp(set.goals.homeAdvantage) } : {}, priors);
+    }
+    case "step6-no-form": return stats ? computeLegacyVariantDetail(match, stats, { disableForm: true }, null) : null;
+    case "step6-no-h2h": return stats ? computeLegacyVariantDetail(match, stats, { disableH2H: true }, null) : null;
+    case "step6-no-players": return stats ? computeLegacyVariantDetail(match, stats, { disablePlayerFactors: true }, null) : null;
+    case "legacy": return stats ? computeLegacyVariantDetail(match, stats, {}, null) : null;
+    default: return null;
+  }
 }
 
 /** 0-1 forecast for one challenger, or null when it cannot forecast this match. */
@@ -88,27 +132,7 @@ export async function computeChallenger(
   stats: MatchStatsResult | null,
   calibrationOverride?: CalibrationParams | null,
 ): Promise<Unit | null> {
-  switch (id) {
-    case "step2-ratings": return fromRatings(match, false);
-    case "step3-ratings-xg": return fromRatings(match, true);
-    case "step4-calibrated": {
-      const base = fromRatings(match, false);
-      return base ? applyCalibration(base, calibrationOverride ?? calibration) : null;
-    }
-    case "step1-league-priors": {
-      if (!stats) return null;
-      const set = getLeagueRatingSet(match.league_id);
-      const f = forecastFromRatings(match.league_id, match.home_team.id, match.away_team.id, false);
-      const priors = set?.priors ?? f?.priors;
-      if (!priors) return null;
-      return computeLegacyVariant(match, stats, set ? { homeAdvantage: Math.exp(set.goals.homeAdvantage) } : {}, priors);
-    }
-    case "step6-no-form": return stats ? computeLegacyVariant(match, stats, { disableForm: true }, null) : null;
-    case "step6-no-h2h": return stats ? computeLegacyVariant(match, stats, { disableH2H: true }, null) : null;
-    case "step6-no-players": return stats ? computeLegacyVariant(match, stats, { disablePlayerFactors: true }, null) : null;
-    case "legacy": return stats ? computeLegacyVariant(match, stats, {}, null) : null;
-    default: return null;
-  }
+  return (await computeChallengerDetail(id, match, stats, calibrationOverride))?.probs ?? null;
 }
 
 /**
@@ -197,6 +221,8 @@ export async function refitCalibration(): Promise<CalibrationParams> {
 export type ChallengerStanding = {
   challenger: string;
   description: string;
+  /** Forecasts recorded before kickoff, still waiting for the result. */
+  pending: number;
   matches: number;
   brier: number | null;
   championBrier: number | null;
@@ -247,8 +273,21 @@ export async function getChallengerReport() {
       ORDER BY gain DESC NULLS LAST`,
     [since],
   );
+  const pendingRows = await pool.query(
+    `SELECT challenger, COUNT(DISTINCT fixture_id)::int AS pending
+       FROM model_challenger_predictions
+      WHERE settled_at IS NULL AND captured_at >= $1
+      GROUP BY challenger`,
+    [since],
+  );
+  const pendingBy = new Map<string, number>(pendingRows.rows.map((r: any) => [String(r.challenger), Number(r.pending ?? 0)]));
+  const settledIds = new Set(result.rows.map((r: any) => String(r.challenger)));
+  const rows = [
+    ...result.rows,
+    ...[...pendingBy.keys()].filter((id) => !settledIds.has(id)).map((challenger) => ({ challenger, matches: 0 })),
+  ];
   const n = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Math.round(Number(v) * 10_000) / 10_000);
-  const standings: ChallengerStanding[] = result.rows.map((r: any) => {
+  const standings: ChallengerStanding[] = rows.map((r: any) => {
     const matches = Number(r.matches ?? 0);
     const gain = n(r.gain), sd = Number(r.gain_sd);
     const tStat = gain != null && Number.isFinite(sd) && sd > 0 && matches > 1 ? Math.round((gain / (sd / Math.sqrt(matches))) * 100) / 100 : null;
@@ -263,6 +302,7 @@ export async function getChallengerReport() {
     return {
       challenger: String(r.challenger),
       description: DESCRIPTIONS[r.challenger as ChallengerId] ?? String(r.challenger),
+      pending: pendingBy.get(String(r.challenger)) ?? 0,
       matches, brier: n(r.brier), championBrier: n(r.champion_brier), brierGain: gain, tStat, logLossGain: llGain,
       marketMatches, marketBrierGain: marketGain, closingOddsBrier: n(r.closing_brier),
       eligible: reasons.length === 0, reasons,
@@ -277,6 +317,7 @@ export async function getChallengerReport() {
     ratings: getTeamRatingsStatus(),
     standings,
     lastRun,
+    pendingTotal: [...pendingBy.values()].reduce((sum, v) => sum + v, 0),
     note: "Each challenger is compared with the champion on the same fixtures, using the latest forecast captured before kickoff.",
   };
 }
@@ -356,8 +397,9 @@ export async function applyServingChampion(match: Match, result: CanonicalPredic
   if (serving.champion === "legacy") return result;
   try {
     if (serving.champion.startsWith("step2") || serving.champion.startsWith("step3") || serving.champion.startsWith("step4")) await ensureTeamRatings();
-    const p = await computeChallenger(serving.champion, match, result.stats, serving.calibration);
-    if (!p) return result;
+    const detail = await computeChallengerDetail(serving.champion, match, result.stats, serving.calibration);
+    if (!detail) return result;
+    const p = detail.probs, m = detail.markets;
     const pct = (v: number) => Math.round(v * 10_000) / 100;
     const home = pct(p.home), draw = pct(p.draw), away = Math.round((100 - home - draw) * 100) / 100;
     const fair = (v: number) => (v > 0 ? Math.round((100 / v) * 100) / 100 : 0);
@@ -367,6 +409,11 @@ export async function applyServingChampion(match: Match, result: CanonicalPredic
         ...result.prediction,
         home_win: home, draw, away_win: away,
         fair_home_odds: fair(home), fair_draw_odds: fair(draw), fair_away_odds: fair(away),
+        // Goal markets and expected goals from the same model, so the page
+        // never shows 1X2 from one model next to over/under from another.
+        home_xg: m.homeXg, away_xg: m.awayXg,
+        over_15: m.over15, over_25: m.over25, over_35: m.over35, btts: m.btts,
+        correct_scores: m.correctScores,
         serving_model: serving.champion,
         pipeline_version: `${result.prediction.pipeline_version}+${serving.champion}`,
         reasons: [`Served by ${serving.champion}, promoted after beating the previous model on unseen matches.`, ...(result.prediction.reasons ?? [])],

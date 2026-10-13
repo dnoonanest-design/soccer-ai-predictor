@@ -5,7 +5,7 @@ import { logger } from "./logger.js";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5";
 
 // Generative AI describes already-computed player evidence; it cannot create
 // or promote prediction weights.

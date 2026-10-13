@@ -474,11 +474,16 @@ function responseFromStoredSchedule(parsed: URL): Response | null {
 function responseFromStoredScheduleDate(parsed: URL): Response | null {
   if (parsed.pathname !== "/fixtures" || schedule.size === 0) return null;
   const date = parsed.searchParams.get("date");
-  if (!date || !/^\\d{4}-\\d{2}-\\d{2}$/.test(date)) return null;
+  // Was /^\\d{4}-…/ (a literal backslash), which never matched, so date
+  // lookups always bypassed the merged schedule and could show stale status.
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
 
   const fixtures = Array.from(schedule.values()).filter((fixture) =>
     fixture.fixture?.date?.slice(0, 10) === date,
   );
+  // Nothing stored for this date (outside the 8-day window, or no tracked
+  // fixtures): ask the provider rather than return a misleading empty list.
+  if (!fixtures.length) return null;
   return synthetic(parsed, fixtures);
 }
 
