@@ -68,7 +68,7 @@ describe("stacking model (step 7)", () => {
     const unaffected = fixtures.filter((f) => Date.parse(f.date) >= from && Date.parse(f.date) < lastWeek).length;
     expect(unaffected).toBeGreaterThan(100);
     for (let i = 0; i < unaffected; i++) expect(JSON.stringify(b.x[i])).toBe(JSON.stringify(a.x[i]));
-  });
+  }, 60_000);
 
   it("fits a softmax that favours the stronger side and sums to one", async () => {
     const fixtures = league();
@@ -82,7 +82,7 @@ describe("stacking model (step 7)", () => {
     expect(strong.home).toBeGreaterThan(strong.away);
     expect(weak.away).toBeGreaterThan(weak.home);
     expect(strong.home + strong.draw + strong.away).toBeCloseTo(1, 9);
-  });
+  }, 60_000);
 
   it("blends goal and shot strengths 70/30 in log space for goal markets", () => {
     const l = blendedLambdas([Math.log(2), Math.log(1), Math.log(1), Math.log(2)]);

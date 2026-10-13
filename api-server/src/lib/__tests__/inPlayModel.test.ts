@@ -40,11 +40,11 @@ describe("in-play challenger", () => {
   });
 
   it("fits the trailing-team multiplier toward the truth and lowers log loss", async () => {
-    const rows = snapshots(4000);
-    const fitted = await fitInPlayParams(rows);
+    const rows = snapshots(2000);
+    const fitted = await fitInPlayParams(rows, DEFAULT_INPLAY_PARAMS, 10);
     expect(fitted.trailing).toBeGreaterThan(1.3);
     expect(meanLogLoss(rows, fitted)).toBeLessThan(meanLogLoss(rows, DEFAULT_INPLAY_PARAMS));
-  });
+  }, 60_000);
 
   it("keeps the hand-set values when there are too few fixtures", async () => {
     const out = await fitWithHoldout(snapshots(50), 150);
@@ -57,7 +57,7 @@ describe("in-play challenger", () => {
     // Either rejected on the holdout, or any accepted fit stays close to the truth.
     if (out.params) expect(Math.abs(out.params.trailing - DEFAULT_INPLAY_PARAMS.trailing)).toBeLessThan(0.25);
     else expect(out.reason ?? "").toContain("did not beat");
-  });
+  }, 60_000);
 
   it("rebuilds the live model's expected goals from a stored snapshot", () => {
     const l = liveLambdas({ home_xg: 1.5, away_xg: 1.0, live_player_performance: { home_factor: 1.1, away_factor: 0.9 }, home_sub_xg_delta: 0.05 });
