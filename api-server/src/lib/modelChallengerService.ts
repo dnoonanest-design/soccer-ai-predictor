@@ -16,6 +16,7 @@
  *   step6-no-form         original formula without the form factor                             [6]
  *   step6-no-h2h          original formula without the head-to-head blend                       [6]
  *   step6-no-players      original formula without injury and lineup factors                    [6]
+ *   step7-shots-stacked   softmax on goal-rating and shot-rating strengths (wider-stats study)  [7]
  *   legacy                the original formula, recorded once another model is champion
  */
 import { pool } from "@workspace/db";
@@ -24,7 +25,8 @@ import type { MatchStatsResult } from "./statsService";
 import type { CanonicalPredictionResult } from "./canonicalPredictionService";
 import { computeLegacyVariantDetail, type VariantMarkets } from "./canonicalPredictionService";
 import { dixonColesMarkets, dixonColesOutcomes } from "./teamRatings";
-import { ensureTeamRatings, forecastFromRatings, getLeagueRatingSet, getTeamRatingsStatus } from "./teamRatingsProvider";
+import { ensureTeamRatings, forecastFromRatings, forecastStacked, getLeagueRatingSet, getTeamRatingsStatus } from "./teamRatingsProvider";
+import { runInPlayCycle } from "./inPlayModelService";
 import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type CalibrationParams, type Outcome } from "./outcomeCalibration";
 import { logger } from "./logger";
 
@@ -38,6 +40,7 @@ export const CHALLENGER_IDS = [
   "step6-no-form",
   "step6-no-h2h",
   "step6-no-players",
+  "step7-shots-stacked",
   "legacy",
 ] as const;
 export type ChallengerId = (typeof CHALLENGER_IDS)[number];
@@ -50,6 +53,7 @@ const DESCRIPTIONS: Record<ChallengerId, string> = {
   "step6-no-form": "Original formula without the last-5 form factor",
   "step6-no-h2h": "Original formula without the head-to-head blend",
   "step6-no-players": "Original formula without injury and lineup factors",
+  "step7-shots-stacked": "Stacking model on team ratings fitted on goals and on shots (on and off target)",
   legacy: "The original formula",
 };
 
@@ -62,6 +66,10 @@ export const PROMOTION_RULES = {
   // t >= 3 cuts that to under 1%, at the cost of a longer wait.
   minTStat: Number(process.env.CHALLENGER_MIN_TSTAT ?? 3),
   minMarketMatches: Number(process.env.CHALLENGER_MIN_MARKET_MATCHES ?? 50),
+  // Goal markets: once enough settled rows carry them, a challenger may not
+  // make over 2.5 or BTTS log loss worse by more than this.
+  minGoalMarketMatches: Number(process.env.CHALLENGER_MIN_GOAL_MARKET_MATCHES ?? 100),
+  maxGoalMarketLoss: Number(process.env.CHALLENGER_MAX_GOAL_MARKET_LOSS ?? 0.002),
   minDaysBetweenPromotions: 7,
   autoPromote: process.env.CHALLENGER_AUTO_PROMOTE !== "false",
 };
@@ -117,6 +125,18 @@ export async function computeChallengerDetail(
       if (!priors) return null;
       return computeLegacyVariantDetail(match, stats, set ? { homeAdvantage: Math.exp(set.goals.homeAdvantage) } : {}, priors);
     }
+    case "step7-shots-stacked": {
+      const f = forecastStacked(match.league_id, match.home_team.id, match.away_team.id);
+      if (!f) return null;
+      const g = dixonColesMarkets(f.lambdas.home, f.lambdas.away);
+      return {
+        probs: f.probs,
+        markets: {
+          homeXg: Math.round(f.lambdas.home * 100) / 100, awayXg: Math.round(f.lambdas.away * 100) / 100,
+          over15: g.over15, over25: g.over25, over35: g.over35, btts: g.btts, correctScores: g.correctScores,
+        },
+      };
+    }
     case "step6-no-form": return stats ? computeLegacyVariantDetail(match, stats, { disableForm: true }, null) : null;
     case "step6-no-h2h": return stats ? computeLegacyVariantDetail(match, stats, { disableH2H: true }, null) : null;
     case "step6-no-players": return stats ? computeLegacyVariantDetail(match, stats, { disablePlayerFactors: true }, null) : null;
@@ -142,7 +162,7 @@ export async function computeChallenger(
 export async function recordChallengerPredictions(
   match: Match,
   checkpoint: string,
-  champion: Unit,
+  champion: Unit & { over25?: number | null; btts?: number | null },
   stats: MatchStatsResult | null,
 ): Promise<number> {
   if (!match.kickoff || new Date(match.kickoff).getTime() <= Date.now()) return 0;
@@ -153,18 +173,22 @@ export async function recordChallengerPredictions(
     if (id === serving.champion) continue;
     if (id === "legacy" && serving.champion === "legacy") continue;
     try {
-      const p = await computeChallenger(id, match, stats);
+      const detail = await computeChallengerDetail(id, match, stats);
+      const p = detail?.probs;
       if (!p || ![p.home, p.draw, p.away].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) continue;
       const result = await pool.query(
         `INSERT INTO model_challenger_predictions
            (fixture_id, league_id, challenger, checkpoint, kickoff_at,
             home_win_prob, draw_prob, away_win_prob,
-            champion_home_prob, champion_draw_prob, champion_away_prob, details)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            champion_home_prob, champion_draw_prob, champion_away_prob, details,
+            over25_prob, btts_prob, champion_over25_prob, champion_btts_prob)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          ON CONFLICT (fixture_id, challenger, checkpoint) DO NOTHING`,
         [match.id, match.league_id, id, checkpoint, new Date(match.kickoff),
           p.home, p.draw, p.away, champion.home, champion.draw, champion.away,
-          JSON.stringify({ champion: serving.champion })],
+          JSON.stringify({ champion: serving.champion }),
+          unitOrNull(detail?.markets.over25), unitOrNull(detail?.markets.btts),
+          unitOrNull(champion.over25, 1), unitOrNull(champion.btts, 1)],
       );
       recorded += result.rowCount ?? 0;
     } catch (err) {
@@ -174,12 +198,21 @@ export async function recordChallengerPredictions(
   return recorded;
 }
 
+/** Percent (or unit when scale = 1) to a 0-1 probability, null when missing. */
+function unitOrNull(v: number | null | undefined, scale = 100): number | null {
+  if (v == null || !Number.isFinite(v)) return null;
+  const u = v / scale;
+  return u >= 0 && u <= 1 ? u : null;
+}
+
 // ── Settlement and scoring ───────────────────────────────────────────────────
 
 export async function settleChallengerPredictions(): Promise<number> {
   const result = await pool.query(
     `WITH scored AS (
        SELECT c.id, o.outcome,
+              (o.score_home + o.score_away > 2) AS o25,
+              (o.score_home > 0 AND o.score_away > 0) AS bt,
               (CASE WHEN o.outcome = 'home' THEN 1 ELSE 0 END) AS yh,
               (CASE WHEN o.outcome = 'draw' THEN 1 ELSE 0 END) AS yd,
               (CASE WHEN o.outcome = 'away' THEN 1 ELSE 0 END) AS ya
@@ -193,6 +226,12 @@ export async function settleChallengerPredictions(): Promise<number> {
             champion_brier_score = POWER(c.champion_home_prob - s.yh, 2) + POWER(c.champion_draw_prob - s.yd, 2) + POWER(c.champion_away_prob - s.ya, 2),
             log_loss = -LN(GREATEST(1e-6, CASE s.outcome WHEN 'home' THEN c.home_win_prob WHEN 'draw' THEN c.draw_prob ELSE c.away_win_prob END)),
             champion_log_loss = -LN(GREATEST(1e-6, CASE s.outcome WHEN 'home' THEN c.champion_home_prob WHEN 'draw' THEN c.champion_draw_prob ELSE c.champion_away_prob END)),
+            over25_actual = s.o25,
+            btts_actual = s.bt,
+            over25_log_loss = CASE WHEN c.over25_prob IS NULL THEN NULL ELSE -LN(GREATEST(1e-6, CASE WHEN s.o25 THEN c.over25_prob ELSE 1 - c.over25_prob END)) END,
+            champion_over25_log_loss = CASE WHEN c.champion_over25_prob IS NULL THEN NULL ELSE -LN(GREATEST(1e-6, CASE WHEN s.o25 THEN c.champion_over25_prob ELSE 1 - c.champion_over25_prob END)) END,
+            btts_log_loss = CASE WHEN c.btts_prob IS NULL THEN NULL ELSE -LN(GREATEST(1e-6, CASE WHEN s.bt THEN c.btts_prob ELSE 1 - c.btts_prob END)) END,
+            champion_btts_log_loss = CASE WHEN c.champion_btts_prob IS NULL THEN NULL ELSE -LN(GREATEST(1e-6, CASE WHEN s.bt THEN c.champion_btts_prob ELSE 1 - c.champion_btts_prob END)) END,
             settled_at = NOW()
        FROM scored s
       WHERE c.id = s.id`,
@@ -231,6 +270,10 @@ export type ChallengerStanding = {
   logLossGain: number | null;
   marketMatches: number;
   marketBrierGain: number | null;
+  /** Settled matches where both sides stored over 2.5 and BTTS. */
+  goalMarketMatches: number;
+  over25LogLossGain: number | null;
+  bttsLogLossGain: number | null;
   closingOddsBrier: number | null;
   eligible: boolean;
   reasons: string[];
@@ -262,6 +305,12 @@ export async function getChallengerReport() {
             AVG(l.champion_brier_score - l.brier_score) AS gain,
             STDDEV_SAMP(l.champion_brier_score - l.brier_score) AS gain_sd,
             AVG(l.champion_log_loss - l.log_loss) AS ll_gain,
+            COUNT(*) FILTER (WHERE l.over25_log_loss IS NOT NULL AND l.champion_over25_log_loss IS NOT NULL
+                               AND l.btts_log_loss IS NOT NULL AND l.champion_btts_log_loss IS NOT NULL)::int AS goal_matches,
+            AVG(l.champion_over25_log_loss - l.over25_log_loss) FILTER (WHERE l.over25_log_loss IS NOT NULL AND l.champion_over25_log_loss IS NOT NULL
+                               AND l.btts_log_loss IS NOT NULL AND l.champion_btts_log_loss IS NOT NULL) AS o25_gain,
+            AVG(l.champion_btts_log_loss - l.btts_log_loss) FILTER (WHERE l.over25_log_loss IS NOT NULL AND l.champion_over25_log_loss IS NOT NULL
+                               AND l.btts_log_loss IS NOT NULL AND l.champion_btts_log_loss IS NOT NULL) AS btts_gain,
             COUNT(c.fixture_id)::int AS market_matches,
             AVG(l.champion_brier_score - l.brier_score) FILTER (WHERE c.fixture_id IS NOT NULL) AS market_gain,
             AVG(POWER(c.h - CASE WHEN l.actual_outcome='home' THEN 1 ELSE 0 END, 2)
@@ -299,12 +348,19 @@ export async function getChallengerReport() {
     if (llGain == null || llGain <= 0) reasons.push("log loss must also improve");
     if (marketMatches < PROMOTION_RULES.minMarketMatches) reasons.push(`needs ${PROMOTION_RULES.minMarketMatches} matches with closing odds (has ${marketMatches})`);
     else if (marketGain == null || marketGain <= 0) reasons.push("must also improve on matches with closing odds (smaller gap to the market)");
+    const goalMatches = Number(r.goal_matches ?? 0), o25Gain = n(r.o25_gain), bttsGain = n(r.btts_gain);
+    if (goalMatches < PROMOTION_RULES.minGoalMarketMatches) reasons.push(`needs ${PROMOTION_RULES.minGoalMarketMatches} matches with goal markets stored (has ${goalMatches})`);
+    else {
+      if (o25Gain == null || o25Gain < -PROMOTION_RULES.maxGoalMarketLoss) reasons.push("over 2.5 goals log loss must not get worse");
+      if (bttsGain == null || bttsGain < -PROMOTION_RULES.maxGoalMarketLoss) reasons.push("both-teams-to-score log loss must not get worse");
+    }
     return {
       challenger: String(r.challenger),
       description: DESCRIPTIONS[r.challenger as ChallengerId] ?? String(r.challenger),
       pending: pendingBy.get(String(r.challenger)) ?? 0,
       matches, brier: n(r.brier), championBrier: n(r.champion_brier), brierGain: gain, tStat, logLossGain: llGain,
       marketMatches, marketBrierGain: marketGain, closingOddsBrier: n(r.closing_brier),
+      goalMarketMatches: goalMatches, over25LogLossGain: o25Gain, bttsLogLossGain: bttsGain,
       eligible: reasons.length === 0, reasons,
     };
   });
@@ -396,7 +452,7 @@ export async function applyServingChampion(match: Match, result: CanonicalPredic
   const serving = await getServingState();
   if (serving.champion === "legacy") return result;
   try {
-    if (serving.champion.startsWith("step2") || serving.champion.startsWith("step3") || serving.champion.startsWith("step4")) await ensureTeamRatings();
+    if (/^step[2347]/.test(serving.champion)) await ensureTeamRatings();
     const detail = await computeChallengerDetail(serving.champion, match, result.stats, serving.calibration);
     if (!detail) return result;
     const p = detail.probs, m = detail.markets;
@@ -437,6 +493,8 @@ export async function runChallengerCycle() {
     error = err instanceof Error ? err.message : String(err);
     logger.warn({ err }, "challenger cycle failed");
   }
+  // In-play challenger: separate table, separate gate (handles its own errors).
+  await runInPlayCycle();
   lastRun = { at: new Date().toISOString(), settled, promoted, error };
   return lastRun;
 }

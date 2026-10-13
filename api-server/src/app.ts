@@ -62,6 +62,8 @@ const adminMutationPaths = [
   /^\/tracker\/\d+\/settle$/,
   /^\/live\/alerts$/,
   /^\/model\/challengers\/(?:run|rollback)$/,
+  /^\/model\/inplay\/(?:run|rollback)$/,
+  /^\/model\/ratings\/backfill$/,
 ];
 
 // Read-only endpoints that export bulk internal data.
