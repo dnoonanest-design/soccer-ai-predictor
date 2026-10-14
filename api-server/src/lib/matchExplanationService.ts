@@ -24,6 +24,8 @@ export type MatchExplanation = {
   flags: DataFlag[];
   explanation: string;
   explanationSource: "claude" | "template";
+  /** Why Claude was not used, when the key is set but the call failed (never contains the key). */
+  explanationError?: string;
   generatedAt: string;
 };
 
@@ -66,9 +68,9 @@ function templateExplanation(match: Match, p: CanonicalPrediction): string {
   return `${fav} are favoured at ${favPct.toFixed(0)}%, with a draw at ${p.draw.toFixed(0)}%.${xg} ${(p.reasons ?? []).slice(0, 2).join(" ")}`.trim();
 }
 
-async function claudeExplanation(match: Match, p: CanonicalPrediction, flags: DataFlag[]): Promise<string | null> {
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (!key) return null;
+async function claudeExplanation(match: Match, p: CanonicalPrediction, flags: DataFlag[]): Promise<{ text: string | null; error?: string }> {
+  const key = process.env.ANTHROPIC_API_KEY?.trim().replace(/^["']|["']$/g, "");
+  if (!key) return { text: null };
   const facts = {
     match: `${match.home_team.name} vs ${match.away_team.name}`,
     competition: match.league_name,
@@ -92,13 +94,22 @@ Facts (JSON): ${JSON.stringify(facts)}`;
         messages: [{ role: "user", content: prompt }],
       }),
     });
-    if (!response.ok) throw new Error(`Anthropic request failed with status ${response.status}`);
+    if (!response.ok) {
+      // Anthropic's error body names the problem (e.g. credit balance, invalid key, unknown model).
+      let detail = "";
+      try {
+        const body = (await response.json()) as { error?: { type?: string; message?: string } };
+        detail = [body.error?.type, body.error?.message].filter(Boolean).join(": ");
+      } catch { /* body not JSON */ }
+      throw new Error(`Anthropic request failed with status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ""}`);
+    }
     const data = (await response.json()) as { content?: Array<{ text?: string }> };
     const text = String(data.content?.[0]?.text ?? "").trim();
-    return text ? text.slice(0, 800) : null;
+    return text ? { text: text.slice(0, 800) } : { text: null, error: "Anthropic returned an empty explanation" };
   } catch (err) {
-    logger.warn({ err, fixtureId: match.id }, "Claude explanation unavailable; using template");
-    return null;
+    const error = (err instanceof Error ? err.message : String(err)).replaceAll(key, "[key]");
+    logger.warn({ error, fixtureId: match.id }, "Claude explanation unavailable; using template");
+    return { text: null, error };
   }
 }
 
@@ -114,11 +125,13 @@ export async function explainMatch(match: Match): Promise<MatchExplanation> {
     probabilities: { home: p.home_win, draw: p.draw, away: p.away_win },
     expectedGoals: { home: p.home_xg ?? null, away: p.away_xg ?? null },
     flags,
-    explanation: ai ?? templateExplanation(match, p),
-    explanationSource: ai ? "claude" : "template",
+    explanation: ai.text ?? templateExplanation(match, p),
+    explanationSource: ai.text ? "claude" : "template",
+    ...(ai.error ? { explanationError: ai.error } : {}),
     generatedAt: new Date().toISOString(),
   };
-  cache.set(match.id, { value, at: Date.now() });
+  // A failed Claude call is retried after 2 minutes instead of 30.
+  cache.set(match.id, { value, at: ai.error ? Date.now() - CACHE_MS + 2 * 60_000 : Date.now() });
   if (cache.size > 2000) cache.delete(cache.keys().next().value as number);
   return value;
 }
