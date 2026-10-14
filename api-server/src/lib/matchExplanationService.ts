@@ -68,6 +68,14 @@ function templateExplanation(match: Match, p: CanonicalPrediction): string {
   return `${fav} are favoured at ${favPct.toFixed(0)}%, with a draw at ${p.draw.toFixed(0)}%.${xg} ${(p.reasons ?? []).slice(0, 2).join(" ")}`.trim();
 }
 
+/** Trim to whole sentences, so a long or cut-off reply never ends mid-sentence. */
+export function wholeSentences(text: string, max: number): string {
+  const t = text.length > max ? text.slice(0, max) : text;
+  if (/[.!?]["')]?$/.test(t.trim())) return t.trim();
+  const end = Math.max(t.lastIndexOf(". "), t.lastIndexOf("! "), t.lastIndexOf("? "), t.lastIndexOf("."));
+  return end > 40 ? t.slice(0, end + 1).trim() : t.trim();
+}
+
 async function claudeExplanation(match: Match, p: CanonicalPrediction, flags: DataFlag[]): Promise<{ text: string | null; error?: string }> {
   const key = process.env.ANTHROPIC_API_KEY?.trim().replace(/^["']|["']$/g, "");
   if (!key) return { text: null };
@@ -107,7 +115,7 @@ Facts (JSON): ${JSON.stringify(facts)}`;
     // Use every text block, not just the first content block.
     const text = (data.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text!.trim()).join(" ").trim();
     return text
-      ? { text: text.slice(0, 800) }
+      ? { text: wholeSentences(text, 900) }
       : { text: null, error: `Anthropic returned no text (stop reason: ${data.stop_reason ?? "unknown"}; blocks: ${(data.content ?? []).map((c) => c.type).join(",") || "none"})` };
   } catch (err) {
     const error = (err instanceof Error ? err.message : String(err)).replaceAll(key, "[key]");
