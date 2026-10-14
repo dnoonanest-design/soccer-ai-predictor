@@ -90,7 +90,7 @@ Facts (JSON): ${JSON.stringify(facts)}`;
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5",
-        max_tokens: 300,
+        max_tokens: 400,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -103,9 +103,12 @@ Facts (JSON): ${JSON.stringify(facts)}`;
       } catch { /* body not JSON */ }
       throw new Error(`Anthropic request failed with status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ""}`);
     }
-    const data = (await response.json()) as { content?: Array<{ text?: string }> };
-    const text = String(data.content?.[0]?.text ?? "").trim();
-    return text ? { text: text.slice(0, 800) } : { text: null, error: "Anthropic returned an empty explanation" };
+    const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }>; stop_reason?: string };
+    // Use every text block, not just the first content block.
+    const text = (data.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text!.trim()).join(" ").trim();
+    return text
+      ? { text: text.slice(0, 800) }
+      : { text: null, error: `Anthropic returned no text (stop reason: ${data.stop_reason ?? "unknown"}; blocks: ${(data.content ?? []).map((c) => c.type).join(",") || "none"})` };
   } catch (err) {
     const error = (err instanceof Error ? err.message : String(err)).replaceAll(key, "[key]");
     logger.warn({ error, fixtureId: match.id }, "Claude explanation unavailable; using template");
