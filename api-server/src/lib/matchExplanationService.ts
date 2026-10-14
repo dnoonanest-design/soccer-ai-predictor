@@ -98,7 +98,8 @@ Facts (JSON): ${JSON.stringify(facts)}`;
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5",
-        max_tokens: 400,
+        // Room for any reasoning the model does before writing; the reply itself is three sentences.
+        max_tokens: 2000,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -112,6 +113,7 @@ Facts (JSON): ${JSON.stringify(facts)}`;
       throw new Error(`Anthropic request failed with status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ""}`);
     }
     const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }>; stop_reason?: string };
+    if (data.stop_reason === "max_tokens") return { text: null, error: "Claude's reply was cut off (token limit); using the template" };
     // Use every text block, not just the first content block.
     const text = (data.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text!.trim()).join(" ").trim();
     return text

@@ -78,7 +78,7 @@ Respond in JSON only:
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 1000,
+        max_tokens: 4000,
         messages: [{ role: "user", content: prompt }]
       })
     });
@@ -88,7 +88,11 @@ Respond in JSON only:
     }
 
     const data = await response.json() as any;
-    const text = data.content?.[0]?.text ?? "";
+    if (data.stop_reason === "max_tokens") throw new Error("Claude's reply was cut off (token limit)");
+    // Use the text blocks only; a reply can start with a non-text block.
+    const text = (Array.isArray(data.content) ? data.content : [])
+      .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+      .map((c: any) => c.text).join("\n");
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean) as Record<string, unknown>;
     // Generative AI is an explanation layer only. It is forbidden from
