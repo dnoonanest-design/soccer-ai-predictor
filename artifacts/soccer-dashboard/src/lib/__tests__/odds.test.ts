@@ -43,7 +43,7 @@ describe("bookmaker fractional price formatting", () => {
     expect(decimalToFractional(1.67)).toBe("4/6");
     expect(decimalToFractional(2.5)).toBe("6/4");
     expect(decimalToFractional(3.25)).toBe("9/4");
-    expect(decimalToFractional(7.77)).toBe("8/1");
+    expect(decimalToFractional(7.77)).toBe("7/1");
   });
 
   it("handles invalid prices safely", () => {
