@@ -8,7 +8,7 @@ export function decimalToFractional(decimal: number | null | undefined): string 
   // Decimal bookmaker prices are rounded to cents. Find the nearest
   // conventional fractional price instead of returning awkward hundredths.
   const profit = decimal - 1;
-  const maxDenominator = 32;
+  const maxDenominator = 16;
   let bestNumerator = Math.round(profit);
   let bestDenominator = 1;
   let bestError = Math.abs(profit - bestNumerator);
