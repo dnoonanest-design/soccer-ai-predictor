@@ -659,32 +659,8 @@ async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
   if (cached) return cached;
 
   const start = new Date();
-  const from = start.toISOString().slice(0, 10);
-  const to = new Date(Date.UTC(
-    start.getUTCFullYear(),
-    start.getUTCMonth(),
-    start.getUTCDate() + safeDays - 1,
-  )).toISOString().slice(0, 10);
-
-  // A range query replaces one provider request per day on the dashboard's
-  // cold path. Keep the daily strategy as a fallback for provider plans or
-  // datasets that do not return a useful range response.
-  const rangePath = `/fixtures?from=${from}&to=${to}&timezone=UTC`;
-  try {
-    const rows = requireFixtureArray(await fetchFootball(rangePath), rangePath);
-    const trackedRows = rows.filter((fixture) => isTrackedLeague(fixture.league.id));
-    if (trackedRows.length > 0) {
-      setCache(cacheKey, trackedRows);
-      return trackedRows;
-    }
-  } catch (err) {
-    logger.warn({ err, from, to }, "fixture range lookup failed; using daily lookups");
-  }
-
   const fixtures = new Map<number, ApiFootballFixture>();
-  let firstError: unknown = null;
-  let successfulDays = 0;
-  for (let offset = 0; offset < safeDays; offset++) {
+  const dailyResults = await Promise.all(Array.from({ length: safeDays }, async (_, offset) => {
     const date = new Date(Date.UTC(
       start.getUTCFullYear(),
       start.getUTCMonth(),
@@ -693,13 +669,18 @@ async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
     const path = `/fixtures?date=${date}&timezone=UTC`;
     try {
       const rows = requireFixtureArray(await fetchFootball(path), path);
-      successfulDays++;
-      for (const fixture of rows) {
-        if (isTrackedLeague(fixture.league.id)) fixtures.set(fixture.fixture.id, fixture);
-      }
+      return { rows, error: null, date };
     } catch (err) {
-      firstError ??= err;
       logger.warn({ err, date }, "fixture-window day lookup failed");
+      return { rows: [] as ApiFootballFixture[], error: err, date };
+    }
+  }));
+
+  const successfulDays = dailyResults.filter((result) => result.error == null).length;
+  const firstError = dailyResults.find((result) => result.error != null)?.error;
+  for (const { rows } of dailyResults) {
+    for (const fixture of rows) {
+      if (isTrackedLeague(fixture.league.id)) fixtures.set(fixture.fixture.id, fixture);
     }
   }
 
