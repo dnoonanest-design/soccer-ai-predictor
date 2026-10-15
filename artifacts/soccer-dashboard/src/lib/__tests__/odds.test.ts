@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decimalToFractional, findModelEdges, findModelGaps } from "../odds";
+import { decimalToFractional, findModelEdges, findModelGaps, formatOdds } from "../odds";
 
 describe("dashboard model/market quality gates", () => {
   const validModel = { home_win: 50, draw: 25, away_win: 25 };
@@ -48,5 +48,19 @@ describe("bookmaker fractional price formatting", () => {
     expect(decimalToFractional(1)).toBe("-");
     expect(decimalToFractional(null)).toBe("-");
     expect(decimalToFractional(Number.NaN)).toBe("-");
+  });
+});
+
+
+describe("bookmaker decimal price formatting", () => {
+  it("keeps two decimal places as bookmaker displays do", () => {
+    expect(formatOdds(1.8, "decimal")).toBe("1.80");
+    expect(formatOdds(2.5, "decimal")).toBe("2.50");
+    expect(formatOdds(4.3333333, "decimal")).toBe("4.33");
+  });
+
+  it("shows unavailable decimal prices safely", () => {
+    expect(formatOdds(null, "decimal")).toBe("—");
+    expect(formatOdds(1, "decimal")).toBe("—");
   });
 });
