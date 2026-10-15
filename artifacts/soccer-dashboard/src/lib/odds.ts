@@ -1,38 +1,36 @@
-function gcd(a: number, b: number): number {
-  return b === 0 ? a : gcd(b, a % b);
-}
+// Common UK and Irish bookmaker fractional prices, quoted in the form bettors see them.
+// Decimal feeds do not preserve a bookie's original fraction, so snap to the nearest
+// familiar quote instead of inventing fractions such as 88/13.
+const BOOKMAKER_FRACTIONAL_ODDS: ReadonlyArray<readonly [number, number]> = [
+  [1, 100], [1, 66], [1, 50], [1, 33], [1, 25], [1, 20], [1, 16], [1, 14],
+  [1, 12], [1, 11], [1, 10], [1, 9], [1, 8], [1, 7], [1, 6], [2, 11], [1, 5],
+  [2, 9], [1, 4], [2, 7], [3, 10], [1, 3], [5, 14], [4, 11], [2, 5], [4, 9],
+  [8, 15], [4, 7], [8, 13], [4, 6], [8, 11], [4, 5], [5, 6], [10, 11], [1, 1],
+  [11, 10], [6, 5], [5, 4], [11, 8], [6, 4], [13, 8], [7, 4], [15, 8], [2, 1],
+  [9, 4], [5, 2], [11, 4], [3, 1], [10, 3], [7, 2], [4, 1], [9, 2], [5, 1],
+  [11, 2], [6, 1], [13, 2], [7, 1], [15, 2], [27, 4], [8, 1], [9, 1], [10, 1],
+  [12, 1], [14, 1], [16, 1], [20, 1], [25, 1], [33, 1], [50, 1], [66, 1], [100, 1],
+];
 
 export function decimalToFractional(decimal: number | null | undefined): string {
   if (decimal == null || !Number.isFinite(decimal) || decimal <= 1) return "-";
 
-  // Decimal bookmaker prices are rounded to cents. Find the nearest
-  // conventional fractional price instead of returning awkward hundredths.
   const profit = decimal - 1;
-  const maxDenominator = 16;
-  let bestNumerator = Math.round(profit);
-  let bestDenominator = 1;
-  let bestError = Math.abs(profit - bestNumerator);
+  let bestNumerator = BOOKMAKER_FRACTIONAL_ODDS[0][0];
+  let bestDenominator = BOOKMAKER_FRACTIONAL_ODDS[0][1];
+  let bestError = Math.abs(profit - bestNumerator / bestDenominator);
 
-  for (let denominator = 1; denominator <= maxDenominator; denominator += 1) {
-    const numerator = Math.round(profit * denominator);
+  for (const [numerator, denominator] of BOOKMAKER_FRACTIONAL_ODDS.slice(1)) {
     const error = Math.abs(profit - numerator / denominator);
-    if (error < bestError - Number.EPSILON || (Math.abs(error - bestError) <= Number.EPSILON && denominator < bestDenominator)) {
+    if (error < bestError) {
       bestNumerator = numerator;
       bestDenominator = denominator;
       bestError = error;
     }
   }
 
-  const divisor = gcd(bestNumerator, bestDenominator);
-  const reduced = bestNumerator / divisor + "/" + bestDenominator / divisor;
-
-  // UK and Irish bookies commonly quote these familiar prices as 6/4 and 4/6,
-  // rather than reducing them to 3/2 and 2/3.
-  if (reduced === "3/2") return "6/4";
-  if (reduced === "2/3") return "4/6";
-  return reduced;
+  return String(bestNumerator) + "/" + String(bestDenominator);
 }
-
 export function formatOdds(decimal: number | null | undefined, format: "decimal" | "fractional"): string {
   if (decimal == null || !Number.isFinite(decimal) || decimal <= 1) return "—";
   return format === "fractional" ? decimalToFractional(decimal) : decimal.toFixed(2);
