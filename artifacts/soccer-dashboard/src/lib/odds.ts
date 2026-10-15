@@ -1,15 +1,14 @@
-// Common UK and Irish bookmaker fractional prices, quoted in the form bettors see them.
-// Decimal feeds do not preserve a bookie's original fraction, so snap to the nearest
-// familiar quote instead of inventing fractions such as 88/13.
+// Familiar UK bookmaker fractions. Pinnacle supplies decimal prices, so use a
+// compact set of common fractional quotes instead of displaying unusual ratios.
 const BOOKMAKER_FRACTIONAL_ODDS: ReadonlyArray<readonly [number, number]> = [
   [1, 100], [1, 66], [1, 50], [1, 33], [1, 25], [1, 20], [1, 16], [1, 14],
-  [1, 12], [1, 11], [1, 10], [1, 9], [1, 8], [1, 7], [1, 6], [2, 11], [1, 5],
-  [2, 9], [1, 4], [2, 7], [3, 10], [1, 3], [5, 14], [4, 11], [2, 5], [4, 9],
-  [8, 15], [4, 7], [8, 13], [4, 6], [8, 11], [4, 5], [5, 6], [10, 11], [1, 1],
-  [11, 10], [6, 5], [5, 4], [11, 8], [6, 4], [13, 8], [7, 4], [15, 8], [2, 1],
-  [9, 4], [5, 2], [11, 4], [3, 1], [10, 3], [7, 2], [4, 1], [9, 2], [5, 1],
-  [11, 2], [6, 1], [13, 2], [7, 1], [15, 2], [27, 4], [8, 1], [9, 1], [10, 1],
-  [12, 1], [14, 1], [16, 1], [20, 1], [25, 1], [33, 1], [50, 1], [66, 1], [100, 1],
+  [1, 12], [1, 10], [1, 9], [1, 8], [1, 7], [1, 6], [1, 5], [2, 9], [1, 4],
+  [2, 7], [3, 10], [1, 3], [2, 5], [4, 9], [1, 2], [4, 6], [4, 5], [5, 6],
+  [10, 11], [1, 1], [11, 10], [6, 5], [5, 4], [11, 8], [6, 4], [13, 8],
+  [7, 4], [15, 8], [2, 1], [9, 4], [5, 2], [11, 4], [3, 1], [10, 3], [7, 2],
+  [4, 1], [9, 2], [5, 1], [11, 2], [6, 1], [13, 2], [7, 1], [15, 2], [8, 1],
+  [9, 1], [10, 1], [12, 1], [14, 1], [16, 1], [20, 1], [25, 1], [33, 1],
+  [50, 1], [66, 1], [100, 1],
 ];
 
 export function decimalToFractional(decimal: number | null | undefined): string {
