@@ -1,10 +1,25 @@
 import { Link, useLocation } from "wouter";
+import { createContext, useContext, useState } from "react";
 import { useGetDashboardSummary, getGetDashboardSummaryQueryKey } from "@workspace/api-client-react";
 import { format } from "date-fns";
 import { Activity, Trophy, Clock, ServerCrash, BarChart2, LineChart, TabletSmartphone } from "lucide-react";
 
+export type OddsFormat = "decimal" | "fractional";
+
+const OddsFormatContext = createContext<OddsFormat>("decimal");
+
+export function useOddsFormat() {
+  return useContext(OddsFormatContext);
+}
+
+function getInitialOddsFormat(): OddsFormat {
+  if (typeof window === "undefined") return "decimal";
+  return window.localStorage.getItem("soccer-odds-format") === "fractional" ? "fractional" : "decimal";
+}
+
 export function Shell({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
+  const [oddsFormat, setOddsFormat] = useState<OddsFormat>(getInitialOddsFormat);
 
   const { data: summary, isError } = useGetDashboardSummary({
     query: {
@@ -47,6 +62,22 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 SYS_ERR
               </span>
             )}
+            <label className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider">
+              Odds
+              <select
+                aria-label="Odds format"
+                value={oddsFormat}
+                onChange={(event) => {
+                  const next = event.target.value as OddsFormat;
+                  setOddsFormat(next);
+                  window.localStorage.setItem("soccer-odds-format", next);
+                }}
+                className="rounded border border-border bg-background px-1.5 py-1 text-foreground"
+              >
+                <option value="decimal">Decimal</option>
+                <option value="fractional">Fractional</option>
+              </select>
+            </label>
             <span>
               LST_UPD: {summary?.last_updated ? format(new Date(summary.last_updated), "HH:mm:ss") : "--:--:--"}
             </span>
@@ -95,5 +126,6 @@ export function Shell({ children }: { children: React.ReactNode }) {
         {children}
       </main>
     </div>
+    </OddsFormatContext.Provider>
   );
 }
