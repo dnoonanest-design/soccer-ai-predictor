@@ -36,14 +36,14 @@ describe("dashboard model/market quality gates", () => {
 
 
 describe("bookmaker fractional price formatting", () => {
-  it("uses familiar bookmaker quotes instead of arbitrary fractions", () => {
-    expect(decimalToFractional(1.36)).toBe("5/14");
+  it("uses familiar bookmaker quotes instead of unusual ratios", () => {
+    expect(decimalToFractional(1.36)).toBe("1/3");
     expect(decimalToFractional(1.83)).toBe("5/6");
     expect(decimalToFractional(1.91)).toBe("10/11");
     expect(decimalToFractional(1.67)).toBe("4/6");
     expect(decimalToFractional(2.5)).toBe("6/4");
     expect(decimalToFractional(3.25)).toBe("9/4");
-    expect(decimalToFractional(7.77)).toBe("27/4");
+    expect(decimalToFractional(7.77)).toBe("8/1");
   });
 
   it("handles invalid prices safely", () => {
