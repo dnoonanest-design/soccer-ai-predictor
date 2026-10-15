@@ -14,7 +14,8 @@ import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays } from "lucide-r
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { decimalToFractional, findModelEdges, findModelGaps, ModelEdge, ModelGap } from "@/lib/odds";
+import { formatOdds, findModelEdges, findModelGaps, ModelEdge, ModelGap } from "@/lib/odds";
+import { useOddsFormat } from "@/components/layout/Shell";
 
 function Tip({ children, text }: { children: React.ReactNode; text: string }) {
   return (
@@ -94,6 +95,7 @@ function MatchStatus({ status, detail, minute }: { status: string; detail: strin
 }
 
 function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction }) {
+  const oddsFormat = useOddsFormat();
   const isLive = match.status === "live";
   const hasValue = valueBets.length > 0;
   const needsReview = modelGaps.length > 0;
@@ -138,9 +140,9 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
                 )}
                 <span className="truncate">{match.home_team.name}</span>
                 {match.odds?.home_odds && (
-                  <Tip text={`Fractional odds for ${match.home_team.name} to win — for every £1 staked you profit ${decimalToFractional(match.odds.home_odds)}`}>
+                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."}>
                     <span className="text-[10px] text-muted-foreground font-mono bg-muted px-1 rounded cursor-default">
-                      {decimalToFractional(match.odds.home_odds)}
+                      {formatOdds(match.odds.home_odds, oddsFormat)}
                     </span>
                   </Tip>
                 )}
@@ -157,9 +159,9 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
                 )}
                 <span className="truncate">{match.away_team.name}</span>
                 {match.odds?.away_odds && (
-                  <Tip text={`Fractional odds for ${match.away_team.name} to win — for every £1 staked you profit ${decimalToFractional(match.odds.away_odds)}`}>
+                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."}>
                     <span className="text-[10px] text-muted-foreground font-mono bg-muted px-1 rounded cursor-default">
-                      {decimalToFractional(match.odds.away_odds)}
+                      {formatOdds(match.odds.away_odds, oddsFormat)}
                     </span>
                   </Tip>
                 )}
@@ -191,7 +193,7 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
               ] as const).map(([label, price]) => (
                 <div key={label} className="rounded bg-background/70 px-1 py-1">
                   <div className="text-[8px] text-muted-foreground">{label}</div>
-                  <div className="text-xs font-bold">{price == null ? "—" : price.toFixed(2)}</div>
+                  <div className="text-xs font-bold">{formatOdds(price, oddsFormat)}</div>
                 </div>
               ))}
             </div>
