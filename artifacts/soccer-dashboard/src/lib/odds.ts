@@ -24,7 +24,13 @@ export function decimalToFractional(decimal: number | null | undefined): string 
   }
 
   const divisor = gcd(bestNumerator, bestDenominator);
-  return bestNumerator / divisor + "/" + bestDenominator / divisor;
+  const reduced = bestNumerator / divisor + "/" + bestDenominator / divisor;
+
+  // UK and Irish bookies commonly quote these familiar prices as 6/4 and 4/6,
+  // rather than reducing them to 3/2 and 2/3.
+  if (reduced === "3/2") return "6/4";
+  if (reduced === "2/3") return "4/6";
+  return reduced;
 }
 
 export function formatOdds(decimal: number | null | undefined, format: "decimal" | "fractional"): string {
