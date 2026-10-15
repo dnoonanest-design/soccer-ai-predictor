@@ -3,11 +3,33 @@ function gcd(a: number, b: number): number {
 }
 
 export function decimalToFractional(decimal: number | null | undefined): string {
-  if (decimal == null || decimal <= 1) return "-";
-  const numerator = Math.round((decimal - 1) * 100);
-  const denominator = 100;
-  const divisor = gcd(numerator, denominator);
-  return `${numerator / divisor}/${denominator / divisor}`;
+  if (decimal == null || !Number.isFinite(decimal) || decimal <= 1) return "-";
+
+  // Decimal bookmaker prices are rounded to cents. Find the nearest
+  // conventional fractional price instead of returning awkward hundredths.
+  const profit = decimal - 1;
+  const maxDenominator = 32;
+  let bestNumerator = Math.round(profit);
+  let bestDenominator = 1;
+  let bestError = Math.abs(profit - bestNumerator);
+
+  for (let denominator = 1; denominator <= maxDenominator; denominator += 1) {
+    const numerator = Math.round(profit * denominator);
+    const error = Math.abs(profit - numerator / denominator);
+    if (error < bestError - Number.EPSILON || (Math.abs(error - bestError) <= Number.EPSILON && denominator < bestDenominator)) {
+      bestNumerator = numerator;
+      bestDenominator = denominator;
+      bestError = error;
+    }
+  }
+
+  const divisor = gcd(bestNumerator, bestDenominator);
+  return bestNumerator / divisor + "/" + bestDenominator / divisor;
+}
+
+export function formatOdds(decimal: number | null | undefined, format: "decimal" | "fractional"): string {
+  if (decimal == null || !Number.isFinite(decimal) || decimal <= 1) return "—";
+  return format === "fractional" ? decimalToFractional(decimal) : decimal.toFixed(2);
 }
 
 export type ValueBet = {
