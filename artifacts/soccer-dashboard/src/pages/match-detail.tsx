@@ -14,7 +14,8 @@ import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card } from "@/components/ui/card";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { decimalToFractional } from "@/lib/odds";
+import { formatOdds } from "@/lib/odds";
+import { useOddsFormat } from "@/components/layout/Shell";
 import { computeXG, divergence } from "@/lib/xg";
 
 
@@ -1261,6 +1262,7 @@ function ExplanationCard({ matchId, status }: { matchId: number; status: string 
 }
 
 export default function MatchDetail() {
+  const oddsFormat = useOddsFormat();
   const params = useParams();
   const matchId = Number(params.id);
 
@@ -1454,9 +1456,9 @@ export default function MatchDetail() {
               <Tip text="Bookmaker-implied probability that the home team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
                 <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.home_win?.toFixed(1)}%</div>
               </Tip>
-              <Tip text={`Fractional odds for a home win: for every £1 stake you profit ${decimalToFractional(match.odds.home_odds)} — these include the bookmaker's margin`} side="bottom">
+              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
                 <div className="text-sm font-mono text-primary bg-primary/10 inline-block px-2 py-0.5 rounded cursor-default">
-                  {decimalToFractional(match.odds.home_odds)}
+                  {formatOdds(match.odds.home_odds, oddsFormat)}
                 </div>
               </Tip>
             </Card>
@@ -1466,9 +1468,9 @@ export default function MatchDetail() {
               <Tip text="Bookmaker-implied probability of the match ending level after 90 minutes — calculated from the draw odds minus the overround">
                 <div className="text-3xl font-mono font-bold mb-1 text-muted-foreground cursor-default">{match.odds.draw?.toFixed(1)}%</div>
               </Tip>
-              <Tip text={`Fractional odds for a draw: for every £1 stake you profit ${decimalToFractional(match.odds.draw_odds)}`} side="bottom">
+              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
                 <div className="text-sm font-mono bg-muted inline-block px-2 py-0.5 rounded cursor-default">
-                  {decimalToFractional(match.odds.draw_odds)}
+                  {formatOdds(match.odds.draw_odds, oddsFormat)}
                 </div>
               </Tip>
             </Card>
@@ -1478,9 +1480,9 @@ export default function MatchDetail() {
               <Tip text="Bookmaker-implied probability that the away team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
                 <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.away_win?.toFixed(1)}%</div>
               </Tip>
-              <Tip text={`Fractional odds for an away win: for every £1 stake you profit ${decimalToFractional(match.odds.away_odds)}`} side="bottom">
+              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
                 <div className="text-sm font-mono text-chart-2 bg-chart-2/10 inline-block px-2 py-0.5 rounded cursor-default">
-                  {decimalToFractional(match.odds.away_odds)}
+                  {formatOdds(match.odds.away_odds, oddsFormat)}
                 </div>
               </Tip>
             </Card>
