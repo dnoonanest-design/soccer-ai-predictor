@@ -766,9 +766,12 @@ async function getSoccerOdds(
   if (!sportKeys.length) return [];
 
   const events = new Map<string, OddsApiEvent>();
-  // Sequential calls respect the shared limiter and avoid provider bursts.
-  for (const sportKey of sportKeys) {
-    const sportEvents = await fetchOddsForSport(sportKey);
+  // Queue independent sports together. The shared limiter still spaces every
+  // provider request, while overlapping response time shortens cold dashboards.
+  const sportResults = await Promise.all(
+    sportKeys.map((sportKey) => fetchOddsForSport(sportKey)),
+  );
+  for (const sportEvents of sportResults) {
     for (const event of sportEvents) {
       events.set(`${event.sport_key}:${event.id}`, event);
     }
