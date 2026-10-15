@@ -29,6 +29,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   });
 
   return (
+    <OddsFormatContext.Provider value={oddsFormat}>
     <div className="min-h-screen bg-background text-foreground flex flex-col font-sans dark selection:bg-primary/30">
       {/* Top Status Bar - Bloomberg Terminal Style */}
       <header className="sticky top-0 z-50 w-full border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
