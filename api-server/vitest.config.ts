@@ -10,7 +10,11 @@ export default defineConfig({
     // Run tests in Node environment (no DOM needed for pure maths)
     environment: "node",
     // Only pick up files in __tests__ folders or *.test.ts files
-    include: ["src/**/__tests__/**/*.test.ts", "src/**/*.test.ts"],
+    include: [
+      "src/**/__tests__/**/*.test.ts",
+      "src/**/*.test.ts",
+      "../artifacts/soccer-dashboard/src/**/__tests__/**/*.test.ts",
+    ],
     // Exclude compiled output
     exclude: ["dist/**"],
     // Concise reporter for CI

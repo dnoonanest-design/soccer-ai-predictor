@@ -7,14 +7,14 @@ import {
   XGPrediction,
 } from "@workspace/api-client-react";
 import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { format } from "date-fns";
 import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { decimalToFractional, findModelEdges, ModelEdge } from "@/lib/odds";
+import { decimalToFractional, findModelEdges, findModelGaps, ModelEdge, ModelGap } from "@/lib/odds";
 
 function Tip({ children, text }: { children: React.ReactNode; text: string }) {
   return (
@@ -30,7 +30,7 @@ function Tip({ children, text }: { children: React.ReactNode; text: string }) {
 function LeagueLogo({ src, name, className }: { src?: string | null; name: string; className: string }) {
   const [failed, setFailed] = useState(false);
   if (!src || failed) return <Trophy aria-label={`${name} logo unavailable`} className={`${className} text-muted-foreground`} />;
-  return <img src={src} alt={name} className={className} onError={() => setFailed(true)} />;
+  return <img src={src} alt={name} className={className} loading="lazy" decoding="async" onError={() => setFailed(true)} />;
 }
 
 const OUTCOME_LABELS: Record<ModelEdge["outcome"], string> = {
@@ -86,15 +86,18 @@ function MatchStatus({ status, detail, minute }: { status: string; detail: strin
   return <div className="text-primary/80 font-mono font-bold text-xs">{detail}</div>;
 }
 
-function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdge[]; xg?: XGPrediction }) {
+function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction }) {
   const isLive = match.status === "live";
   const hasValue = valueBets.length > 0;
+  const needsReview = modelGaps.length > 0;
+  const odds = match.odds;
+  const hasCompleteOdds = odds?.home_win != null && odds.draw != null && odds.away_win != null;
 
   return (
     <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`}>
       <Card
         className={`p-3 hover:bg-muted/50 transition-colors border-border/50 group cursor-pointer h-full flex flex-col justify-between ${
-          hasValue ? "ring-1 ring-yellow-400/40 border-yellow-400/30" : ""
+          hasValue ? "ring-1 ring-yellow-400/40 border-yellow-400/30" : needsReview ? "ring-1 ring-amber-400/30 border-amber-400/25" : ""
         }`}
       >
         <div>
@@ -102,6 +105,15 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdg
             <div className="flex items-center gap-2 flex-wrap">
               <MatchStatus status={match.status} detail={match.status_detail} minute={match.minute} />
               {hasValue && <ValueBadge bets={valueBets} />}
+              {needsReview && (
+                <span
+                  className="inline-flex items-center gap-1 rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider text-amber-300"
+                  data-testid="badge-model-gap-review"
+                  title={`Largest model/market probability gap is ${modelGaps[0].delta.toFixed(1)} percentage points. Hidden from model edges pending review.`}
+                >
+                  REVIEW · {Math.round(modelGaps[0].delta)} pp gap
+                </span>
+              )}
             </div>
             {match.status === "upcoming" && (
               <div className="text-xs text-muted-foreground font-mono">
@@ -114,7 +126,7 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdg
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2 font-medium truncate">
                 {match.home_team.logo && (
-                  <img src={match.home_team.logo} alt={match.home_team.name} className="w-4 h-4 object-contain" />
+                  <img src={match.home_team.logo} alt={match.home_team.name} className="w-4 h-4 object-contain" loading="lazy" decoding="async" />
                 )}
                 <span className="truncate">{match.home_team.name}</span>
                 {match.odds?.home_odds && (
@@ -133,7 +145,7 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdg
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2 font-medium truncate">
                 {match.away_team.logo && (
-                  <img src={match.away_team.logo} alt={match.away_team.name} className="w-4 h-4 object-contain" />
+                  <img src={match.away_team.logo} alt={match.away_team.name} className="w-4 h-4 object-contain" loading="lazy" decoding="async" />
                 )}
                 <span className="truncate">{match.away_team.name}</span>
                 {match.odds?.away_odds && (
@@ -151,7 +163,13 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdg
           </div>
         </div>
 
-        {match.odds && match.odds.home_win != null && (
+        {match.status === "upcoming" && !hasCompleteOdds && (
+          <div className="mt-3 text-[9px] font-mono uppercase tracking-wider text-muted-foreground" title="Odds are unavailable or incomplete, so this fixture is excluded from model edge calculations.">
+            Market odds unavailable
+          </div>
+        )}
+
+        {odds && odds.home_win != null && odds.draw != null && odds.away_win != null && (
           <div className="mt-4 pt-3 border-t border-border/50">
             {/* Value bet breakdown row */}
             {hasValue && (
@@ -165,17 +183,17 @@ function MatchCard({ match, valueBets, xg }: { match: Match; valueBets: ModelEdg
               </div>
             )}
             <div className="flex justify-between text-[10px] font-mono text-muted-foreground mb-1">
-              <Tip text="Market-implied home win probability from the bookmaker's odds">
-                <span className="text-primary cursor-default">{match.odds.home_win.toFixed(1)}%</span>
+                  <Tip text="Market-implied home win probability from the bookmaker's odds">
+                <span className="text-primary cursor-default">{odds.home_win.toFixed(1)}%</span>
               </Tip>
               <Tip text="Market-implied draw probability from the bookmaker's odds">
-                <span className="cursor-default">{match.odds.draw?.toFixed(1)}%</span>
+                <span className="cursor-default">{odds.draw.toFixed(1)}%</span>
               </Tip>
               <Tip text="Market-implied away win probability from the bookmaker's odds">
-                <span className="text-chart-2 cursor-default">{match.odds.away_win?.toFixed(1)}%</span>
+                <span className="text-chart-2 cursor-default">{odds.away_win.toFixed(1)}%</span>
               </Tip>
             </div>
-            <ProbabilityBar home={match.odds.home_win} draw={match.odds.draw} away={match.odds.away_win} />
+            <ProbabilityBar home={odds.home_win} draw={odds.draw} away={odds.away_win} />
 
           </div>
         )}
@@ -262,14 +280,20 @@ export default function Dashboard() {
     value: "UPCOMING MODEL EDGES",
   };
 
-  const { data: matches, isLoading } = useGetMatches(
+  const { data: matches, isLoading, isError, refetch } = useGetMatches(
     { status: apiStatus },
-    { query: { refetchInterval: 15000, queryKey: getGetMatchesQueryKey({ status: apiStatus }) } }
+    { query: {
+      refetchInterval: 15000,
+      staleTime: 10_000,
+      gcTime: 10 * 60_000,
+      placeholderData: keepPreviousData,
+      queryKey: getGetMatchesQueryKey({ status: apiStatus }),
+    } }
   );
 
   // Bulk xG predictions — one call, 5-min cache
   const { data: xgData } = useGetXg({
-    query: { refetchInterval: 30_000, queryKey: getGetXgQueryKey() },
+    query: { refetchInterval: 30_000, staleTime: 30_000, gcTime: 10 * 60_000, queryKey: getGetXgQueryKey() },
   });
 
   const { data: storedData } = useQuery({
@@ -280,6 +304,9 @@ export default function Dashboard() {
       return response.json() as Promise<{ fixtures: Array<{ fixture_id: number; prediction: { home_win: number; draw: number; away_win: number; home_xg?: number | null; away_xg?: number | null } }> }>;
     },
     refetchInterval: 60_000,
+    staleTime: 30_000,
+    gcTime: 10 * 60_000,
+    placeholderData: keepPreviousData,
   });
 
   const xgMap = useMemo<Map<number, XGPrediction>>(() => {
@@ -315,6 +342,16 @@ export default function Dashboard() {
     }
     return map;
   }, [matches, xgMap, threshold]);
+
+  const modelGapMap = useMemo<Map<number, ModelGap[]>>(() => {
+    const map = new Map<number, ModelGap[]>();
+    for (const match of matches ?? []) {
+      const prediction = xgMap.get(match.id);
+      if (match.status !== "upcoming" || !match.odds || !prediction) continue;
+      map.set(match.id, findModelGaps(match.odds, prediction));
+    }
+    return map;
+  }, [matches, xgMap]);
 
   const totalValueBets = useMemo(() => {
     let count = 0;
@@ -447,6 +484,12 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
+      ) : isError && !matches ? (
+        <div className="flex flex-col items-center justify-center gap-3 py-24 text-center text-muted-foreground border border-dashed border-destructive/30 rounded-lg">
+          <Trophy className="w-10 h-10 opacity-30" />
+          <p>Match data couldn’t be loaded. Predictions stay frozen after kickoff.</p>
+          <button onClick={() => void refetch()} className="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted">Try again</button>
+        </div>
       ) : filter === "value" ? (
         valueSortedMatches.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-yellow-400/20 rounded-lg">
@@ -479,7 +522,7 @@ export default function Dashboard() {
                         {match.league_name} · {match.country}
                       </span>
                     </div>
-                    <MatchCard match={match} valueBets={bets} xg={xgMap.get(match.id)} />
+                    <MatchCard match={match} valueBets={bets} modelGaps={modelGapMap.get(match.id) ?? []} xg={xgMap.get(match.id)} />
                   </div>
                 );
               })}
@@ -531,6 +574,7 @@ export default function Dashboard() {
                     key={match.id}
                     match={match}
                     valueBets={valueBetMap.get(match.id) ?? []}
+                    modelGaps={modelGapMap.get(match.id) ?? []}
                     xg={xgMap.get(match.id)}
                   />
                 ))}

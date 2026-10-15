@@ -659,6 +659,28 @@ async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
   if (cached) return cached;
 
   const start = new Date();
+  const from = start.toISOString().slice(0, 10);
+  const to = new Date(Date.UTC(
+    start.getUTCFullYear(),
+    start.getUTCMonth(),
+    start.getUTCDate() + safeDays - 1,
+  )).toISOString().slice(0, 10);
+
+  // A range query replaces one provider request per day on the dashboard's
+  // cold path. Keep the daily strategy as a fallback for provider plans or
+  // datasets that do not return a useful range response.
+  const rangePath = `/fixtures?from=${from}&to=${to}&timezone=UTC`;
+  try {
+    const rows = requireFixtureArray(await fetchFootball(rangePath), rangePath);
+    const trackedRows = rows.filter((fixture) => isTrackedLeague(fixture.league.id));
+    if (trackedRows.length > 0) {
+      setCache(cacheKey, trackedRows);
+      return trackedRows;
+    }
+  } catch (err) {
+    logger.warn({ err, from, to }, "fixture range lookup failed; using daily lookups");
+  }
+
   const fixtures = new Map<number, ApiFootballFixture>();
   let firstError: unknown = null;
   let successfulDays = 0;

@@ -1,0 +1,35 @@
+import { describe, expect, it } from "vitest";
+import { findModelEdges, findModelGaps } from "../odds";
+
+describe("dashboard model/market quality gates", () => {
+  const validModel = { home_win: 50, draw: 25, away_win: 25 };
+
+  it("requires a complete three-way market before calculating edges", () => {
+    expect(findModelEdges(
+      { home_win: 42, draw: 28, away_win: null },
+      validModel,
+      5,
+    )).toEqual([]);
+  });
+
+  it("rejects malformed market and model totals", () => {
+    expect(findModelEdges(
+      { home_win: 90, draw: 25, away_win: 5 },
+      { home_win: 90, draw: 5, away_win: 5 },
+      5,
+    )).toEqual([]);
+  });
+
+  it("flags very large gaps for review and keeps them out of model edges", () => {
+    const market = { home_win: 90, draw: 7, away_win: 3 };
+    const model = { home_win: 34, draw: 29, away_win: 37 };
+
+    expect(findModelGaps(market, model)).toMatchObject([
+      { outcome: "HOME", delta: 56, market: 90, history: 34 },
+      { outcome: "AWAY", delta: 34, market: 3, history: 37 },
+    ]);
+    expect(findModelEdges(market, model, 5)).toEqual([
+      { outcome: "DRAW", delta: 22, market: 7, modelProbability: 29 },
+    ]);
+  });
+});
