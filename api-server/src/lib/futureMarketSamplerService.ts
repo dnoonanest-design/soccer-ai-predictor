@@ -588,6 +588,9 @@ function toMatch(fixture: FutureFixture): Match {
       home_odds: null,
       draw_odds: null,
       away_odds: null,
+      bookmaker: null,
+      bookmaker_key: null,
+      last_updated: null,
     },
   };
 }

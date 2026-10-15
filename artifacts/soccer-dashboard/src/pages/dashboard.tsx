@@ -71,6 +71,13 @@ function ProbabilityBar({ home, draw, away }: { home?: number | null; draw?: num
   );
 }
 
+function oddsUpdatedLabel(value?: string | null) {
+  if (!value) return "update time unavailable";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "update time unavailable";
+  return `updated ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function MatchStatus({ status, detail, minute }: { status: string; detail: string; minute?: number | null }) {
   if (status === "live") {
     return (
@@ -92,6 +99,7 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
   const needsReview = modelGaps.length > 0;
   const odds = match.odds;
   const hasCompleteOdds = odds?.home_win != null && odds.draw != null && odds.away_win != null;
+  const hasPrices = odds?.home_odds != null || odds?.draw_odds != null || odds?.away_odds != null;
 
   return (
     <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`}>
@@ -163,9 +171,33 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
           </div>
         </div>
 
-        {match.status === "upcoming" && !hasCompleteOdds && (
+        {!hasPrices && (
           <div className="mt-3 text-[9px] font-mono uppercase tracking-wider text-muted-foreground" title="Odds are unavailable or incomplete, so this fixture is excluded from model edge calculations.">
-            Market odds unavailable
+            Bookmaker odds unavailable
+          </div>
+        )}
+
+        {hasPrices && (
+          <div className="mt-3 rounded border border-border/50 bg-muted/20 px-2.5 py-2" data-testid={`fixture-bookmaker-odds-${match.id}`}>
+            <div className="mb-2 flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              <span className="truncate">{odds.bookmaker || odds.bookmaker_key || "Bookmaker"} · {isLive ? "LIVE" : "PRE-MATCH"}</span>
+              <span className="shrink-0" title={odds.last_updated ?? undefined}>{oddsUpdatedLabel(odds.last_updated)}</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center font-mono">
+              {([
+                ["HOME", odds.home_odds],
+                ["DRAW", odds.draw_odds],
+                ["AWAY", odds.away_odds],
+              ] as const).map(([label, price]) => (
+                <div key={label} className="rounded bg-background/70 px-1 py-1">
+                  <div className="text-[8px] text-muted-foreground">{label}</div>
+                  <div className="text-xs font-bold">{price == null ? "—" : price.toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-1.5 text-center font-mono text-[8px] uppercase tracking-wider text-muted-foreground">
+              Odds display only · never used in prediction
+            </div>
           </div>
         )}
 
@@ -183,7 +215,7 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
               </div>
             )}
             <div className="flex justify-between text-[10px] font-mono text-muted-foreground mb-1">
-                  <Tip text="Market-implied home win probability from the bookmaker's odds">
+              <Tip text="Market-implied home win probability from the bookmaker's odds">
                 <span className="text-primary cursor-default">{odds.home_win.toFixed(1)}%</span>
               </Tip>
               <Tip text="Market-implied draw probability from the bookmaker's odds">

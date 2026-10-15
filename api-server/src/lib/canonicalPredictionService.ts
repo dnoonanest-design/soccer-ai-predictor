@@ -1,4 +1,5 @@
 import type { Match } from "./soccerService";
+import { toPredictionMatch, type PredictionMatch } from "./predictionInputBoundary";
 import { getMatchStats, type MatchStatsResult } from "./statsService";
 import {
   getEnhancedPrediction,
@@ -96,7 +97,7 @@ export type VariantMarkets = {
 };
 
 export async function computeLegacyVariant(
-  match: Match,
+  match: PredictionMatch,
   stats: MatchStatsResult,
   overrides: EnhancedPredictionOverrides,
   shrinkToward: UnitThreeWay | null,
@@ -106,7 +107,7 @@ export async function computeLegacyVariant(
 
 /** As computeLegacyVariant, plus the variant's own expected goals and goal markets. */
 export async function computeLegacyVariantDetail(
-  match: Match,
+  match: PredictionMatch,
   stats: MatchStatsResult,
   overrides: EnhancedPredictionOverrides,
   shrinkToward: UnitThreeWay | null,
@@ -201,7 +202,7 @@ function featureUsage(stats: MatchStatsResult, raw: EnhancedPrediction, live: bo
   };
 }
 
-async function buildFallbackPrediction(match: Match): Promise<CanonicalPrediction> {
+async function buildFallbackPrediction(match: PredictionMatch): Promise<CanonicalPrediction> {
   const fallback = await getOfflineFallbackModel();
   const prior = fallback.leagueOutcomePriors[match.league_id] ?? fallback.globalPriors;
   if (fallback.sampleSize < MIN_SAMPLE_FOR_OFFLINE_FALLBACK) {
@@ -245,37 +246,40 @@ export async function createCanonicalPrediction(
   if (match.status !== "upcoming" && match.status !== "live") {
     throw new Error(`Prediction generation blocked for non-forecast status: ${match.status}`);
   }
+  // Odds belong to the presentation/market-comparison layer. Strip them at
+  // the canonical boundary so model and challenger code cannot read them.
+  const predictionMatch = toPredictionMatch(match);
 
   let stats: MatchStatsResult;
   try {
     stats = options.stats ?? await getMatchStats(
-      match.id, match.home_team.id, match.home_team.name, match.away_team.id,
-      match.away_team.name, match.league_id, match.status === "live",
+      predictionMatch.id, predictionMatch.home_team.id, predictionMatch.home_team.name, predictionMatch.away_team.id,
+      predictionMatch.away_team.name, predictionMatch.league_id, predictionMatch.status === "live",
     );
   } catch (err) {
     logger.warn({ err, fixtureId: match.id }, "canonical prediction: stats unavailable; attempting fallback");
-    return { prediction: await buildFallbackPrediction(match), stats: null, circumstances: null };
+    return { prediction: await buildFallbackPrediction(predictionMatch), stats: null, circumstances: null };
   }
 
   if (!stats.home || !stats.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) {
-    return { prediction: await buildFallbackPrediction(match), stats, circumstances: null };
+    return { prediction: await buildFallbackPrediction(predictionMatch), stats, circumstances: null };
   }
 
-  const live = match.status === "live";
+  const live = predictionMatch.status === "live";
   const raw = await getEnhancedPrediction(
-    match.id, match.status, match.home_team.id, match.away_team.id, match.league_id,
+    predictionMatch.id, predictionMatch.status, predictionMatch.home_team.id, predictionMatch.away_team.id, predictionMatch.league_id,
     stats.home.goals_per_game, stats.home.conceded_per_game,
     stats.away.goals_per_game, stats.away.conceded_per_game,
-    match.home_team.name, match.away_team.name, match.minute ?? null, live,
-    match.score?.home ?? null, match.score?.away ?? null,
+    predictionMatch.home_team.name, predictionMatch.away_team.name, predictionMatch.minute ?? null, live,
+    predictionMatch.score?.home ?? null, predictionMatch.score?.away ?? null,
     stats.home.form, stats.away.form, modelStatsPayload(stats),
   );
   const serving = selectServingProbabilities(raw, live);
   const quality = applyDataQualityReliability(serving, stats.home, stats.away, raw.confidence_score);
   let circumstances: Awaited<ReturnType<typeof collectMatchCircumstances>> | null = null;
   if (options.collectCircumstances) {
-    circumstances = await collectMatchCircumstances(match, stats.home.form, stats.away.form).catch((err) => {
-      logger.warn({ err, fixtureId: match.id }, "canonical prediction: circumstance collection failed");
+    circumstances = await collectMatchCircumstances(predictionMatch, stats.home.form, stats.away.form).catch((err) => {
+      logger.warn({ err, fixtureId: predictionMatch.id }, "canonical prediction: circumstance collection failed");
       return null;
     });
   }
@@ -314,11 +318,11 @@ export async function createCanonicalPrediction(
   // model is computed beside the live model and serves only once promoted.
   if (!live && !options.legacyOnly) {
     const { applyServingChampion } = await import("./modelChallengerService");
-    return applyServingChampion(match, result);
+    return applyServingChampion(predictionMatch, result);
   }
   if (live && !options.legacyOnly) {
     const { applyInPlayModel } = await import("./inPlayModelService");
-    return applyInPlayModel(match, result);
+    return applyInPlayModel(predictionMatch, result);
   }
   return result;
 }

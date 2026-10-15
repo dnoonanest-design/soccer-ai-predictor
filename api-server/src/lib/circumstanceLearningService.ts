@@ -1,6 +1,6 @@
 import { db, factorLearningInsights, matchCircumstances, playerMatchFactors } from "@workspace/db";
 import { and, desc, eq, sql } from "drizzle-orm";
-import type { Match } from "./soccerService";
+import type { PredictionMatch } from "./predictionInputBoundary";
 import { getMatchEvents, type MatchEvent } from "./eventsService";
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
@@ -95,7 +95,7 @@ function influenceFromStat(stat: any): number {
   return Math.round((rating * 3 + goals * 8 + assists * 6 + shots * 0.8 + keyPasses * 1.2 - red * 10 - yellow * 2) * 10) / 10;
 }
 
-async function savePlayerFactors(match: Match, lineups: ApiLineup[], injuries: ApiInjury[], playerStats: ApiPlayerStats[], events: MatchEvent[]) {
+async function savePlayerFactors(match: PredictionMatch, lineups: ApiLineup[], injuries: ApiInjury[], playerStats: ApiPlayerStats[], events: MatchEvent[]) {
   const rows: any[] = [];
   for (const side of ["home", "away"] as const) {
     const team = side === "home" ? match.home_team : match.away_team;
@@ -147,7 +147,7 @@ async function savePlayerFactors(match: Match, lineups: ApiLineup[], injuries: A
   }
 }
 
-export async function collectMatchCircumstances(match: Match, homeForm?: string | null, awayForm?: string | null) {
+export async function collectMatchCircumstances(match: PredictionMatch, homeForm?: string | null, awayForm?: string | null) {
   const lineups = await fetchFootball<ApiLineup[]>(`/fixtures/lineups?fixture=${match.id}`, []);
   const injuries = await fetchFootball<ApiInjury[]>(`/injuries?fixture=${match.id}`, []);
   const playerStats = await fetchFootball<ApiPlayerStats[]>(`/fixtures/players?fixture=${match.id}`, []);
@@ -233,7 +233,7 @@ function normalise(home: number, draw: number, away: number) {
   return { home: h, draw: d, away: a };
 }
 
-export async function applyCircumstanceCalibration(match: Match, probs: { home: number; draw: number; away: number }) {
+export async function applyCircumstanceCalibration(match: PredictionMatch, probs: { home: number; draw: number; away: number }) {
   // Retained for API compatibility only. These signals overlap with form,
   // injuries, lineups and live cards already used by the canonical model. The
   // former default-weight adjustment could double count them without holdout

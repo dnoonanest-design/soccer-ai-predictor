@@ -94,6 +94,9 @@ export declare const GetMatchesResponseItem: zod.ZodObject<{
         home_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         draw_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         away_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
+        bookmaker: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        bookmaker_key: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        last_updated: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
     }, "strip", zod.ZodTypeAny, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -101,6 +104,9 @@ export declare const GetMatchesResponseItem: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -108,6 +114,9 @@ export declare const GetMatchesResponseItem: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }>>;
 }, "strip", zod.ZodTypeAny, {
     status: string;
@@ -144,6 +153,9 @@ export declare const GetMatchesResponseItem: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }, {
     status: string;
@@ -180,6 +192,9 @@ export declare const GetMatchesResponseItem: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }>;
 export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
@@ -245,6 +260,9 @@ export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
         home_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         draw_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         away_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
+        bookmaker: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        bookmaker_key: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        last_updated: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
     }, "strip", zod.ZodTypeAny, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -252,6 +270,9 @@ export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -259,6 +280,9 @@ export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }>>;
 }, "strip", zod.ZodTypeAny, {
     status: string;
@@ -295,6 +319,9 @@ export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }, {
     status: string;
@@ -331,6 +358,9 @@ export declare const GetMatchesResponse: zod.ZodArray<zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }>, "many">;
 /**
@@ -406,6 +436,9 @@ export declare const GetMatchResponse: zod.ZodObject<{
         home_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         draw_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
         away_odds: zod.ZodOptional<zod.ZodNullable<zod.ZodNumber>>;
+        bookmaker: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        bookmaker_key: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
+        last_updated: zod.ZodOptional<zod.ZodNullable<zod.ZodString>>;
     }, "strip", zod.ZodTypeAny, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -413,6 +446,9 @@ export declare const GetMatchResponse: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }, {
         home_win?: number | null | undefined;
         draw?: number | null | undefined;
@@ -420,6 +456,9 @@ export declare const GetMatchResponse: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     }>>;
 }, "strip", zod.ZodTypeAny, {
     status: string;
@@ -456,6 +495,9 @@ export declare const GetMatchResponse: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }, {
     status: string;
@@ -492,6 +534,9 @@ export declare const GetMatchResponse: zod.ZodObject<{
         home_odds?: number | null | undefined;
         draw_odds?: number | null | undefined;
         away_odds?: number | null | undefined;
+        bookmaker?: string | null | undefined;
+        bookmaker_key?: string | null | undefined;
+        last_updated?: string | null | undefined;
     } | undefined;
 }>;
 /**
@@ -1123,18 +1168,18 @@ export declare const GetDashboardSummaryResponse: zod.ZodObject<{
     leagues_active: zod.ZodNumber;
     last_updated: zod.ZodDate;
 }, "strip", zod.ZodTypeAny, {
+    last_updated: Date;
     live_count: number;
     total_matches: number;
     upcoming_count: number;
     finished_count: number;
     leagues_active: number;
-    last_updated: Date;
 }, {
+    last_updated: Date;
     live_count: number;
     total_matches: number;
     upcoming_count: number;
     finished_count: number;
     leagues_active: number;
-    last_updated: Date;
 }>;
 //# sourceMappingURL=api.d.ts.map

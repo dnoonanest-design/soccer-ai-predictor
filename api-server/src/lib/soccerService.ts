@@ -18,15 +18,15 @@ const SEASON = String(configuredFootballSeason());
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
-// Per-endpoint cache TTLs (ms). The bookmaker cache is intentionally longer
-// than the match cache: market snapshots are stored in 30-minute buckets and
-// there is no value in consuming odds-provider quota on every dashboard poll.
+// Per-endpoint cache TTLs (ms). Pre-match odds can use a longer cache, while
+// live prices refresh on the provider's roughly 40-second in-play cadence.
 const CACHE_TTL = {
   live_fixtures: 30_000,
   soccer_odds: Math.max(
     60_000,
     Number(process.env.ODDS_CACHE_TTL_MS ?? 5 * 60_000),
   ),
+  live_soccer_odds: 40_000,
   today_fixtures: 300_000,
   fixture_window: 300_000,
   team_stats: 3_600_000,
@@ -299,6 +299,9 @@ export interface Odds {
   home_odds: number | null;
   draw_odds: number | null;
   away_odds: number | null;
+  bookmaker: string | null;
+  bookmaker_key: string | null;
+  last_updated: string | null;
 }
 
 export interface Score {
@@ -449,6 +452,7 @@ export type OddsApiEvent = {
     title?: string;
     markets: Array<{
       key: string;
+      last_update?: string;
       outcomes: Array<{ name: string; price: number }>;
     }>;
   }>;
@@ -494,7 +498,7 @@ function namesMatch(a: string, b: string) {
   return longer.includes(shorter) && shorter.length / longer.length >= 0.65;
 }
 
-function extractOdds(
+export function extractOdds(
   homeTeam: string,
   awayTeam: string,
   oddsEvents: OddsApiEvent[],
@@ -507,6 +511,9 @@ function extractOdds(
     home_odds: null,
     draw_odds: null,
     away_odds: null,
+    bookmaker: null,
+    bookmaker_key: null,
+    last_updated: null,
   };
 
   if (!expectedSportKey) return nullOdds;
@@ -566,6 +573,9 @@ function extractOdds(
     home_odds: homeDecimal,
     draw_odds: drawDecimal,
     away_odds: awayDecimal,
+    bookmaker: bookmaker.title ?? bookmaker.key,
+    bookmaker_key: bookmaker.key,
+    last_updated: h2h.last_update ?? null,
   };
 }
 
@@ -708,9 +718,9 @@ async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
   return fixtures;
 }
 
-async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
+async function fetchOddsForSport(sportKey: string, maxAgeMs = CACHE_TTL.soccer_odds): Promise<OddsApiEvent[]> {
   const cacheKey = `soccer_odds:${sportKey}`;
-  const cached = getCached<OddsApiEvent[]>(cacheKey, CACHE_TTL.soccer_odds);
+  const cached = getCached<OddsApiEvent[]>(cacheKey, maxAgeMs);
   if (cached) return cached;
 
   if (!ODDS_API_KEY) {
@@ -749,19 +759,16 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
 async function getSoccerOdds(
   fixtures: ApiFootballFixture[],
 ): Promise<OddsApiEvent[]> {
-  const sportKeys = Array.from(
-    new Set(
-      fixtures
-        .filter(
-          (fixture) => {
-            const status = normaliseStatus(fixture.fixture.status.short);
-            return status === "live" || status === "upcoming";
-          },
-        )
-        .map((fixture) => getOddsSportKeyForLeague(fixture.league.id))
-        .filter((key): key is string => Boolean(key)),
-    ),
-  );
+  const sportTtls = new Map<string, number>();
+  for (const fixture of fixtures) {
+    const status = normaliseStatus(fixture.fixture.status.short);
+    if (status !== "live" && status !== "upcoming") continue;
+    const sportKey = getOddsSportKeyForLeague(fixture.league.id);
+    if (!sportKey) continue;
+    const ttl = status === "live" ? CACHE_TTL.live_soccer_odds : CACHE_TTL.soccer_odds;
+    sportTtls.set(sportKey, Math.min(sportTtls.get(sportKey) ?? ttl, ttl));
+  }
+  const sportKeys = Array.from(sportTtls.keys());
 
   if (!sportKeys.length) return [];
 
@@ -769,7 +776,7 @@ async function getSoccerOdds(
   // Queue independent sports together. The shared limiter still spaces every
   // provider request, while overlapping response time shortens cold dashboards.
   const sportResults = await Promise.all(
-    sportKeys.map((sportKey) => fetchOddsForSport(sportKey)),
+    sportKeys.map((sportKey) => fetchOddsForSport(sportKey, sportTtls.get(sportKey))),
   );
   for (const sportEvents of sportResults) {
     for (const event of sportEvents) {

@@ -15,7 +15,7 @@
  * model_inplay_predictions, never in the pre-match challenger table.
  */
 import { pool } from "@workspace/db";
-import type { Match } from "./soccerService";
+import type { PredictionMatch } from "./predictionInputBoundary";
 import type { CanonicalPredictionResult } from "./canonicalPredictionService";
 import {
   DEFAULT_INPLAY_PARAMS,
@@ -244,7 +244,7 @@ async function getInPlayServing(fresh = false) {
 
 // ── Serving and capture ──────────────────────────────────────────────────────
 
-function fittedProbsPercent(match: Match, result: CanonicalPredictionResult, params: InPlayParams): Unit | null {
+function fittedProbsPercent(match: PredictionMatch, result: CanonicalPredictionResult, params: InPlayParams): Unit | null {
   const raw = result.prediction as any;
   const stats = result.stats;
   if (!stats?.home || !stats?.away || match.minute == null || match.score?.home == null || match.score?.away == null) return null;
@@ -263,7 +263,7 @@ function fittedProbsPercent(match: Match, result: CanonicalPredictionResult, par
  * inplay_alternative (for recording at checkpoints), and swaps in the fitted
  * model's numbers once it has been promoted.
  */
-export async function applyInPlayModel(match: Match, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
+export async function applyInPlayModel(match: PredictionMatch, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
   try {
     const state = await getInPlayServing();
     const pred = result.prediction;
@@ -295,7 +295,7 @@ export async function applyInPlayModel(match: Match, result: CanonicalPrediction
 
 /** Store the alternative beside the sealed live checkpoint (both 0-1). */
 export async function recordInPlayChallenger(
-  match: Match,
+  match: PredictionMatch,
   checkpoint: string,
   champion: Unit,
   alternative: { model: string; home: number; draw: number; away: number } | undefined,

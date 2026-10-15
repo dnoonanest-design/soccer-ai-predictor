@@ -20,7 +20,7 @@
  *   legacy                the original formula, recorded once another model is champion
  */
 import { pool } from "@workspace/db";
-import type { Match } from "./soccerService";
+import type { PredictionMatch } from "./predictionInputBoundary";
 import type { MatchStatsResult } from "./statsService";
 import type { CanonicalPredictionResult } from "./canonicalPredictionService";
 import { computeLegacyVariantDetail, type VariantMarkets } from "./canonicalPredictionService";
@@ -83,7 +83,7 @@ let lastRun: { at: string; settled: number; promoted: string | null; error: stri
 
 type ChallengerDetail = { probs: Unit; markets: VariantMarkets };
 
-function fromRatings(match: Match, useXg: boolean): ChallengerDetail | null {
+function fromRatings(match: PredictionMatch, useXg: boolean): ChallengerDetail | null {
   if (useXg) {
     const set = getLeagueRatingSet(match.league_id);
     // Without xG for this league the forecast would duplicate step 2.
@@ -105,7 +105,7 @@ function fromRatings(match: Match, useXg: boolean): ChallengerDetail | null {
 /** Forecast plus the goal markets that go with it, or null when it cannot forecast this match. */
 export async function computeChallengerDetail(
   id: string,
-  match: Match,
+  match: PredictionMatch,
   stats: MatchStatsResult | null,
   calibrationOverride?: CalibrationParams | null,
 ): Promise<ChallengerDetail | null> {
@@ -148,7 +148,7 @@ export async function computeChallengerDetail(
 /** 0-1 forecast for one challenger, or null when it cannot forecast this match. */
 export async function computeChallenger(
   id: string,
-  match: Match,
+  match: PredictionMatch,
   stats: MatchStatsResult | null,
   calibrationOverride?: CalibrationParams | null,
 ): Promise<Unit | null> {
@@ -160,7 +160,7 @@ export async function computeChallenger(
  * Called by the audit worker right after it seals the champion's record.
  */
 export async function recordChallengerPredictions(
-  match: Match,
+  match: PredictionMatch,
   checkpoint: string,
   champion: Unit & { over25?: number | null; btts?: number | null },
   stats: MatchStatsResult | null,
@@ -448,7 +448,7 @@ async function getServingState(fresh = false) {
  * Falls back to the original formula otherwise, so a missing rating never
  * blanks a prediction.
  */
-export async function applyServingChampion(match: Match, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
+export async function applyServingChampion(match: PredictionMatch, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
   const serving = await getServingState();
   if (serving.champion === "legacy") return result;
   try {

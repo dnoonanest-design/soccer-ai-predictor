@@ -60,7 +60,10 @@ export const GetMatchesResponseItem = zod.object({
   "away_win": zod.number().nullish().describe('Probability 0-100 for away win'),
   "home_odds": zod.number().nullish().describe('Decimal odds for home win'),
   "draw_odds": zod.number().nullish().describe('Decimal odds for draw'),
-  "away_odds": zod.number().nullish().describe('Decimal odds for away win')
+  "away_odds": zod.number().nullish().describe('Decimal odds for away win'),
+  "bookmaker": zod.string().nullish().describe('Selected bookmaker display name'),
+  "bookmaker_key": zod.string().nullish().describe('Selected bookmaker API key'),
+  "last_updated": zod.string().nullish().describe('Provider timestamp for the selected market')
 }).optional()
 })
 export const GetMatchesResponse = zod.array(GetMatchesResponseItem)
@@ -107,7 +110,10 @@ export const GetMatchResponse = zod.object({
   "away_win": zod.number().nullish().describe('Probability 0-100 for away win'),
   "home_odds": zod.number().nullish().describe('Decimal odds for home win'),
   "draw_odds": zod.number().nullish().describe('Decimal odds for draw'),
-  "away_odds": zod.number().nullish().describe('Decimal odds for away win')
+  "away_odds": zod.number().nullish().describe('Decimal odds for away win'),
+  "bookmaker": zod.string().nullish().describe('Selected bookmaker display name'),
+  "bookmaker_key": zod.string().nullish().describe('Selected bookmaker API key'),
+  "last_updated": zod.string().nullish().describe('Provider timestamp for the selected market')
 }).optional()
 })
 

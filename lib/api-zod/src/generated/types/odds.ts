@@ -37,4 +37,10 @@ export interface Odds {
      * @nullable
      */
   away_odds?: number | null;
+  /** Selected bookmaker display name */
+  bookmaker?: string | null;
+  /** Selected bookmaker API key */
+  bookmaker_key?: string | null;
+  /** Provider timestamp for the selected market */
+  last_updated?: string | null;
 }
