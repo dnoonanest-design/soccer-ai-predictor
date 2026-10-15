@@ -378,6 +378,43 @@ export async function getChallengerReport() {
   };
 }
 
+/** Settled forecasts for one challenger beside the champion's, newest first (diagnostics). */
+export async function getChallengerFixtures(challenger: string, limit = 60) {
+  const safe = Math.max(1, Math.min(200, Math.floor(limit) || 60));
+  const result = await pool.query(
+    `WITH latest AS (
+       SELECT DISTINCT ON (fixture_id) *
+         FROM model_challenger_predictions
+        WHERE challenger = $1 AND settled_at IS NOT NULL
+        ORDER BY fixture_id, captured_at DESC
+     )
+     SELECT l.fixture_id, l.league_id, l.kickoff_at, l.checkpoint,
+            t.home_team, t.away_team, o.score_home, o.score_away, l.actual_outcome,
+            l.home_win_prob, l.draw_prob, l.away_win_prob,
+            l.champion_home_prob, l.champion_draw_prob, l.champion_away_prob,
+            l.brier_score, l.champion_brier_score
+       FROM latest l
+       LEFT JOIN match_outcomes o ON o.fixture_id = l.fixture_id
+       LEFT JOIN LATERAL (
+         SELECT home_team, away_team FROM prediction_audit_records a
+          WHERE a.fixture_id = l.fixture_id ORDER BY a.captured_at DESC LIMIT 1
+       ) t ON TRUE
+      ORDER BY l.kickoff_at DESC
+      LIMIT $2`,
+    [challenger, safe],
+  );
+  const r3 = (v: unknown) => (v == null ? null : Math.round(Number(v) * 1000) / 1000);
+  return result.rows.map((r: any) => ({
+    fixtureId: Number(r.fixture_id), leagueId: r.league_id == null ? null : Number(r.league_id),
+    kickoff: r.kickoff_at, checkpoint: r.checkpoint,
+    match: `${r.home_team ?? "?"} v ${r.away_team ?? "?"}`,
+    score: r.score_home == null ? null : `${r.score_home}-${r.score_away}`, actual: r.actual_outcome,
+    challenger: [r3(r.home_win_prob), r3(r.draw_prob), r3(r.away_win_prob)],
+    champion: [r3(r.champion_home_prob), r3(r.champion_draw_prob), r3(r.champion_away_prob)],
+    brier: r3(r.brier_score), championBrier: r3(r.champion_brier_score),
+  }));
+}
+
 export async function runPromotionGate(): Promise<string | null> {
   const report = await getChallengerReport();
   const eligible = report.standings.filter((s) => s.eligible).sort((a, b) => (b.brierGain ?? 0) - (a.brierGain ?? 0));

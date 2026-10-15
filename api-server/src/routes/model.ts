@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { logger } from "../lib/logger";
-import { getChallengerReport, rollbackToLegacy, runChallengerCycle } from "../lib/modelChallengerService";
+import { getChallengerFixtures, getChallengerReport, rollbackToLegacy, runChallengerCycle } from "../lib/modelChallengerService";
 import { backfillShotStatistics, ensureTeamRatings, getTeamRatingsStatus } from "../lib/teamRatingsProvider";
 import { getInPlayReport, refitInPlayModel, rollbackInPlay, runInPlayCycle } from "../lib/inPlayModelService";
 import { explainMatch } from "../lib/matchExplanationService";
@@ -17,6 +17,18 @@ router.get("/model/challengers", async (_req, res) => {
   } catch (err) {
     logger.error({ err }, "challenger report failed");
     return res.status(500).json({ error: "Failed to build challenger report" });
+  }
+});
+
+/** Per-fixture forecasts for one challenger beside the live model (settled matches only). */
+router.get("/model/challengers/:challenger/fixtures", async (req, res) => {
+  try {
+    const id = String(req.params.challenger);
+    if (!/^[a-z0-9-]{1,40}$/.test(id)) return res.status(400).json({ error: "Invalid challenger" });
+    return res.json({ challenger: id, fixtures: await getChallengerFixtures(id, Number(req.query.limit ?? 60)) });
+  } catch (err) {
+    logger.error({ err }, "challenger fixtures failed");
+    return res.status(500).json({ error: "Failed to list challenger fixtures" });
   }
 });
 

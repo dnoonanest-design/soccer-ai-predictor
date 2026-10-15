@@ -35,6 +35,14 @@ const SIGNATURE_VERSION = AUDIT_SIGNING_KEY
   ? "hmac-sha256-v3"
   : "sha256-dev-v3";
 
+// In-play checkpoints are 15-minute windows, and the 90' one lasts only for
+// stoppage time (a few minutes). The full audit runs every 5 minutes and does
+// pre-match work first, so in-play capture also runs on its own, faster scan.
+const LIVE_SCAN_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.PREDICTION_ACCURACY_AUDIT_LIVE_SCAN_MS ?? 2 * 60_000),
+);
+const AUDIT_LIVE_ADVISORY_LOCK = 7_310_250_005;
 const HOUR = 60 * 60_000;
 const MINUTE = 60_000;
 const AUDIT_ADVISORY_LOCK = 7_310_250_004;
@@ -90,6 +98,8 @@ let started = false;
 let running = false;
 let timer: NodeJS.Timeout | null = null;
 let startupTimer: NodeJS.Timeout | null = null;
+let liveTimer: NodeJS.Timeout | null = null;
+let liveCapturing = false;
 let lastRunAt: Date | null = null;
 let lastResult: AuditRunResult | null = null;
 let lastError: string | null = null;
@@ -641,6 +651,36 @@ async function capturePrematchCheckpoints(now: Date) {
 }
 
 async function captureLiveCheckpoints() {
+  // One in-play capture at a time in this process (the fast scan and the full audit share it).
+  if (liveCapturing) return { candidates: 0, captured: 0, errors: 0 };
+  liveCapturing = true;
+  try {
+    return await captureLiveCheckpointsUnlocked();
+  } finally {
+    liveCapturing = false;
+  }
+}
+
+/** Fast in-play scan; skips when another instance holds the in-play lock. */
+async function runLiveAuditScan() {
+  let lockClient: PoolClient | null = null;
+  try {
+    lockClient = await pool.connect();
+    const lock = await lockClient.query("SELECT pg_try_advisory_lock($1) AS acquired", [AUDIT_LIVE_ADVISORY_LOCK]);
+    if (!lock.rows[0]?.acquired) return;
+    try {
+      await captureLiveCheckpoints();
+    } finally {
+      await lockClient.query("SELECT pg_advisory_unlock($1)", [AUDIT_LIVE_ADVISORY_LOCK]).catch(() => {});
+    }
+  } catch (err) {
+    logger.warn({ err }, "in-play audit scan failed");
+  } finally {
+    lockClient?.release();
+  }
+}
+
+async function captureLiveCheckpointsUnlocked() {
   let liveMatches: Match[] = [];
   try {
     liveMatches = (await getAllMatches(null, "live")).filter((match) =>
@@ -876,11 +916,13 @@ export function startPredictionAccuracyAudit() {
   startupTimer = setTimeout(() => {
     runPredictionAccuracyAudit().catch(() => {});
   }, 2 * 60_000);
+  liveTimer = setInterval(() => { void runLiveAuditScan(); }, LIVE_SCAN_INTERVAL_MS);
   logger.info(
     {
       scanIntervalMs: SCAN_INTERVAL_MS,
       maxPrematchCapturesPerRun: MAX_PREMATCH_CAPTURES_PER_RUN,
       maxLiveCapturesPerRun: MAX_LIVE_CAPTURES_PER_RUN,
+      liveScanIntervalMs: LIVE_SCAN_INTERVAL_MS,
       modelVersion: MODEL_VERSION,
       engineRevision: ENGINE_REVISION,
       prematchCheckpoints: ["24h", "6h", "90m", "15m"],
@@ -892,6 +934,8 @@ export function startPredictionAccuracyAudit() {
 
 export function stopPredictionAccuracyAudit() {
   if (timer) clearInterval(timer);
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null;
   if (startupTimer) clearTimeout(startupTimer);
   timer = null;
   startupTimer = null;

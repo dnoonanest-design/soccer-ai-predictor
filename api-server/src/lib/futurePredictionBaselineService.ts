@@ -117,6 +117,9 @@ function isBlockedLeagueName(name: string | null | undefined) {
 
 function checkpointFor(msToKickoff: number): "prematch_168h" | "prematch_72h" | "prematch_48h" | "prematch_24h" | null {
   if (msToKickoff <= 0 || msToKickoff > WINDOW_HOURS * HOUR) return null;
+  // Inside 6 hours the audit worker owns the checkpoints (6h, 90m, 15m); a
+  // "24h" record captured a few hours before kickoff would be mislabelled.
+  if (msToKickoff <= 6 * HOUR) return null;
   if (msToKickoff <= 24 * HOUR) return "prematch_24h";
   if (msToKickoff <= 48 * HOUR) return "prematch_48h";
   if (msToKickoff <= 72 * HOUR) return "prematch_72h";

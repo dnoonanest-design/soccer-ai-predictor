@@ -85,7 +85,7 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
              FROM canonical_prematch a
              LEFT JOIN LATERAL (
                SELECT x.home_starting_xi_count, x.away_starting_xi_count
-                 FROM match_circumstances x
+                 FROM prematch_circumstances x
                 WHERE x.fixture_id = a.fixture_id
                   AND x.updated_at <= a.captured_at
                 ORDER BY x.updated_at DESC
