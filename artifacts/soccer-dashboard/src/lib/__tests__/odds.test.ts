@@ -36,12 +36,14 @@ describe("dashboard model/market quality gates", () => {
 
 
 describe("bookmaker fractional price formatting", () => {
-  it("uses familiar reduced bookmaker fractions for rounded decimal prices", () => {
+  it("uses familiar bookmaker quotes instead of arbitrary fractions", () => {
+    expect(decimalToFractional(1.36)).toBe("5/14");
     expect(decimalToFractional(1.83)).toBe("5/6");
     expect(decimalToFractional(1.91)).toBe("10/11");
     expect(decimalToFractional(1.67)).toBe("4/6");
     expect(decimalToFractional(2.5)).toBe("6/4");
     expect(decimalToFractional(3.25)).toBe("9/4");
+    expect(decimalToFractional(7.77)).toBe("27/4");
   });
 
   it("handles invalid prices safely", () => {
@@ -57,6 +59,7 @@ describe("bookmaker decimal price formatting", () => {
     expect(formatOdds(1.8, "decimal")).toBe("1.80");
     expect(formatOdds(2.5, "decimal")).toBe("2.50");
     expect(formatOdds(4.3333333, "decimal")).toBe("4.33");
+    expect(formatOdds(7.77, "decimal")).toBe("7.77");
   });
 
   it("shows unavailable decimal prices safely", () => {
