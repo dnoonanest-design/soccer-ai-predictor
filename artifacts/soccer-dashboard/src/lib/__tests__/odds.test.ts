@@ -39,7 +39,8 @@ describe("bookmaker fractional price formatting", () => {
   it("uses familiar reduced bookmaker fractions for rounded decimal prices", () => {
     expect(decimalToFractional(1.83)).toBe("5/6");
     expect(decimalToFractional(1.91)).toBe("10/11");
-    expect(decimalToFractional(2.5)).toBe("3/2");
+    expect(decimalToFractional(1.67)).toBe("4/6");
+    expect(decimalToFractional(2.5)).toBe("6/4");
     expect(decimalToFractional(3.25)).toBe("9/4");
   });
 
