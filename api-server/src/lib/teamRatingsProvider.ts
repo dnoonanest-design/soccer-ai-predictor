@@ -25,6 +25,7 @@ import {
 } from "./stackingModel";
 import { logger } from "./logger";
 import { getQuotaOptimizationStatus } from "./quotaOptimizationService";
+import { fitLeagueOffsets, type CrossLeagueMatch } from "./leagueOffsets";
 
 type ApiFixture = {
   fixture?: { id?: number; date?: string; status?: { short?: string } };
@@ -99,6 +100,12 @@ let teamLeague = new Map<number, number>();
 let stacking: SoftmaxModel | null = null;
 let stackingTrainedAt = 0;
 let stackingTraining: Promise<void> | null = null;
+/** Fitted log strength per domestic league (cross-league matches only). */
+let leagueOffsets = new Map<number, number>();
+let leagueOffsetMatches = new Map<number, number>();
+let crossLeagueMatchesUsed = 0;
+/** Competitions where teams from different leagues meet: UEFA and domestic cups. */
+const CROSS_LEAGUE_COMPETITIONS = TRACKED_COMPETITIONS.filter((c) => c.kind !== "league").map((c) => c.id);
 /** Walk-forward rows per league and week; a past week's rows never change once its shots are known. */
 const stackRowMemo = new Map<string, { x: number[][]; y: Array<0 | 1 | 2>; shotFixtures: number }>();
 let lastRefresh = 0;
@@ -264,6 +271,8 @@ async function refreshAll(): Promise<void> {
     await pause();
   }
   for (const [id, lg] of teamLeague) if (!nextTeamLeague.has(id) && nextSets.has(lg)) nextTeamLeague.set(id, lg);
+  await fitCrossLeagueOffsets(season, nextSets, nextTeamLeague, now).catch((err) =>
+    logger.warn({ err }, "league offsets not fitted; using the strength table"));
   ratingSets = nextSets;
   teamLeague = nextTeamLeague;
   lastRefresh = now;
@@ -279,6 +288,50 @@ async function refreshAll(): Promise<void> {
 
 /** Test hook: wait for any step 7 training in progress. */
 export async function __waitForStackingTraining() { await stackingTraining; }
+
+/**
+ * League offsets from matches between teams of different leagues (UEFA and
+ * domestic cups, last 3 seasons, 2-year half-life), with the hand-set
+ * strength table as the prior. Replaces the table in cross-league forecasts.
+ */
+async function fitCrossLeagueOffsets(season: number, sets: Map<number, LeagueRatingSet>, membership: Map<number, number>, now: number) {
+  const rows: CrossLeagueMatch[] = [];
+  for (const comp of CROSS_LEAGUE_COMPETITIONS) {
+    for (let s = season - 2; s <= season; s++) {
+      let fixtures: SlimFixture[] = [];
+      try {
+        fixtures = (await loadSeason(comp, s, s === season)).fixtures;
+      } catch (err) {
+        logger.warn({ err, competition: comp, season: s }, "league offsets: competition season unavailable");
+        continue;
+      }
+      for (const f of fixtures) {
+        const t = Date.parse(f.date);
+        if (!(now - t <= 3 * 365 * 86_400_000)) continue;
+        const hl = membership.get(f.home), al = membership.get(f.away);
+        if (hl == null || al == null || hl === al) continue;
+        const hs = sets.get(hl)?.goals, as = sets.get(al)?.goals;
+        const ht = hs?.teams.get(String(f.home)), at = as?.teams.get(String(f.away));
+        if (!hs || !as || !ht || !at) continue;
+        const mu = (hs.mu + as.mu) / 2, h = (hs.homeAdvantage + as.homeAdvantage) / 2;
+        rows.push({
+          homeLeague: hl, awayLeague: al,
+          baseHome: mu + h + ht.attack - at.defence,
+          baseAway: mu + at.attack - ht.defence,
+          homeGoals: f.homeGoals, awayGoals: f.awayGoals,
+          weight: Math.pow(0.5, (now - t) / (730 * 86_400_000)),
+        });
+      }
+      await pause();
+    }
+  }
+  const priors = new Map<number, number>();
+  for (const id of sets.keys()) priors.set(id, Math.log(strengthIndex(id)));
+  const fit = fitLeagueOffsets(rows, priors, 0.3);
+  leagueOffsets = fit.offsets;
+  leagueOffsetMatches = fit.matches;
+  crossLeagueMatchesUsed = rows.length;
+}
 
 /** Step 7: walk-forward rows from every tracked league, pooled, then a softmax fit. */
 async function trainStacking(byLeague: Map<number, StatFixture[]>, now: number) {
@@ -478,7 +531,8 @@ export function forecastFromRatings(
   if (!hr || !ar) return null;
   const ht = hr.teams.get(String(homeTeamId)), at = ar.teams.get(String(awayTeamId));
   if (!ht || !at) return null;
-  const sH = Math.log(strengthIndex(hl)), sA = Math.log(strengthIndex(al));
+  const sH = leagueOffsets.get(hl) ?? Math.log(strengthIndex(hl));
+  const sA = leagueOffsets.get(al) ?? Math.log(strengthIndex(al));
   const mu = (hr.mu + ar.mu) / 2, h = (hr.homeAdvantage + ar.homeAdvantage) / 2;
   const lambdaHome = Math.exp(mu + h + (ht.attack + sH) - (at.defence + sA));
   const lambdaAway = Math.exp(mu + (at.attack + sA) - (ht.defence + sH));
@@ -504,6 +558,13 @@ export function getTeamRatingsStatus() {
     teamsRated: teamLeague.size,
     lastRefreshAt: lastRefresh ? new Date(lastRefresh).toISOString() : null,
     lastError,
+    crossLeague: {
+      matchesUsed: crossLeagueMatchesUsed,
+      // Relative scoring strength (England top flight = 1).
+      leagues: [...leagueOffsets.entries()]
+        .map(([leagueId, o]) => ({ leagueId, strength: Math.round(Math.exp(o - (leagueOffsets.get(39) ?? 0)) * 1000) / 1000, crossLeagueMatches: leagueOffsetMatches.get(leagueId) ?? 0 }))
+        .sort((a, b) => b.strength - a.strength),
+    },
     shotStatistics: {
       fixturesWithShots: sets.reduce((sum, s) => sum + s.shotFixtures, 0),
       lastBackfill,
