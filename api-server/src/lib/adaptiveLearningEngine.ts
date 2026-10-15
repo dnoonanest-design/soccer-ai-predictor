@@ -340,7 +340,7 @@ export async function loadVerifiedTrainingRows(limit = 2000): Promise<TrainingRo
         AND rc.engine_revision = c.engine_revision
        LEFT JOIN LATERAL (
          SELECT x.*
-           FROM match_circumstances x
+           FROM prematch_circumstances x
           WHERE x.fixture_id = c.fixture_id
             AND x.status = 'upcoming'
             AND x.updated_at <= c.captured_at

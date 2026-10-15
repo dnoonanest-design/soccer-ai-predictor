@@ -1,4 +1,4 @@
-import { db, factorLearningInsights, matchCircumstances, playerMatchFactors } from "@workspace/db";
+import { db, factorLearningInsights, matchCircumstances, playerMatchFactors, pool } from "@workspace/db";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { PredictionMatch } from "./predictionInputBoundary";
 import { getMatchEvents, type MatchEvent } from "./eventsService";
@@ -213,6 +213,21 @@ export async function collectMatchCircumstances(match: PredictionMatch, homeForm
     target: matchCircumstances.fixtureId,
     set: values,
   });
+  // The row above is overwritten during play; keep what was known before kickoff.
+  if (match.status === "upcoming") {
+    await pool.query(
+      `INSERT INTO match_circumstance_snapshots
+         (fixture_id, league_id, status, home_starting_xi_count, away_starting_xi_count,
+          home_missing_players, away_missing_players, home_red_cards, away_red_cards,
+          home_star_player_rating, away_star_player_rating, home_form_score, away_form_score,
+          circumstance_score_home, circumstance_score_away)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [values.fixtureId, values.leagueId, values.status, values.homeStartingXiCount, values.awayStartingXiCount,
+        values.homeMissingPlayers, values.awayMissingPlayers, values.homeRedCards, values.awayRedCards,
+        values.homeStarPlayerRating, values.awayStarPlayerRating, values.homeFormScore, values.awayFormScore,
+        values.circumstanceScoreHome, values.circumstanceScoreAway],
+    ).catch((err) => logger.warn({ err, fixtureId: match.id }, "pre-kickoff circumstance snapshot not stored"));
+  }
   await savePlayerFactors(match, lineups, injuries, playerStats, events);
   return values;
 }
