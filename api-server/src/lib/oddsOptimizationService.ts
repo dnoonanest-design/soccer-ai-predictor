@@ -9,8 +9,10 @@ const ENABLED = process.env.ODDS_QUOTA_OPTIMIZATION_ENABLED !== "false";
 const FAR_TTL_MS = clamp(Number(process.env.ODDS_CACHE_FAR_MS ?? 2 * 60 * 60_000), 30 * 60_000, 6 * 60 * 60_000);
 const MID_TTL_MS = clamp(Number(process.env.ODDS_CACHE_MID_MS ?? 60 * 60_000), 15 * 60_000, 3 * 60 * 60_000);
 const NEAR_TTL_MS = clamp(Number(process.env.ODDS_CACHE_NEAR_MS ?? 30 * 60_000), 5 * 60_000, 60 * 60_000);
-const CLOSE_TTL_MS = clamp(Number(process.env.ODDS_CACHE_CLOSE_MS ?? 10 * 60_000), 2 * 60_000, 30 * 60_000);
-const LIVE_TTL_MS = clamp(Number(process.env.ODDS_CACHE_LIVE_MS ?? 40_000), 40_000, 15 * 60_000);
+// Refresh near-kickoff events before the provider marks them in-play, so the
+// optimizer cannot keep serving a long pre-match snapshot after kickoff.
+const CLOSE_TTL_MS = 60_000;
+const LIVE_TTL_MS = 40_000;
 const EMPTY_TTL_MS = clamp(Number(process.env.ODDS_CACHE_EMPTY_MS ?? 30 * 60_000), 5 * 60_000, 2 * 60 * 60_000);
 const FAILURE_BACKOFF_MS = clamp(Number(process.env.ODDS_FAILURE_BACKOFF_MS ?? 15 * 60_000), 60_000, 60 * 60_000);
 const RESERVED_CREDITS = clamp(Number(process.env.ODDS_RESERVED_CREDITS ?? 100), 0, 100_000);
