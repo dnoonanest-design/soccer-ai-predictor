@@ -307,7 +307,7 @@ export default function Dashboard() {
   const search = useSearch();
   const selectedLeagueId = useMemo(() => {
     const rawLeagueId = new URLSearchParams(search).get("league_id");
-    if (!rawLeagueId || !/^\\d+$/.test(rawLeagueId)) return null;
+    if (!rawLeagueId || !/^[0-9]+$/.test(rawLeagueId)) return null;
     const leagueId = Number(rawLeagueId);
     return Number.isSafeInteger(leagueId) && leagueId > 0 ? leagueId : null;
   }, [search, location]);
