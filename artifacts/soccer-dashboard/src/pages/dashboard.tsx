@@ -8,7 +8,7 @@ import {
 } from "@workspace/api-client-react";
 import { useState, useMemo } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { format } from "date-fns";
 import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -303,6 +303,14 @@ function competitionTheme(name: string, country: string) {
 export default function Dashboard() {
   const [filter, setFilter] = useState<Filter>("all");
   const [threshold, setThreshold] = useState<Threshold>(10);
+  const [location, navigate] = useLocation();
+  const search = useSearch();
+  const selectedLeagueId = useMemo(() => {
+    const rawLeagueId = new URLSearchParams(search).get("league_id");
+    if (!rawLeagueId || !/^\\d+$/.test(rawLeagueId)) return null;
+    const leagueId = Number(rawLeagueId);
+    return Number.isSafeInteger(leagueId) && leagueId > 0 ? leagueId : null;
+  }, [search, location]);
 
   // Model edges are evaluated only for upcoming fixtures; never pass "value" as status
   const apiStatus = filter === "all" || filter === "value" ? undefined : filter;
@@ -315,14 +323,23 @@ export default function Dashboard() {
   };
 
   const { data: matches, isLoading, isError, refetch } = useGetMatches(
-    { status: apiStatus },
+    { status: apiStatus, league_id: selectedLeagueId },
     { query: {
       refetchInterval: 15000,
       staleTime: 10_000,
       gcTime: 10 * 60_000,
       placeholderData: keepPreviousData,
-      queryKey: getGetMatchesQueryKey({ status: apiStatus }),
+      queryKey: getGetMatchesQueryKey({ status: apiStatus, league_id: selectedLeagueId }),
     } }
+  );
+
+  // keepPreviousData may temporarily retain the previous league's matches while
+  // the filtered query loads, so apply the selection locally as well.
+  const visibleMatches = useMemo(
+    () => selectedLeagueId == null
+      ? matches
+      : (matches ?? []).filter((match) => match.league_id === selectedLeagueId),
+    [matches, selectedLeagueId],
   );
 
   // Bulk xG predictions — one call, 5-min cache
@@ -346,7 +363,7 @@ export default function Dashboard() {
   const xgMap = useMemo<Map<number, XGPrediction>>(() => {
     const map = new Map<number, XGPrediction>();
     for (const prediction of xgData?.predictions ?? []) map.set(prediction.match_id, prediction);
-    const liveMatchIds = new Set((matches ?? []).filter((match) => match.status === "live").map((match) => match.id));
+    const liveMatchIds = new Set((visibleMatches ?? []).filter((match) => match.status === "live").map((match) => match.id));
     for (const fixture of storedData?.fixtures ?? []) {
       // Saved forecasts are frozen prematch; never replace a live forecast.
       if (liveMatchIds.has(fixture.fixture_id)) continue;
@@ -360,13 +377,13 @@ export default function Dashboard() {
       });
     }
     return map;
-  }, [xgData, storedData, matches]);
+  }, [xgData, storedData, visibleMatches]);
 
   // A halftime-only backtest cannot price a live match state.
   const valueBetMap = useMemo<Map<number, ModelEdge[]>>(() => {
-    if (!matches) return new Map();
+    if (!visibleMatches) return new Map();
     const map = new Map<number, ModelEdge[]>();
-    for (const match of matches) {
+    for (const match of visibleMatches) {
       const prediction = xgMap.get(match.id);
       if (match.status !== "upcoming" || !match.odds || !prediction) {
         map.set(match.id, []);
@@ -375,17 +392,17 @@ export default function Dashboard() {
       map.set(match.id, findModelEdges(match.odds, prediction, threshold));
     }
     return map;
-  }, [matches, xgMap, threshold]);
+  }, [visibleMatches, xgMap, threshold]);
 
   const modelGapMap = useMemo<Map<number, ModelGap[]>>(() => {
     const map = new Map<number, ModelGap[]>();
-    for (const match of matches ?? []) {
+    for (const match of visibleMatches ?? []) {
       const prediction = xgMap.get(match.id);
       if (match.status !== "upcoming" || !match.odds || !prediction) continue;
       map.set(match.id, findModelGaps(match.odds, prediction));
     }
     return map;
-  }, [matches, xgMap]);
+  }, [visibleMatches, xgMap]);
 
   const totalValueBets = useMemo(() => {
     let count = 0;
@@ -395,20 +412,20 @@ export default function Dashboard() {
 
   // Sorted flat list for the Value tab — best delta first
   const valueSortedMatches = useMemo(() => {
-    if (!matches) return [];
-    return matches
+    if (!visibleMatches) return [];
+    return visibleMatches
       .filter((m) => (valueBetMap.get(m.id) ?? []).length > 0)
       .sort((a, b) => {
         const topA = (valueBetMap.get(a.id) ?? [])[0]?.delta ?? 0;
         const topB = (valueBetMap.get(b.id) ?? [])[0]?.delta ?? 0;
         return topB - topA;
       });
-  }, [matches, valueBetMap]);
+  }, [visibleMatches, valueBetMap]);
 
   const groupedMatches = useMemo(() => {
-    if (!matches) return [];
+    if (!visibleMatches) return [];
     const dates = new Map<string, Map<number, { name: string; logo?: string | null; country: string; matches: Match[] }>>();
-    for (const match of matches) {
+    for (const match of visibleMatches) {
       const date = dublinDateKey(match.kickoff);
       if (!dates.has(date)) dates.set(date, new Map());
       const competitions = dates.get(date)!;
@@ -430,7 +447,7 @@ export default function Dashboard() {
           }),
         })),
     }));
-  }, [matches]);
+  }, [visibleMatches]);
 
   return (
     <div className="space-y-6 max-w-[1600px] mx-auto">
@@ -438,6 +455,18 @@ export default function Dashboard() {
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
           <h1 className="shrink-0 text-2xl font-bold tracking-tight">Match Center</h1>
           <span className="rounded-full border border-primary/25 bg-primary/10 px-2.5 py-1 font-mono text-[10px] text-primary">{scopeLabel[filter]}</span>
+          {selectedLeagueId != null && (
+            <button
+              type="button"
+              onClick={() => navigate("/")}
+              data-testid="button-clear-league-filter"
+              aria-label="Clear league filter"
+              className="rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground"
+              title="Show matches from all leagues"
+            >
+              {visibleMatches?.[0]?.league_name ?? `League ${selectedLeagueId}`} · clear ×
+            </button>
+          )}
           {totalValueBets > 0 && (
             <div
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-400 text-xs font-mono font-bold"
@@ -563,7 +592,7 @@ export default function Dashboard() {
             </div>
           </div>
         )
-      ) : !matches || matches.length === 0 ? (
+      ) : !visibleMatches || visibleMatches.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-border rounded-lg">
           <Trophy className="w-12 h-12 mb-4 opacity-20" />
           <p>No {filter !== "all" ? filter : ""} matches found.</p>
