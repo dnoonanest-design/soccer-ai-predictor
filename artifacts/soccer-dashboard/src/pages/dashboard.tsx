@@ -323,7 +323,9 @@ export default function Dashboard() {
   };
 
   const { data: matches, isLoading, isError, refetch } = useGetMatches(
-    { status: apiStatus, league_id: selectedLeagueId },
+    // The generated client serializes null as "league_id=null", which the API
+    // would parse as an invalid league. Omit the parameter when showing all.
+    { status: apiStatus, league_id: selectedLeagueId ?? undefined },
     { query: {
       refetchInterval: 15000,
       staleTime: 10_000,
