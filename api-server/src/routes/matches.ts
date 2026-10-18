@@ -25,6 +25,12 @@ function inProductScope(match: { league_id: number; league_name?: string | null 
   return isTrackedLeague(Number(match.league_id)) && !isBlockedLeague(match.league_name);
 }
 
+export function parseLeagueIdQuery(value: unknown): number | null {
+  if (value == null || value === "" || value === "null") return null;
+  const leagueId = Number.parseInt(String(value), 10);
+  return Number.isInteger(leagueId) ? leagueId : Number.NaN;
+}
+
 function handleMatchRouteError(err: unknown, res: Response) {
   if (isApiFootballProviderError(err)) {
     const provider = getApiFootballProviderHealth();
@@ -45,9 +51,7 @@ const router: IRouter = Router();
 
 router.get("/matches", async (req, res) => {
   try {
-    const leagueId = req.query.league_id
-      ? parseInt(req.query.league_id as string, 10)
-      : null;
+    const leagueId = parseLeagueIdQuery(req.query.league_id);
     const status = (req.query.status as string) || null;
 
     if (leagueId != null && (!Number.isInteger(leagueId) || !isTrackedLeague(leagueId))) {
