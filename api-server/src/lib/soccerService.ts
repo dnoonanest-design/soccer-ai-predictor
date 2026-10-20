@@ -1015,13 +1015,35 @@ export async function getMatchById(id: number): Promise<Match | null> {
   const cached = getCached<Match>(cacheKey, CACHE_TTL.live_fixtures);
   if (cached) return cached;
 
-  // A match-detail request must not depend on the fixture being present in
-  // today's cached list. Direct fixture lookup keeps bookmarked/live detail
-  // pages working across UTC date boundaries and after a schedule refresh.
-  const response = await fetchFootball(`/fixtures?id=${id}`);
-  const fixtures = Array.isArray(response) ? response as ApiFootballFixture[] : [];
-  const fixture = fixtures.find((item) => item.fixture?.id === id);
-  if (!fixture) return null;
+  // A direct provider lookup handles bookmarked fixtures across UTC date
+  // boundaries. Some API-Football responses omit a fixture that is still in
+  // the dashboard's recent schedule snapshot, so retain that known-good row
+  // as a fallback instead of turning a listed fixture's detail page into 404.
+  let fixture: ApiFootballFixture | undefined;
+  let providerError: unknown;
+  try {
+    const response = await fetchFootball(`/fixtures?id=${id}`);
+    const fixtures = Array.isArray(response) ? response as ApiFootballFixture[] : [];
+    fixture = fixtures.find((item) => item.fixture?.id === id);
+  } catch (err) {
+    providerError = err;
+  }
+
+  if (!fixture) {
+    try {
+      const snapshotMatch = (await getAllMatches()).find((match) => match.id === id);
+      if (snapshotMatch) {
+        setCache(cacheKey, snapshotMatch);
+        return snapshotMatch;
+      }
+    } catch (snapshotError) {
+      // Preserve the direct provider error when both sources are unavailable;
+      // the route can then report temporary unavailability rather than 404.
+      if (!providerError) throw snapshotError;
+    }
+    if (providerError) throw providerError;
+    return null;
+  }
 
   const status = normaliseStatus(fixture.fixture.status.short);
   const oddsEvents = status === "live" || status === "upcoming"
