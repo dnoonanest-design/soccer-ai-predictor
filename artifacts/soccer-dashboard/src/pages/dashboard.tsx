@@ -536,6 +536,36 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {!isLoading && filter !== "value" && groupedMatches.length > 0 && (
+        <nav
+          aria-label="Jump to fixture date"
+          data-testid="fixture-date-navigation"
+          className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1"
+        >
+          <span className="shrink-0 pr-1 text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+            Dates
+          </span>
+          {groupedMatches.map((dateGroup) => (
+            <button
+              key={dateGroup.date}
+              type="button"
+              data-testid={`button-fixture-date-${dateGroup.date}`}
+              onClick={() =>
+                document
+                  .getElementById(`fixture-date-${dateGroup.date}`)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+              className="shrink-0 rounded-lg border border-border/60 bg-card/60 px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-primary/5"
+            >
+              <span className="block text-xs font-semibold">{dateHeading(dateGroup.date)}</span>
+              <span className="mt-0.5 block font-mono text-[9px] text-muted-foreground">
+                {dateGroup.fixtureCount} fixture{dateGroup.fixtureCount === 1 ? "" : "s"}
+              </span>
+            </button>
+          ))}
+        </nav>
+      )}
+
       {isLoading ? (
         <div className="space-y-8">
           {[1, 2].map((i) => (
@@ -602,7 +632,7 @@ export default function Dashboard() {
       ) : (
         <div className="space-y-10">
           {groupedMatches.map((dateGroup) => (
-            <section key={dateGroup.date} className="space-y-5" data-testid={`fixture-date-${dateGroup.date}`}>
+            <section key={dateGroup.date} id={`fixture-date-${dateGroup.date}`} className="scroll-mt-20 space-y-5" data-testid={`fixture-date-${dateGroup.date}`}>
               <div className="sticky top-14 z-20 flex items-center gap-3 rounded-lg border border-border/60 bg-background/95 px-4 py-3 shadow-sm backdrop-blur">
                 <CalendarDays className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-bold tracking-tight">{dateHeading(dateGroup.date)}</h2>
