@@ -31,8 +31,8 @@ const DAILY_BUDGET = clamp(
   150_000,
 );
 const LIVE_POLL_MS = clamp(
-  Number(process.env.API_FOOTBALL_LIVE_POLL_MS ?? 60_000),
-  30_000,
+  Number(process.env.API_FOOTBALL_LIVE_POLL_MS ?? 15_000),
+  15_000,
   5 * 60_000,
 );
 const PREMATCH_LEAD_MS = clamp(

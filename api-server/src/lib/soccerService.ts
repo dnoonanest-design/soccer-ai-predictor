@@ -21,7 +21,7 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 // Per-endpoint cache TTLs (ms). Pre-match odds can use a longer cache, while
 // live prices refresh on the provider's roughly 40-second in-play cadence.
 const CACHE_TTL = {
-  live_fixtures: 30_000,
+  live_fixtures: 15_000,
   soccer_odds: Math.max(
     60_000,
     Number(process.env.ODDS_CACHE_TTL_MS ?? 5 * 60_000),
@@ -56,7 +56,7 @@ const MATCH_SNAPSHOT_DAILY_TTL_MS = snapshotTtl(
 );
 const MATCH_SNAPSHOT_WEEKLY_TTL_MS = snapshotTtl(
   process.env.MATCH_SNAPSHOT_WEEKLY_TTL_MS,
-  30_000,
+  15_000,
 );
 const matchSnapshots = new AsyncSnapshotCache<MatchSnapshotMode, Match[]>(
   (mode) => mode === "daily" ? MATCH_SNAPSHOT_DAILY_TTL_MS : MATCH_SNAPSHOT_WEEKLY_TTL_MS,
