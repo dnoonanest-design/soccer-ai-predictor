@@ -303,6 +303,7 @@ function competitionTheme(name: string, country: string) {
 export default function Dashboard() {
   const [filter, setFilter] = useState<Filter>("all");
   const [threshold, setThreshold] = useState<Threshold>(10);
+  const [selectedFixtureDate, setSelectedFixtureDate] = useState<string | null>(null);
   const [location, navigate] = useLocation();
   const search = useSearch();
   const selectedLeagueId = useMemo(() => {
@@ -451,6 +452,11 @@ export default function Dashboard() {
     }));
   }, [visibleMatches]);
 
+  const activeFixtureDate =
+    groupedMatches.find((dateGroup) => dateGroup.date === selectedFixtureDate) ??
+    groupedMatches[0] ??
+    null;
+
   return (
     <div className="space-y-6 max-w-[1600px] mx-auto">
       <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 border-b border-border/50 pb-4">
@@ -550,12 +556,13 @@ export default function Dashboard() {
               key={dateGroup.date}
               type="button"
               data-testid={`button-fixture-date-${dateGroup.date}`}
-              onClick={() =>
-                document
-                  .getElementById(`fixture-date-${dateGroup.date}`)
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-              className="shrink-0 rounded-lg border border-border/60 bg-card/60 px-3 py-2 text-left transition-colors hover:border-primary/40 hover:bg-primary/5"
+              onClick={() => setSelectedFixtureDate(dateGroup.date)}
+              aria-pressed={activeFixtureDate?.date === dateGroup.date}
+              className={`shrink-0 rounded-lg border px-3 py-2 text-left transition-colors ${
+                activeFixtureDate?.date === dateGroup.date
+                  ? "border-primary/50 bg-primary/10 text-foreground"
+                  : "border-border/60 bg-card/60 hover:border-primary/40 hover:bg-primary/5"
+              }`
             >
               <span className="block text-xs font-semibold">{dateHeading(dateGroup.date)}</span>
               <span className="mt-0.5 block font-mono text-[9px] text-muted-foreground">
@@ -631,8 +638,8 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="space-y-10">
-          {groupedMatches.map((dateGroup) => (
-            <section key={dateGroup.date} id={`fixture-date-${dateGroup.date}`} className="scroll-mt-20 space-y-5" data-testid={`fixture-date-${dateGroup.date}`}>
+          {groupedMatches.filter((dateGroup) => dateGroup.date === activeFixtureDate?.date).map((dateGroup) => (
+            <section key={dateGroup.date} className="space-y-5" data-testid={`fixture-date-${dateGroup.date}`}>
               <div className="sticky top-14 z-20 flex items-center gap-3 rounded-lg border border-border/60 bg-background/95 px-4 py-3 shadow-sm backdrop-blur">
                 <CalendarDays className="h-5 w-5 text-primary" />
                 <h2 className="text-lg font-bold tracking-tight">{dateHeading(dateGroup.date)}</h2>
