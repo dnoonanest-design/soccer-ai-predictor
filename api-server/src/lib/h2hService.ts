@@ -69,6 +69,84 @@ export interface H2HResult {
   summary: H2HSummary;
 }
 
+export interface TeamRecentResult {
+  fixture_id: number;
+  date: string;
+  competition: string;
+  home_team: string;
+  away_team: string;
+  home_score: number;
+  away_score: number;
+  venue: "home" | "away";
+  opponent: string;
+  result: "W" | "D" | "L";
+}
+
+export interface TeamRecentResults {
+  team_id: number;
+  team_name: string;
+  matches: TeamRecentResult[];
+}
+
+export async function getTeamRecentResults(
+  teamId: number,
+  teamName = "Team",
+): Promise<TeamRecentResults> {
+  const cacheKey = `team-results:${teamId}`;
+  const cached = getCached<TeamRecentResults>(cacheKey);
+  if (cached) return cached;
+
+  const data = (await fetchFootball(
+    `/fixtures?team=${teamId}&last=20`,
+  )) as {
+    response?: Array<{
+      fixture: { id: number; date: string; status?: { short?: string } };
+      league: { name: string };
+      teams: { home: { id: number; name: string }; away: { id: number; name: string } };
+      goals: { home: number | null; away: number | null };
+    }>;
+  } | null;
+
+  const matches = (data?.response ?? [])
+    .filter((fixture) =>
+      ["FT", "AET", "PEN"].includes(fixture.fixture.status?.short ?? "") &&
+      fixture.goals.home != null && fixture.goals.away != null,
+    )
+    .sort((a, b) => Date.parse(b.fixture.date) - Date.parse(a.fixture.date))
+    .slice(0, 8)
+    .map((fixture): TeamRecentResult => {
+      const homeScore = fixture.goals.home!;
+      const awayScore = fixture.goals.away!;
+      const isHome = fixture.teams.home.id === teamId;
+      const teamScore = isHome ? homeScore : awayScore;
+      const opponentScore = isHome ? awayScore : homeScore;
+      return {
+        fixture_id: fixture.fixture.id,
+        date: fixture.fixture.date,
+        competition: fixture.league.name,
+        home_team: fixture.teams.home.name,
+        away_team: fixture.teams.away.name,
+        home_score: homeScore,
+        away_score: awayScore,
+        venue: isHome ? "home" : "away",
+        opponent: isHome ? fixture.teams.away.name : fixture.teams.home.name,
+        result: teamScore > opponentScore ? "W" : teamScore < opponentScore ? "L" : "D",
+      };
+    });
+
+  const providerTeam = (data?.response ?? []).find(
+    (fixture) => fixture.teams.home.id === teamId || fixture.teams.away.id === teamId,
+  );
+  const resolvedTeamName = providerTeam
+    ? providerTeam.teams.home.id === teamId
+      ? providerTeam.teams.home.name
+      : providerTeam.teams.away.name
+    : teamName;
+  const result = { team_id: teamId, team_name: resolvedTeamName, matches };
+  setCache(cacheKey, result);
+  return result;
+}
+
 export async function getH2H(
   refTeamId: number,
   refTeamName: string,
