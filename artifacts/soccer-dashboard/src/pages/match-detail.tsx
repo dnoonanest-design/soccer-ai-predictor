@@ -9,6 +9,7 @@ import {
 } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Fragment } from "react";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -29,6 +30,67 @@ function useMatchPollInterval(matchId: number, intervalMs: number) {
     const cached = queryClient.getQueryData(getGetMatchQueryKey(matchId)) as { status?: string } | undefined;
     return cached?.status === "finished" || cached?.status === "cancelled" ? false : intervalMs;
   };
+}
+
+type OddsSnapshot = {
+  bookmakerKey: string;
+  bookmakerName: string | null;
+  homeOdds: number;
+  drawOdds: number;
+  awayOdds: number;
+  observedAt: string;
+};
+
+function FixtureOddsMovement({ fixtureId, kickoff, status }: { fixtureId: number; kickoff: string; status: string }) {
+  const oddsFormat = useOddsFormat();
+  const cutoff = Date.parse(kickoff) - 60_000;
+  const { data, isLoading, isError } = useQuery<{ snapshots: OddsSnapshot[] }>({
+    queryKey: ["market-intelligence-fixture", fixtureId],
+    queryFn: async () => {
+      const response = await fetch(`/api/market-intelligence/fixture/${fixtureId}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Odds movement unavailable");
+      return response.json() as Promise<{ snapshots: OddsSnapshot[] }>;
+    },
+    refetchInterval: () => status === "upcoming" && Date.now() < cutoff ? 60_000 : false,
+    staleTime: 30_000,
+  });
+
+  const byBookmaker = new Map<string, OddsSnapshot[]>();
+  const windowStart = Date.parse(kickoff) - 72 * 60 * 60_000;
+  for (const snapshot of data?.snapshots ?? []) {
+    const observedAt = Date.parse(snapshot.observedAt);
+    if (observedAt < windowStart || observedAt > cutoff) continue;
+    const list = byBookmaker.get(snapshot.bookmakerKey) ?? [];
+    list.push(snapshot);
+    byBookmaker.set(snapshot.bookmakerKey, list);
+  }
+  const marketRows = Array.from(byBookmaker.values()).map((snapshots) => {
+    snapshots.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+    return { first: snapshots[0], latest: snapshots[snapshots.length - 1], count: snapshots.length, snapshots };
+  });
+  const lastObservedAt = marketRows.reduce<string | null>((latest, row) =>
+    !latest || Date.parse(row.latest.observedAt) > Date.parse(latest) ? row.latest.observedAt : latest,
+  null);
+  const tracking = status === "upcoming" && Date.now() < cutoff;
+
+  return <Card className="overflow-hidden border-border/50" data-testid="fixture-odds-movement">
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/50 px-4 py-3">
+      <div><h2 className="font-mono text-xs font-bold uppercase tracking-widest">Bookmaker odds movement</h2><p className="mt-1 text-[10px] text-muted-foreground">Stored market snapshots from 72 hours before kickoff until one minute before. Odds are display and evaluation data only.</p></div>
+      <span className={`rounded-full border px-2 py-1 font-mono text-[9px] font-bold uppercase ${tracking ? "border-primary/30 bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{tracking ? "Tracking" : "Tracking closed"}</span>
+    </div>
+    {isLoading ? <div className="space-y-2 p-4"><Skeleton className="h-10 w-full"/><Skeleton className="h-10 w-full"/></div> : isError ? <p className="p-4 text-xs text-muted-foreground">Odds history is temporarily unavailable.</p> : marketRows.length === 0 ? <p className="p-4 text-xs text-muted-foreground">No bookmaker snapshots have been recorded for this match yet. Coverage depends on the bookmaker feed and league mapping.</p> : <>
+      <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-xs"><thead className="font-mono text-[9px] uppercase text-muted-foreground"><tr><th className="px-4 py-2 text-left">Bookmaker</th><th className="px-2 py-2 text-center">Home</th><th className="px-2 py-2 text-center">Draw</th><th className="px-2 py-2 text-center">Away</th><th className="px-4 py-2 text-right">Samples</th></tr></thead><tbody className="divide-y divide-border/40">
+        {marketRows.map(({ first, latest, count, snapshots }) => <tr key={first.bookmakerKey}>
+          <td className="px-4 py-2 font-medium"><details><summary className="cursor-pointer">{first.bookmakerName ?? first.bookmakerKey}<span className="ml-2 text-[9px] text-primary">history</span></summary><div className="absolute z-20 mt-2 max-h-64 w-[min(90vw,520px)] overflow-auto rounded-lg border border-border bg-card p-2 shadow-xl"><div className="grid grid-cols-[1fr_repeat(3,auto)] gap-x-3 gap-y-1 font-mono text-[9px]"><span className="text-muted-foreground">Observed</span><span>H</span><span>D</span><span>A</span>{snapshots.map((snapshot) => <Fragment key={`${snapshot.bookmakerKey}-${snapshot.observedAt}`}><span className="text-muted-foreground">{format(new Date(snapshot.observedAt), "d MMM HH:mm")}</span><span>{formatOdds(snapshot.homeOdds, oddsFormat)}</span><span>{formatOdds(snapshot.drawOdds, oddsFormat)}</span><span>{formatOdds(snapshot.awayOdds, oddsFormat)}</span></Fragment>)}</div></div></details></td>
+          {(["homeOdds", "drawOdds", "awayOdds"] as const).map((key) => <td key={key} className="px-2 py-2 text-center font-mono"><span className="text-muted-foreground">{formatOdds(first[key], oddsFormat)}</span><span className="px-1 text-muted-foreground/50">→</span><span className="font-semibold">{formatOdds(latest[key], oddsFormat)}</span></td>)}
+          <td className="px-4 py-2 text-right font-mono text-muted-foreground">{count}</td>
+        </tr>)}
+      </tbody></table></div>
+      <div className="border-t border-border/50 px-4 py-2 text-[10px] text-muted-foreground">Last saved: {lastObservedAt ? format(new Date(lastObservedAt), "d MMM · HH:mm:ss") : "—"} · refreshes while tracking is open</div>
+    </>}
+  </Card>;
 }
 
 function Tip({ children, text, side = "top" }: {
@@ -1354,7 +1416,7 @@ export default function MatchDetail() {
             ) : (
               <div className="w-24 h-24 rounded-full bg-muted mb-4" />
             )}
-            <h2 className="text-xl sm:text-2xl font-bold">{match.home_team.name}</h2>
+            <Link href={`/teams/${match.home_team.id}?name=${encodeURIComponent(match.home_team.name)}`} className="text-xl sm:text-2xl font-bold hover:text-primary">{match.home_team.name}<span className="sr-only"> recent results</span></Link>
           </div>
 
           <div className="flex-shrink-0 px-4 sm:px-8">
@@ -1377,10 +1439,12 @@ export default function MatchDetail() {
             ) : (
               <div className="w-24 h-24 rounded-full bg-muted mb-4" />
             )}
-            <h2 className="text-xl sm:text-2xl font-bold">{match.away_team.name}</h2>
+            <Link href={`/teams/${match.away_team.id}?name=${encodeURIComponent(match.away_team.name)}`} className="text-xl sm:text-2xl font-bold hover:text-chart-2">{match.away_team.name}<span className="sr-only"> recent results</span></Link>
           </div>
         </div>
       </Card>
+
+      <FixtureOddsMovement fixtureId={match.id} kickoff={match.kickoff} status={match.status} />
 
       <ExplanationCard matchId={match.id} status={match.status} />
 
