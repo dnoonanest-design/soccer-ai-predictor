@@ -66,10 +66,14 @@ function FixtureOddsMovement({ fixtureId, kickoff, status }: { fixtureId: number
     list.push(snapshot);
     byBookmaker.set(snapshot.bookmakerKey, list);
   }
-  const marketRows = Array.from(byBookmaker.values()).map((snapshots) => {
-    snapshots.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
-    return { first: snapshots[0], latest: snapshots[snapshots.length - 1], count: snapshots.length, snapshots };
-  });
+  const bookmakerPriority = ["pinnacle", "betfair_ex_eu", "betfair", "bet365", "unibet_eu", "williamhill"];
+  const selectedBookmakerKey = bookmakerPriority.find((key) => byBookmaker.has(key))
+    ?? byBookmaker.keys().next().value;
+  const selectedSnapshots = selectedBookmakerKey ? byBookmaker.get(selectedBookmakerKey) : undefined;
+  const marketRows = selectedSnapshots?.length ? (() => {
+    selectedSnapshots.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+    return [{ first: selectedSnapshots[0], latest: selectedSnapshots[selectedSnapshots.length - 1], count: selectedSnapshots.length, snapshots: selectedSnapshots }];
+  })() : [];
   const lastObservedAt = marketRows.reduce<string | null>((latest, row) =>
     !latest || Date.parse(row.latest.observedAt) > Date.parse(latest) ? row.latest.observedAt : latest,
   null);

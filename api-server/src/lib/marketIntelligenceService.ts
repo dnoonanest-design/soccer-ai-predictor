@@ -28,15 +28,8 @@ export type RawOddsEvent = {
 
 const ENABLED = process.env.MARKET_INTELLIGENCE_ENABLED !== "false";
 const BUCKET_MINUTES = 1;
-const MAX_BOOKMAKERS = clampInt(Number(process.env.MARKET_INTELLIGENCE_MAX_BOOKMAKERS ?? 4), 1, 12);
-const DEFAULT_BOOKMAKERS = [
-  "pinnacle",
-  "betfair_ex_eu",
-  "betfair",
-  "bet365",
-  "unibet_eu",
-  "williamhill",
-];
+const MAX_BOOKMAKERS = 1;
+const DEFAULT_BOOKMAKERS = ["pinnacle", "betfair_ex_eu", "betfair", "bet365", "unibet_eu", "williamhill"];
 const PREFERRED_BOOKMAKERS = (process.env.MARKET_INTELLIGENCE_BOOKMAKERS ?? DEFAULT_BOOKMAKERS.join(","))
   .split(",")
   .map((v) => v.trim().toLowerCase())
