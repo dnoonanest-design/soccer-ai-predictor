@@ -2,6 +2,7 @@ import { db, marketOddsSnapshots, matchOutcomes, matchPredictions } from "@works
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import type { Match } from "./soccerService";
+import { isBeforeOddsCaptureCutoff } from "./marketOddsSamplingPolicy";
 import {
   calculateNoVigProbabilities,
   calculateProbabilityMovement,
@@ -26,7 +27,7 @@ export type RawOddsEvent = {
 };
 
 const ENABLED = process.env.MARKET_INTELLIGENCE_ENABLED !== "false";
-const BUCKET_MINUTES = clampInt(Number(process.env.MARKET_INTELLIGENCE_BUCKET_MINUTES ?? 30), 5, 120);
+const BUCKET_MINUTES = 1;
 const MAX_BOOKMAKERS = clampInt(Number(process.env.MARKET_INTELLIGENCE_MAX_BOOKMAKERS ?? 4), 1, 12);
 const DEFAULT_BOOKMAKERS = [
   "pinnacle",
@@ -97,6 +98,8 @@ export async function captureMarketSnapshots(
   for (const match of matches) {
     // Keep the learning signal clean: opening/closing analysis is pre-match.
     if (match.status !== "upcoming") continue;
+    const kickoffMs = match.kickoff ? new Date(match.kickoff).getTime() : NaN;
+    if (!isBeforeOddsCaptureCutoff(kickoffMs, now.getTime())) continue;
 
     const event = findOddsEvent(match.home_team.name, match.away_team.name, oddsEvents);
     if (!event) continue;
