@@ -1,13 +1,16 @@
 import { logger } from "./logger";
+import { pool } from "@workspace/db";
 import { configuredFootballSeason } from "./season";
 import { waitForRateLimit } from "./rateLimiter";
 import { getOddsSportKeyForLeague, isTrackedLeague } from "./leagueConfig";
 import {
   isApiFootballProviderError,
+  assertApiFootballQuotaAvailable,
   markApiFootballFailure,
   markApiFootballSuccess,
 } from "./apiFootballReliability";
 import { AsyncSnapshotCache } from "./asyncSnapshotCache";
+import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const ODDS_API_KEY = process.env.ODDS_API_KEY ?? "";
@@ -15,15 +18,15 @@ const SEASON = String(configuredFootballSeason());
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
-// Per-endpoint cache TTLs (ms). The bookmaker cache is intentionally longer
-// than the match cache: market snapshots are stored in 30-minute buckets and
-// there is no value in consuming odds-provider quota on every dashboard poll.
+// Per-endpoint cache TTLs (ms). Pre-match odds can use a longer cache, while
+// live prices refresh on the provider's roughly 40-second in-play cadence.
 const CACHE_TTL = {
   live_fixtures: 30_000,
   soccer_odds: Math.max(
     60_000,
     Number(process.env.ODDS_CACHE_TTL_MS ?? 5 * 60_000),
   ),
+  live_soccer_odds: 40_000,
   today_fixtures: 300_000,
   fixture_window: 300_000,
   team_stats: 3_600_000,
@@ -77,7 +80,7 @@ function getCached<T>(key: string, ttl: number): T | null {
 }
 
 function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, fetchedAt: Date.now() });
+  setBounded(cache, key, { data, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
 }
 /**
  * Resolve the active season for a given league/competition.
@@ -176,6 +179,10 @@ export async function fetchFootball(path: string): Promise<unknown> {
       state: "offline",
     });
   }
+
+  // Share a provider-wide cooldown after quota exhaustion rather than allowing
+  // independent background workers to retry the same failed request every minute.
+  assertApiFootballQuotaAvailable(path);
 
   const url = `${API_FOOTBALL_BASE}${path}`;
   const startMs = Date.now();
@@ -292,6 +299,9 @@ export interface Odds {
   home_odds: number | null;
   draw_odds: number | null;
   away_odds: number | null;
+  bookmaker: string | null;
+  bookmaker_key: string | null;
+  last_updated: string | null;
 }
 
 export interface Score {
@@ -312,8 +322,27 @@ export interface Match {
   minute: number | null;
   score: Score;
   score_ht: Score | null;
+  /** Score after 90 minutes plus stoppage time, before any extra time. */
+  score_regular_time?: Score | null;
   kickoff: string;
   odds: Odds;
+}
+
+/**
+ * The score that settles 1X2, over/under and BTTS predictions. Those are
+ * 90-minute markets, so a cup tie decided in extra time or on penalties is
+ * settled on its regular-time score, not the extra-time total in `goals`.
+ */
+export function settlementScore(match: Pick<Match, "score" | "status_detail" | "score_regular_time">): Score {
+  const regular = match.score_regular_time;
+  if (
+    (match.status_detail === "AET" || match.status_detail === "PEN") &&
+    regular?.home != null &&
+    regular?.away != null
+  ) {
+    return regular;
+  }
+  return match.score;
 }
 
 export interface League {
@@ -352,6 +381,67 @@ type ApiFootballFixture = {
   };
 };
 
+type SettledOutcome = {
+  fixture_id: number;
+  score_home: number;
+  score_away: number;
+};
+
+/**
+ * The settlement ledger is the local source of truth once a result has been
+ * recorded. API-Football date responses are intentionally cached for quota
+ * safety and can therefore still say NS after the exact-fixture settlement
+ * worker has recorded FT. Overlaying the immutable result prevents the main
+ * dashboard and performance ledger disagreeing about the same fixture.
+ */
+export function applySettledOutcomeToFixture(
+  fixture: ApiFootballFixture,
+  outcome: SettledOutcome,
+): ApiFootballFixture {
+  return {
+    ...fixture,
+    fixture: {
+      ...fixture.fixture,
+      status: {
+        long: "Match Finished",
+        short: "FT",
+        elapsed: fixture.fixture.status.elapsed ?? 90,
+      },
+    },
+    goals: { home: outcome.score_home, away: outcome.score_away },
+    score: {
+      ...fixture.score,
+      fulltime: { home: outcome.score_home, away: outcome.score_away },
+    },
+  };
+}
+
+async function overlaySettledOutcomes(
+  fixtures: ApiFootballFixture[],
+): Promise<ApiFootballFixture[]> {
+  const ids = fixtures.map((fixture) => fixture.fixture.id);
+  if (ids.length === 0) return fixtures;
+  try {
+    const result = await pool.query<SettledOutcome>(
+      `SELECT fixture_id, score_home, score_away
+         FROM match_outcomes
+        WHERE fixture_id = ANY($1::int[])`,
+      [ids],
+    );
+    if (result.rows.length === 0) return fixtures;
+    const settled = new Map(result.rows.map((row) => [Number(row.fixture_id), row]));
+    return fixtures.map((fixture) => {
+      const outcome = settled.get(fixture.fixture.id);
+      return outcome ? applySettledOutcomeToFixture(fixture, outcome) : fixture;
+    });
+  } catch (err) {
+    // Fixture serving must remain available during a database incident. The
+    // provider snapshot is still a safe degraded response.
+    logger.warn({ err }, "settled-outcome fixture overlay failed");
+    return fixtures;
+  }
+}
+
 export type OddsApiEvent = {
   id: string;
   sport_key: string;
@@ -362,6 +452,7 @@ export type OddsApiEvent = {
     title?: string;
     markets: Array<{
       key: string;
+      last_update?: string;
       outcomes: Array<{ name: string; price: number }>;
     }>;
   }>;
@@ -407,7 +498,7 @@ function namesMatch(a: string, b: string) {
   return longer.includes(shorter) && shorter.length / longer.length >= 0.65;
 }
 
-function extractOdds(
+export function extractOdds(
   homeTeam: string,
   awayTeam: string,
   oddsEvents: OddsApiEvent[],
@@ -420,6 +511,9 @@ function extractOdds(
     home_odds: null,
     draw_odds: null,
     away_odds: null,
+    bookmaker: null,
+    bookmaker_key: null,
+    last_updated: null,
   };
 
   if (!expectedSportKey) return nullOdds;
@@ -479,6 +573,9 @@ function extractOdds(
     home_odds: homeDecimal,
     draw_odds: drawDecimal,
     away_odds: awayDecimal,
+    bookmaker: bookmaker.title ?? bookmaker.key,
+    bookmaker_key: bookmaker.key,
+    last_updated: h2h.last_update ?? null,
   };
 }
 
@@ -511,14 +608,14 @@ async function reconcileStaleLiveFixture(
 
   const lastAttempt = staleLiveRefreshAt.get(fixtureId) ?? 0;
   if (Date.now() - lastAttempt < STALE_LIVE_RECHECK_MS) return cached;
-  staleLiveRefreshAt.set(fixtureId, Date.now());
+  setBounded(staleLiveRefreshAt, fixtureId, Date.now(), DEFAULT_CACHE_MAX_ENTRIES);
 
   try {
     const path = `/fixtures?id=${fixtureId}`;
     const rows = requireFixtureArray(await fetchFootball(path), path);
     const refreshed = rows.find((row) => row.fixture.id === fixtureId) ?? null;
     if (refreshed) {
-      staleLiveOverride.set(fixtureId, { data: refreshed, fetchedAt: Date.now() });
+      setBounded(staleLiveOverride, fixtureId, { data: refreshed, fetchedAt: Date.now() }, DEFAULT_CACHE_MAX_ENTRIES);
       const status = normaliseStatus(refreshed.fixture.status.short);
       if (status !== "live") {
         logger.info(
@@ -573,9 +670,7 @@ async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
 
   const start = new Date();
   const fixtures = new Map<number, ApiFootballFixture>();
-  let firstError: unknown = null;
-  let successfulDays = 0;
-  for (let offset = 0; offset < safeDays; offset++) {
+  const dailyResults = await Promise.all(Array.from({ length: safeDays }, async (_, offset) => {
     const date = new Date(Date.UTC(
       start.getUTCFullYear(),
       start.getUTCMonth(),
@@ -584,13 +679,18 @@ async function getFixtureWindow(days = 8): Promise<ApiFootballFixture[]> {
     const path = `/fixtures?date=${date}&timezone=UTC`;
     try {
       const rows = requireFixtureArray(await fetchFootball(path), path);
-      successfulDays++;
-      for (const fixture of rows) {
-        if (isTrackedLeague(fixture.league.id)) fixtures.set(fixture.fixture.id, fixture);
-      }
+      return { rows, error: null, date };
     } catch (err) {
-      firstError ??= err;
       logger.warn({ err, date }, "fixture-window day lookup failed");
+      return { rows: [] as ApiFootballFixture[], error: err, date };
+    }
+  }));
+
+  const successfulDays = dailyResults.filter((result) => result.error == null).length;
+  const firstError = dailyResults.find((result) => result.error != null)?.error;
+  for (const { rows } of dailyResults) {
+    for (const fixture of rows) {
+      if (isTrackedLeague(fixture.league.id)) fixtures.set(fixture.fixture.id, fixture);
     }
   }
 
@@ -618,9 +718,9 @@ async function getLiveFixtures(): Promise<ApiFootballFixture[]> {
   return fixtures;
 }
 
-async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
+async function fetchOddsForSport(sportKey: string, maxAgeMs = CACHE_TTL.soccer_odds): Promise<OddsApiEvent[]> {
   const cacheKey = `soccer_odds:${sportKey}`;
-  const cached = getCached<OddsApiEvent[]>(cacheKey, CACHE_TTL.soccer_odds);
+  const cached = getCached<OddsApiEvent[]>(cacheKey, maxAgeMs);
   if (cached) return cached;
 
   if (!ODDS_API_KEY) {
@@ -659,26 +759,26 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
 async function getSoccerOdds(
   fixtures: ApiFootballFixture[],
 ): Promise<OddsApiEvent[]> {
-  const sportKeys = Array.from(
-    new Set(
-      fixtures
-        .filter(
-          (fixture) => {
-            const status = normaliseStatus(fixture.fixture.status.short);
-            return status === "live" || status === "upcoming";
-          },
-        )
-        .map((fixture) => getOddsSportKeyForLeague(fixture.league.id))
-        .filter((key): key is string => Boolean(key)),
-    ),
-  );
+  const sportTtls = new Map<string, number>();
+  for (const fixture of fixtures) {
+    const status = normaliseStatus(fixture.fixture.status.short);
+    if (status !== "live" && status !== "upcoming") continue;
+    const sportKey = getOddsSportKeyForLeague(fixture.league.id);
+    if (!sportKey) continue;
+    const ttl = status === "live" ? CACHE_TTL.live_soccer_odds : CACHE_TTL.soccer_odds;
+    sportTtls.set(sportKey, Math.min(sportTtls.get(sportKey) ?? ttl, ttl));
+  }
+  const sportKeys = Array.from(sportTtls.keys());
 
   if (!sportKeys.length) return [];
 
   const events = new Map<string, OddsApiEvent>();
-  // Sequential calls respect the shared limiter and avoid provider bursts.
-  for (const sportKey of sportKeys) {
-    const sportEvents = await fetchOddsForSport(sportKey);
+  // Queue independent sports together. The shared limiter still spaces every
+  // provider request, while overlapping response time shortens cold dashboards.
+  const sportResults = await Promise.all(
+    sportKeys.map((sportKey) => fetchOddsForSport(sportKey, sportTtls.get(sportKey))),
+  );
+  for (const sportEvents of sportResults) {
     for (const event of sportEvents) {
       events.set(`${event.sport_key}:${event.id}`, event);
     }
@@ -695,7 +795,20 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
   // matches, the quota layer uses this request to replace stale schedule rows
   // (including matches that have just reached FT). Reading the date/window
   // cache first can otherwise render an old NS snapshot for the whole request.
-  const liveFixtures = await getLiveFixtures();
+  let liveFixtures: ApiFootballFixture[] = [];
+  try {
+    liveFixtures = await getLiveFixtures();
+  } catch (err) {
+    if (!isApiFootballProviderError(err)) throw err;
+    // The live-only endpoint must not take down the full Match Center. Keep
+    // building the fixture list from the cached daily/weekly schedule while
+    // the provider is rate-limited or temporarily unavailable.
+    logger.warn(
+      { err },
+      "live fixture feed unavailable; continuing with scheduled fixtures",
+    );
+  }
+
   const todayFixtures = mode === "daily"
     ? await getTodayFixtures()
     : await getFixtureWindow(8);
@@ -720,7 +833,7 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
 
       const lastLogged = staleLiveSuppressionLogAt.get(fixtureId) ?? 0;
       if (Date.now() - lastLogged >= STALE_LIVE_RECHECK_MS) {
-        staleLiveSuppressionLogAt.set(fixtureId, Date.now());
+        setBounded(staleLiveSuppressionLogAt, fixtureId, Date.now(), DEFAULT_CACHE_MAX_ENTRIES);
         logger.warn(
           {
             fixtureId,
@@ -735,7 +848,7 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
     combined.set(fixtureId, cachedStaleLiveOverride(fixtureId) ?? fixture);
   }
   for (const fixture of liveFixtures) combined.set(fixture.fixture.id, fixture);
-  const combinedFixtures = Array.from(combined.values());
+  const combinedFixtures = await overlaySettledOutcomes(Array.from(combined.values()));
 
   const hasActiveMatches = combinedFixtures.some((fixture) => {
     const fixtureStatus = normaliseStatus(fixture.fixture.status.short);
@@ -805,6 +918,7 @@ export async function warmMatchSnapshot() {
 export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
   const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
   const matches: Match[] = [];
+  let directRecoveryBudget = 5;
 
   // API-Football accepts hyphen-separated fixture IDs; conservative batches
   // keep URLs small and are also understood by the quota optimisation cache.
@@ -814,6 +928,25 @@ export async function getMatchesByIds(ids: number[]): Promise<Match[]> {
     const fixtures = requireFixtureArray(await fetchFootball(path), path);
     for (const fixture of fixtures) {
       if (isTrackedLeague(fixture.league.id)) {
+        matches.push(fixtureToMatch(fixture, []));
+      }
+    }
+
+    // API-Football occasionally returns a partial/empty response for an ids
+    // batch even though the same fixture is available through the single-id
+    // endpoint. Settlement must not silently strand those predictions. Retry
+    // a small bounded number directly; the provider cache still deduplicates
+    // successful lookups and the bound protects quota during provider faults.
+    const resolved = new Set(matches.map((match) => match.id));
+    const missing = group
+      .filter((id) => !resolved.has(id))
+      .slice(0, directRecoveryBudget);
+    directRecoveryBudget -= missing.length;
+    for (const id of missing) {
+      const directPath = `/fixtures?id=${id}`;
+      const direct = requireFixtureArray(await fetchFootball(directPath), directPath);
+      const fixture = direct.find((item) => item.fixture?.id === id);
+      if (fixture && isTrackedLeague(fixture.league.id)) {
         matches.push(fixtureToMatch(fixture, []));
       }
     }
@@ -855,6 +988,14 @@ function fixtureToMatch(
         ? {
             home: fixture.score.halftime.home,
             away: fixture.score.halftime.away,
+          }
+        : null,
+    score_regular_time:
+      fixture.score?.fulltime?.home != null &&
+      fixture.score?.fulltime?.away != null
+        ? {
+            home: fixture.score.fulltime.home,
+            away: fixture.score.fulltime.away,
           }
         : null,
     kickoff: fixture.fixture.date,
