@@ -562,7 +562,7 @@ export default function Dashboard() {
                 activeFixtureDate?.date === dateGroup.date
                   ? "border-primary/50 bg-primary/10 text-foreground"
                   : "border-border/60 bg-card/60 hover:border-primary/40 hover:bg-primary/5"
-              }`
+              }`}
             >
               <span className="block text-xs font-semibold">{dateHeading(dateGroup.date)}</span>
               <span className="mt-0.5 block font-mono text-[9px] text-muted-foreground">
