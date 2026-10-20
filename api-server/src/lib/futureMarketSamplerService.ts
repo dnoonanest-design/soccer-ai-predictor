@@ -13,6 +13,7 @@ import {
   type RawOddsEvent,
 } from "./marketIntelligenceService";
 import { getOddsOptimizationStatus } from "./oddsOptimizationService";
+import { isBeforeOddsCaptureCutoff, oddsSnapshotCadenceMs } from "./marketOddsSamplingPolicy";
 import { waitForRateLimit } from "./rateLimiter";
 import {
   fetchFootball,
@@ -30,16 +31,9 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 const SEASON = String(configuredFootballSeason());
 
 const ENABLED = process.env.MARKET_FUTURE_SAMPLER_ENABLED === "true";
-const WINDOW_HOURS = clampNumber(
-  Number(process.env.MARKET_FUTURE_SAMPLER_WINDOW_HOURS ?? 72),
-  24,
-  168,
-);
-const SCAN_INTERVAL_MS = clampNumber(
-  Number(process.env.MARKET_FUTURE_SAMPLER_SCAN_MS ?? 30 * 60_000),
-  15 * 60_000,
-  6 * 60 * 60_000,
-);
+const WINDOW_HOURS = 72;
+// Check each minute so a match close to kickoff is not missed by a coarse scan.
+const SCAN_INTERVAL_MS = 60_000;
 const FIXTURE_REFRESH_MS = clampNumber(
   Number(process.env.MARKET_FUTURE_SAMPLER_FIXTURE_REFRESH_MS ?? 2 * 60 * 60_000),
   30 * 60_000,
@@ -61,9 +55,11 @@ const MAX_ODDS_CALLS_PER_DAY = clampNumber(
   1000,
 );
 
-const NEAR_INTERVAL_MS = 30 * 60_000;
+const NEAR_INTERVAL_MS = 15 * 60_000;
 const MID_INTERVAL_MS = 60 * 60_000;
 const FAR_INTERVAL_MS = 2 * 60 * 60_000;
+const FINAL_HOUR_INTERVAL_MS = 5 * 60_000;
+const FINAL_FIVE_MINUTES_INTERVAL_MS = 60_000;
 const EMPTY_SPORT_KEY_COOLDOWN_MS = 6 * 60 * 60_000;
 
 type FutureFixture = {
@@ -175,7 +171,10 @@ export function getFutureMarketSamplerStatus() {
       cadence: {
         moreThan24HoursBeforeKickoffMs: FAR_INTERVAL_MS,
         sixTo24HoursBeforeKickoffMs: MID_INTERVAL_MS,
-        zeroToSixHoursBeforeKickoffMs: NEAR_INTERVAL_MS,
+        oneToSixHoursBeforeKickoffMs: NEAR_INTERVAL_MS,
+        fiveMinutesToOneHourBeforeKickoffMs: FINAL_HOUR_INTERVAL_MS,
+        oneToFiveMinutesBeforeKickoffMs: FINAL_FIVE_MINUTES_INTERVAL_MS,
+        stopsAtMillisecondsBeforeKickoff: 60_000,
       },
     },
     budget: {
@@ -232,7 +231,10 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
     const dueFixtures = fixtures.filter((fixture) => {
       const kickoffMs = new Date(fixture.fixture.date).getTime();
       const hoursToKickoff = (kickoffMs - nowMs) / 3_600_000;
-      if (hoursToKickoff <= 0 || hoursToKickoff > WINDOW_HOURS) return false;
+      if (
+        !isBeforeOddsCaptureCutoff(kickoffMs, nowMs) ||
+        hoursToKickoff > WINDOW_HOURS
+      ) return false;
 
       const latest = latestByFixture.get(fixture.fixture.id);
       if (!latest) return true;
@@ -263,13 +265,17 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       }))
       .filter((group) => (emptySportKeyUntil.get(group.sportKey) ?? 0) <= nowMs)
       .sort((a, b) => {
+        const urgency = (group: typeof a) => {
+          const hours = (new Date(group.fixtures[0].fixture.date).getTime() - nowMs) / 3_600_000;
+          return hours <= 1 ? 0 : hours <= 6 ? 1 : hours <= 24 ? 2 : 3;
+        };
         const priority = (group: typeof a) => {
           const competition = getTrackedCompetition(group.fixtures[0].league.id);
           if (competition?.kind === "uefa" || competition?.tier === 1) return 0;
           if (competition?.tier === 2) return 1;
           return 2;
         };
-        return priority(a) - priority(b) ||
+        return urgency(a) - urgency(b) || priority(a) - priority(b) ||
           new Date(a.fixtures[0].fixture.date).getTime() -
           new Date(b.fixtures[0].fixture.date).getTime();
       });
@@ -302,6 +308,10 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
         continue;
       }
       emptySportKeyUntil.delete(group.sportKey);
+
+      // Do not timestamp a cached quote as if it were newly observed. The
+      // scheduler will sample it after the provider cache expires.
+      if (providerCalls === 0) continue;
 
       const matches = group.fixtures.map(toMatch);
       const result = await captureMarketSnapshots(matches, events);
@@ -684,9 +694,7 @@ async function recordSamplerJob(
 }
 
 function cadenceForHours(hoursToKickoff: number) {
-  if (hoursToKickoff <= 6) return NEAR_INTERVAL_MS;
-  if (hoursToKickoff <= 24) return MID_INTERVAL_MS;
-  return FAR_INTERVAL_MS;
+  return oddsSnapshotCadenceMs(hoursToKickoff);
 }
 
 function isFutureStatus(status: string | undefined) {

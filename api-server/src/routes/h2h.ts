@@ -1,9 +1,23 @@
 import { Router } from "express";
-import { getH2H } from "../lib/h2hService";
+import { getH2H, getTeamRecentResults } from "../lib/h2hService";
 import { getAllMatches } from "../lib/soccerService";
 import { logger } from "../lib/logger";
 
 const router = Router();
+
+router.get("/teams/:team_id/results", async (req, res) => {
+  const teamId = Number.parseInt(req.params.team_id, 10);
+  if (!Number.isInteger(teamId) || teamId <= 0) {
+    return res.status(400).json({ error: "Invalid team id" });
+  }
+
+  try {
+    return res.json(await getTeamRecentResults(teamId, String(req.query.name ?? "Team")));
+  } catch (err) {
+    logger.error({ err, teamId }, "Failed to fetch recent team results");
+    return res.status(502).json({ error: "Recent team results are temporarily unavailable" });
+  }
+});
 
 router.get("/matches/:match_id/h2h", async (req, res) => {
   const matchId = parseInt(req.params.match_id, 10);
