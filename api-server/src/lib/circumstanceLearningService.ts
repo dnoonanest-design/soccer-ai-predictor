@@ -5,6 +5,7 @@ import { getMatchEvents, type MatchEvent } from "./eventsService";
 import { logger } from "./logger";
 import { waitForRateLimit } from "./rateLimiter";
 import { setBounded, DEFAULT_CACHE_MAX_ENTRIES } from "./boundedCache";
+import { recordPrematchTeamSheets } from "./teamSheets";
 
 const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY ?? "";
 const API_FOOTBALL_BASE = "https://v3.football.api-sports.io";
@@ -227,6 +228,9 @@ export async function collectMatchCircumstances(match: PredictionMatch, homeForm
         values.homeStarPlayerRating, values.awayStarPlayerRating, values.homeFormScore, values.awayFormScore,
         values.circumstanceScoreHome, values.circumstanceScoreAway],
     ).catch((err) => logger.warn({ err, fixtureId: match.id }, "pre-kickoff circumstance snapshot not stored"));
+    // Names and ids of who starts and who is out, kept unchanged after kickoff.
+    await recordPrematchTeamSheets(match, lineups, injuries)
+      .catch((err) => logger.warn({ err, fixtureId: match.id }, "pre-kickoff team sheets not stored"));
   }
   await savePlayerFactors(match, lineups, injuries, playerStats, events);
   return values;

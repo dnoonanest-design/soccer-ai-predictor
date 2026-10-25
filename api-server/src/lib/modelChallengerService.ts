@@ -35,6 +35,7 @@ import { runInPlayCycle } from "./inPlayModelService";
 import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type CalibrationParams, type Outcome } from "./outcomeCalibration";
 import { logger } from "./logger";
 import { ensureStrengthModel, forecastStrength, getStrengthModelStatus } from "./strengthModel";
+import { getTeamSheetCoverage } from "./teamSheets";
 
 type Unit = { home: number; draw: number; away: number };
 
@@ -422,6 +423,8 @@ export async function getChallengerReport() {
     legacyCalibration,
     ratings: getTeamRatingsStatus(),
     strengthModel: getStrengthModelStatus(),
+    // Pre-kickoff line-up and absence data collected for the next model step.
+    teamSheets: await getTeamSheetCoverage().catch(() => null),
     standings,
     lastRun,
     pendingTotal: [...pendingBy.values()].reduce((sum, v) => sum + v, 0),
