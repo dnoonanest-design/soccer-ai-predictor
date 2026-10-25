@@ -131,3 +131,93 @@ export function __setMarketConsensusForTests(entries: Array<[number, MarketConse
   consensus = new Map(entries);
   refreshedAt = Date.now();
 }
+
+// ── In play ──────────────────────────────────────────────────────────────────
+//
+// Live prices come from inplay_odds_snapshots (kept from the odds the app
+// already downloads). A price is used only when it is fresh and was quoted at
+// the current score, so a pre-goal price is never shown just after a goal.
+// Not yet tested against results: the challenger "inplay-market-blend"
+// records it at live checkpoints so it is scored on real outcomes.
+
+export const INPLAY_MARKET_CHALLENGER = "inplay-market-blend";
+/** The bookmaker must have updated the price within this window. */
+export const LIVE_PRICE_MAX_AGE_MS = 2 * 60_000;
+const LIVE_REFRESH_MS = 30_000;
+
+export type LivePrice = { h: number; d: number; a: number; scoreHome: number | null; scoreAway: number | null; updatedAt: number };
+
+let livePrices = new Map<number, LivePrice[]>();
+let liveRefreshedAt = 0;
+let liveRefreshing: Promise<void> | null = null;
+
+async function refreshLive(): Promise<void> {
+  const res = await pool.query(
+    `SELECT DISTINCT ON (fixture_id, bookmaker_key)
+            fixture_id, implied_home_prob h, implied_draw_prob d, implied_away_prob a,
+            score_home, score_away, COALESCE(bookmaker_updated_at, observed_at) AS updated_at
+       FROM inplay_odds_snapshots
+      WHERE observed_at > NOW() - INTERVAL '10 minutes'
+      ORDER BY fixture_id, bookmaker_key, observed_at DESC`,
+  );
+  const next = new Map<number, LivePrice[]>();
+  for (const r of res.rows as any[]) {
+    const id = Number(r.fixture_id);
+    const list = next.get(id) ?? [];
+    list.push({ h: Number(r.h), d: Number(r.d), a: Number(r.a),
+      scoreHome: r.score_home == null ? null : Number(r.score_home), scoreAway: r.score_away == null ? null : Number(r.score_away),
+      updatedAt: new Date(r.updated_at).getTime() });
+    next.set(id, list);
+  }
+  livePrices = next;
+  liveRefreshedAt = Date.now();
+}
+
+/** Refresh live prices at most every 30 seconds; never throws. */
+export async function ensureLiveMarket(): Promise<void> {
+  if (Date.now() - liveRefreshedAt < LIVE_REFRESH_MS) return;
+  liveRefreshing ??= refreshLive()
+    .catch((err) => { liveRefreshedAt = Date.now(); logger.warn({ err }, "live market refresh failed"); })
+    .finally(() => { liveRefreshing = null; });
+  await liveRefreshing;
+}
+
+/** Consensus of fresh prices quoted at exactly this score, or null. */
+export function liveConsensusFrom(prices: LivePrice[], score: { home: number | null; away: number | null }, now: number): MarketConsensus | null {
+  if (score.home == null || score.away == null) return null;
+  const usable = prices.filter((p) => p.scoreHome === score.home && p.scoreAway === score.away
+    && p.updatedAt <= now + 30_000 && now - p.updatedAt <= LIVE_PRICE_MAX_AGE_MS);
+  return consensusFromRows(usable.map((p) => ({ h: p.h, d: p.d, a: p.a, observedAt: p.updatedAt })));
+}
+
+type LiveMatchLike = { id: number; status: string; score?: { home: number | null; away: number | null } | null };
+
+export type LiveMarketInformed = Omit<MarketInformed, "model"> & { model: "live-model"; phase: "live" };
+
+/**
+ * Odds-informed in-play forecast: the live model (10%) blended with fresh
+ * in-play prices at the current score. `served` is the live prediction in percent.
+ */
+export function liveMarketInformedForecast(match: LiveMatchLike, served: { home: number; draw: number; away: number }, now = Date.now()): LiveMarketInformed | null {
+  if (match.status !== "live" || !match.score) return null;
+  const market = liveConsensusFrom(livePrices.get(match.id) ?? [], match.score, now);
+  if (!market) return null;
+  const t = served.home + served.draw + served.away;
+  if (!(t > 0)) return null;
+  const model = { home: served.home / t, draw: served.draw / t, away: served.away / t };
+  const p = blendWithMarket(model, market, MARKET_BLEND_MODEL_WEIGHT);
+  const home = Math.round(p.home * 10_000) / 100, draw = Math.round(p.draw * 10_000) / 100;
+  return {
+    home, draw, away: Math.round((100 - home - draw) * 100) / 100,
+    model: "live-model", phase: "live",
+    model_weight: MARKET_BLEND_MODEL_WEIGHT,
+    bookmakers: market.bookmakers,
+    odds_observed_at: new Date(market.observedAt).toISOString(),
+  };
+}
+
+/** Test hook. */
+export function __setLivePricesForTests(entries: Array<[number, LivePrice[]]>): void {
+  livePrices = new Map(entries);
+  liveRefreshedAt = Date.now();
+}

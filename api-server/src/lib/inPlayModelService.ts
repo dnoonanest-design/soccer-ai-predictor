@@ -375,6 +375,7 @@ export async function getInPlayReport() {
     if (gain == null || gain < INPLAY_RULES.minBrierImprovement) reasons.push(`Brier gain must be at least ${INPLAY_RULES.minBrierImprovement}`);
     if (tStat == null || tStat < INPLAY_RULES.minTStat) reasons.push(`gain must be at least ${INPLAY_RULES.minTStat} standard errors from zero (per fixture)`);
     if (llGain == null || llGain <= 0) reasons.push("log loss must also improve");
+    if (id === "inplay-market-blend") reasons.push("odds-informed benchmark: shown beside the live prediction, never replaces it");
     return {
       challenger: id, pending: pendingBy.get(id) ?? 0, fixtures, checkpoints: Number(x.checkpoints ?? 0),
       brier: n4(x.brier), championBrier: n4(x.champion_brier), brierGain: gain, tStat, logLossGain: llGain,

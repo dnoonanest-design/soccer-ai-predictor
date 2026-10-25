@@ -73,7 +73,7 @@ router.get("/matches/:match_id/stats", async (req, res) => {
           // Odds-informed forecast shown beside the independent one (pre-match only).
           // It never feeds the value flags below, which compare the independent
           // prediction with the bookmaker price.
-          let marketInformed = null;
+          let marketInformed: unknown = null;
           if (match.status === "upcoming") {
             try {
               const { ensureMarketConsensus, marketInformedForecast } = await import("../lib/marketBlend");
@@ -82,6 +82,13 @@ router.get("/matches/:match_id/stats", async (req, res) => {
               void ensureStrengthModel();
               await ensureMarketConsensus();
               marketInformed = marketInformedForecast(match);
+            } catch { marketInformed = null; }
+          } else if (match.status === "live") {
+            // In play: fresh prices quoted at the current score only.
+            try {
+              const { ensureLiveMarket, liveMarketInformedForecast } = await import("../lib/marketBlend");
+              await ensureLiveMarket();
+              marketInformed = liveMarketInformedForecast(match, { home: prediction.home_win, draw: prediction.draw, away: prediction.away_win });
             } catch { marketInformed = null; }
           }
           enhancedPred = {

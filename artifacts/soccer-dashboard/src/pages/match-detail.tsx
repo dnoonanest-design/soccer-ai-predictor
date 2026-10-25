@@ -721,7 +721,7 @@ function XGPanel({
             {enhanced.market_informed && (
               <div className="rounded-lg border border-border/40 p-2 space-y-1" data-testid="market-informed">
                 <div className="flex items-center justify-between">
-                  <div className="text-[8px] uppercase tracking-widest text-muted-foreground">With bookmaker odds</div>
+                  <div className="text-[8px] uppercase tracking-widest text-muted-foreground">With bookmaker odds{enhanced.market_informed.phase === 'live' ? ' · live' : ''}</div>
                   <div className="text-[8px] font-mono text-muted-foreground/60">{enhanced.market_informed.bookmakers} book{enhanced.market_informed.bookmakers === 1 ? '' : 's'}</div>
                 </div>
                 <div className="grid grid-cols-3 gap-2 text-center">
@@ -730,7 +730,9 @@ function XGPanel({
                   <div><div className="text-[8px] uppercase text-muted-foreground">Away</div><div className="font-mono font-black">{enhanced.market_informed.away.toFixed(1)}%</div></div>
                 </div>
                 <div className="text-[9px] text-muted-foreground/70">
-                  Most accurate "who wins" estimate in testing. Value flags below still use the independent model.
+                  {enhanced.market_informed.phase === 'live'
+                    ? 'Live prices at the current score, updated within 2 minutes. On trial: scored against results before it is relied on.'
+                    : 'Most accurate "who wins" estimate in testing. Value flags below still use the independent model.'}
                 </div>
               </div>
             )}

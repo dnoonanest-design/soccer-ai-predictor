@@ -5,7 +5,7 @@ vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: (
 const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: number; draw: number; away: number } } }));
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
-const { __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, marketInformedForecast } = await import("../marketBlend");
+const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast } = await import("../marketBlend");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
 const match = { id: 5, league_id: 39, status: "upcoming", kickoff: "2026-10-25T15:00:00Z", home_team: { id: 1 }, away_team: { id: 2 } };
@@ -50,5 +50,35 @@ describe("odds-informed forecast", () => {
     expect(marketInformedForecast({ ...match, status: "live" }, now)).toBeNull();
     expect(marketInformedForecast({ ...match, id: 6 }, now)).toBeNull();
     expect(marketInformedForecast(match, Date.parse(match.kickoff))).toBeNull();
+  });
+});
+
+describe("odds-informed in-play forecast", () => {
+  const live = { id: 9, status: "live", score: { home: 1, away: 0 } };
+  const served = { home: 60, draw: 25, away: 15 };
+  const price = (over: Partial<{ h: number; d: number; a: number; scoreHome: number; scoreAway: number; updatedAt: number }>) =>
+    ({ h: 70, d: 20, a: 10, scoreHome: 1, scoreAway: 0, updatedAt: now - 30_000, ...over });
+
+  it("blends the live model with fresh prices at the current score", () => {
+    __setLivePricesForTests([[9, [price({})]]]);
+    const f = liveMarketInformedForecast(live, served, now)!;
+    expect(f.phase).toBe("live");
+    expect(f.home).toBeCloseTo(69, 1); // 0.1 * 60 + 0.9 * 70
+    expect(f.home + f.draw + f.away).toBeCloseTo(100, 6);
+  });
+
+  it("ignores a price quoted at a different score (just after a goal)", () => {
+    __setLivePricesForTests([[9, [price({ scoreHome: 0, scoreAway: 0 })]]]);
+    expect(liveMarketInformedForecast(live, served, now)).toBeNull();
+  });
+
+  it("ignores prices the bookmaker has not updated for over two minutes", () => {
+    __setLivePricesForTests([[9, [price({ updatedAt: now - 3 * 60_000 })]]]);
+    expect(liveMarketInformedForecast(live, served, now)).toBeNull();
+  });
+
+  it("is in-play only", () => {
+    __setLivePricesForTests([[9, [price({})]]]);
+    expect(liveMarketInformedForecast({ ...live, status: "upcoming" }, served, now)).toBeNull();
   });
 });
