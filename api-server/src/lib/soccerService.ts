@@ -872,7 +872,7 @@ async function loadMatchSnapshot(mode: MatchSnapshotMode): Promise<Match[]> {
   if (
     process.env.MARKET_INTELLIGENCE_ENABLED !== "false" &&
     oddsEvents.length > 0 &&
-    matches.some((match) => match.status === "upcoming")
+    matches.some((match) => match.status === "upcoming" || match.status === "live")
   ) {
     void import("./marketIntelligenceService")
       .then(({ captureMarketSnapshots }) =>

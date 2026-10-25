@@ -718,6 +718,22 @@ function XGPanel({
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">BTTS</div><div className="font-mono font-black">{enhanced.btts?.toFixed?.(1) ?? enhanced.btts}%</div></div>
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">Fair H</div><div className="font-mono font-black">{enhanced.fair_home_odds}</div></div>
             </div>
+            {enhanced.market_informed && (
+              <div className="rounded-lg border border-border/40 p-2 space-y-1" data-testid="market-informed">
+                <div className="flex items-center justify-between">
+                  <div className="text-[8px] uppercase tracking-widest text-muted-foreground">With bookmaker odds</div>
+                  <div className="text-[8px] font-mono text-muted-foreground/60">{enhanced.market_informed.bookmakers} book{enhanced.market_informed.bookmakers === 1 ? '' : 's'}</div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div><div className="text-[8px] uppercase text-muted-foreground">Home</div><div className="font-mono font-black">{enhanced.market_informed.home.toFixed(1)}%</div></div>
+                  <div><div className="text-[8px] uppercase text-muted-foreground">Draw</div><div className="font-mono font-black">{enhanced.market_informed.draw.toFixed(1)}%</div></div>
+                  <div><div className="text-[8px] uppercase text-muted-foreground">Away</div><div className="font-mono font-black">{enhanced.market_informed.away.toFixed(1)}%</div></div>
+                </div>
+                <div className="text-[9px] text-muted-foreground/70">
+                  Most accurate "who wins" estimate in testing. Value flags below still use the independent model.
+                </div>
+              </div>
+            )}
             {enhanced.value_edges && (
               <div className="text-[10px] text-muted-foreground" data-testid="value-experimental-note">
                 Value flags are experimental: bookmakers' closing odds have been more accurate than this model so far, so a gap is more often model error than real value.
