@@ -250,7 +250,7 @@ async function realRequest(
   parsed: URL,
 ): Promise<StoredResponse> {
   const response = await originalFetch(input, init);
-  observeQuota(response.headers);
+  observeQuota(response);
   providerCallsToday++;
   lastProviderCallAt = new Date().toISOString();
 
@@ -320,7 +320,7 @@ async function providerFailureOrFallback(init?: RequestInit): Promise<Response> 
 
   const parsed = new URL(`${API_BASE}/fixtures?live=all`);
   const response = await originalFetch(parsed, providerInit(init));
-  observeQuota(response.headers);
+  observeQuota(response);
   providerCallsToday++;
   lastProviderCallAt = new Date().toISOString();
   const stored = await store(response);
@@ -367,7 +367,7 @@ async function refreshSchedule(init?: RequestInit): Promise<void> {
 
     try {
       const response = await originalFetch(url, providerInit(init));
-      observeQuota(response.headers);
+      observeQuota(response);
       providerCallsToday++;
       lastProviderCallAt = new Date().toISOString();
       const stored = await store(response);
@@ -427,7 +427,7 @@ async function refreshBundles(ids: number[], init?: RequestInit): Promise<Stored
 
     try {
       const response = await originalFetch(url, providerInit(init));
-      observeQuota(response.headers);
+      observeQuota(response);
       providerCallsToday++;
       bundledProviderCalls++;
       lastProviderCallAt = new Date().toISOString();
@@ -572,7 +572,16 @@ function priorityFor(parsed: URL): Priority {
 }
 
 function requestAllowed(priority: Priority): boolean {
-  if (providerDailyLimitReached || providerRemaining === 0) return false;
+  if (providerDailyLimitReached) return false;
+  if (providerRemaining === 0) {
+    if (priority !== "live" && priority !== "critical") return false;
+    const sinceProbe = Date.now() - lastZeroRemainingProbeAt;
+    // Callers check more than once per refresh cycle, so a probe stays open briefly.
+    if (sinceProbe < ZERO_REMAINING_PROBE_WINDOW_MS) return true;
+    if (sinceProbe < ZERO_REMAINING_PROBE_MS) return false;
+    lastZeroRemainingProbeAt = Date.now();
+    return true;
+  }
   const mode = quotaMode();
   if (mode === "full") return true;
   if (mode === "conserve") return priority !== "background";
@@ -599,7 +608,19 @@ function effectiveUsedToday(): number {
   return providerCallsToday;
 }
 
-function observeQuota(headers: Headers): void {
+// A header-reported "0 remaining" without the provider's explicit daily-limit
+// error is ambiguous (seen on a 500 from /fixtures/headtohead on 2026-10-25,
+// which froze live scores for an hour while the account had 71k requests
+// left). Allow one live/critical probe this often so a bad reading self-heals.
+const ZERO_REMAINING_PROBE_MS = 5 * 60_000;
+const ZERO_REMAINING_PROBE_WINDOW_MS = 10_000;
+let lastZeroRemainingProbeAt = 0;
+
+function observeQuota(response: Response): void {
+  // Only successful responses carry trustworthy daily quota headers; real
+  // exhaustion is detected from the response body in store().
+  if (!response.ok) return;
+  const headers = response.headers;
   const limit = Number(headers.get("x-ratelimit-requests-limit"));
   const remaining = Number(headers.get("x-ratelimit-requests-remaining"));
   if (Number.isFinite(limit) && limit > 0) providerLimit = limit;
