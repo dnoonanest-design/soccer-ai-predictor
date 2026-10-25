@@ -27,7 +27,7 @@ type StoredResponse = {
   fetchedAt: number;
 };
 
-type CacheEntry = {
+export type CacheEntry = {
   response: StoredResponse;
   ttlMs: number;
   nearestCommenceMs: number | null;
@@ -274,8 +274,16 @@ function shouldServeStale(mode: OddsQuotaMode, entry: CacheEntry, now: number): 
   return age < 24 * 60 * 60_000;
 }
 
-function requestAllowed(mode: OddsQuotaMode, entry: CacheEntry | undefined, now: number, estimatedCost: number): boolean {
-  if (providerRemaining != null && providerRemaining - estimatedCost < RESERVED_CREDITS) return false;
+/** With credits at the reserve, one request per half hour re-reads the quota (monthly reset or plan upgrade). */
+export const LOW_CREDIT_PROBE_MS = 30 * 60_000;
+let lastLowCreditProbeAt = 0;
+
+export function requestAllowed(mode: OddsQuotaMode, entry: CacheEntry | undefined, now: number, estimatedCost: number): boolean {
+  if (providerRemaining != null && providerRemaining - estimatedCost < RESERVED_CREDITS) {
+    if (now - lastLowCreditProbeAt < LOW_CREDIT_PROBE_MS) return false;
+    lastLowCreditProbeAt = now;
+    return true;
+  }
   if (mode === "full" || mode === "conserve") return true;
   if (mode === "protect") {
     if (!entry) return true;
@@ -297,10 +305,22 @@ function quotaMode(): OddsQuotaMode {
   return "full";
 }
 
-function observeQuota(headers: Headers): void {
-  const used = Number(headers.get("x-requests-used"));
-  const remaining = Number(headers.get("x-requests-remaining"));
-  const last = Number(headers.get("x-requests-last"));
+/**
+ * A missing header means "not reported", not zero. Number(null) is 0, so a
+ * provider or gateway error without quota headers (seen as HTTP 502 on
+ * 25 Oct 2026) used to record 0 credits remaining and block every odds
+ * request until the process restarted.
+ */
+export function headerNumber(headers: Headers, name: string): number {
+  const raw = headers.get(name);
+  if (raw == null || raw.trim() === "") return NaN;
+  return Number(raw);
+}
+
+export function observeQuota(headers: Headers): void {
+  const used = headerNumber(headers, "x-requests-used");
+  const remaining = headerNumber(headers, "x-requests-remaining");
+  const last = headerNumber(headers, "x-requests-last");
 
   if (Number.isFinite(used) && used >= 0) providerUsed = used;
   if (Number.isFinite(remaining) && remaining >= 0) providerRemaining = remaining;
@@ -384,4 +404,14 @@ function safeUrl(value: string): URL | null {
 function clamp(value: number, min: number, max: number): number {
   const safe = Number.isFinite(value) ? Math.floor(value) : min;
   return Math.max(min, Math.min(max, safe));
+}
+
+/** Test hook: forget observed quota and probe timing. */
+export function __resetOddsQuotaForTests(): void {
+  providerUsed = null;
+  providerRemaining = null;
+  providerTotal = null;
+  lastRequestCost = null;
+  lastQuotaObservedAt = null;
+  lastLowCreditProbeAt = 0;
 }
