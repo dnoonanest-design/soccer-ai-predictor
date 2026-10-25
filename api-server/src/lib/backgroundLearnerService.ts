@@ -31,6 +31,8 @@ const MIN_AUTO_CALIBRATION_SAMPLE = Math.max(
 const TRAINING_ADVISORY_LOCK = 7_310_250_001;
 const LIVE_ADVISORY_LOCK = 7_310_250_002;
 const SETTLEMENT_ADVISORY_LOCK = 7_310_250_003;
+/** Retries are 15 min doubling to a daily cap; 10 attempts spans about four days. */
+const MAX_PLAYER_RECOVERY_ATTEMPTS = Math.max(3, Number(process.env.MAX_PLAYER_RECOVERY_ATTEMPTS ?? 10));
 
 let started = false;
 let liveStatus:     JobStatus = ENABLED ? "idle" : "disabled";
@@ -306,6 +308,20 @@ export async function runFinishedSettlement() {
     const returnedFixtureIds = new Set(matches.map((match) => match.id));
 
     const deferPlayerRecovery = async (fixtureId: number, attempts: number, reason: string) => {
+      // The provider publishes no player data for many cup competitions, so
+      // after about four days of retries the fixture is closed rather than
+      // re-requested every day forever.
+      if (attempts + 1 >= MAX_PLAYER_RECOVERY_ATTEMPTS) {
+        await pool.query(
+          `UPDATE player_stats_recovery_queue
+              SET attempts = attempts + 1, completed_at = NOW(), last_attempt_at = NOW(),
+                  last_error = $2
+            WHERE fixture_id = $1`,
+          [fixtureId, `gave up after ${attempts + 1} attempts: ${reason}`],
+        );
+        playerDeferred++;
+        return;
+      }
       const delayMs = Math.min(24 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(attempts, 7));
       await pool.query(
         `UPDATE player_stats_recovery_queue
