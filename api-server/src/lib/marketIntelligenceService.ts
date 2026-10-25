@@ -1,4 +1,4 @@
-import { db, marketOddsSnapshots, matchOutcomes, matchPredictions } from "@workspace/db";
+import { db, marketOddsSnapshots, matchOutcomes, matchPredictions, pool } from "@workspace/db";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { logger } from "./logger";
 import type { Match } from "./soccerService";
@@ -19,6 +19,7 @@ export type RawOddsEvent = {
   bookmakers: Array<{
     key: string;
     title?: string;
+    last_update?: string;
     markets: Array<{
       key: string;
       outcomes: Array<{ name: string; price: number }>;
@@ -82,6 +83,9 @@ export async function captureMarketSnapshots(
   if (!matches.length || !oddsEvents.length) {
     return { enabled: true, observations: 0, fixtures: 0 };
   }
+  // In-play prices go to their own table; failures there never affect pre-match capture.
+  await captureInplayOdds(matches, oddsEvents).catch((err) =>
+    logger.warn({ err }, "in-play odds capture failed"));
 
   const now = new Date();
   const captureBucket = getCaptureBucket(now);
@@ -181,6 +185,50 @@ export async function captureMarketSnapshots(
       persistenceError: true,
     };
   }
+}
+
+const INPLAY_BUCKET_MINUTES = 2;
+
+/**
+ * Keep the live prices already returned by the odds request for matches in
+ * play, one row per fixture and bookmaker every two minutes, with the minute
+ * and score. Makes no API call of its own. Used only to test the live model
+ * against the in-play market; nothing serves from these rows yet.
+ */
+export async function captureInplayOdds(matches: Match[], oddsEvents: RawOddsEvent[], now = new Date()): Promise<number> {
+  const bucketMs = INPLAY_BUCKET_MINUTES * 60_000;
+  const bucket = new Date(Math.floor(now.getTime() / bucketMs) * bucketMs).toISOString();
+  let stored = 0;
+  for (const match of matches) {
+    if (match.status !== "live") continue;
+    const event = findOddsEvent(match.home_team.name, match.away_team.name, oddsEvents);
+    if (!event) continue;
+    for (const bookmaker of selectBookmakers(event.bookmakers)) {
+      const prices = extractThreeWayPrices(match.home_team.name, match.away_team.name, event, bookmaker);
+      if (!prices) continue;
+      const implied = calculateNoVigProbabilities(prices.home, prices.draw, prices.away);
+      if (!implied) continue;
+      const updated = bookmaker.last_update ? new Date(bookmaker.last_update) : null;
+      try {
+        const res = await pool.query(
+          `INSERT INTO inplay_odds_snapshots
+             (fixture_id, league_id, minute, score_home, score_away, bookmaker_key,
+              home_odds, draw_odds, away_odds, implied_home_prob, implied_draw_prob, implied_away_prob,
+              bookmaker_updated_at, capture_bucket)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           ON CONFLICT (fixture_id, bookmaker_key, capture_bucket) DO NOTHING`,
+          [match.id, match.league_id ?? null, match.minute ?? null, match.score?.home ?? null, match.score?.away ?? null,
+            bookmaker.key, prices.home, prices.draw, prices.away, implied.home, implied.draw, implied.away,
+            updated && Number.isFinite(updated.getTime()) ? updated : null, bucket],
+        );
+        stored += res.rowCount ?? 0;
+      } catch (err) {
+        // A result recorded moments ago makes the trigger refuse the row; that is expected.
+        logger.debug({ err, fixtureId: match.id }, "in-play odds snapshot not stored");
+      }
+    }
+  }
+  return stored;
 }
 
 export async function getMarketIntelligenceReport(maxSnapshots = 10_000) {

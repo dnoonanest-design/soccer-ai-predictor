@@ -70,8 +70,23 @@ router.get("/matches/:match_id/stats", async (req, res) => {
           const normHome = prediction.home_win;
           const normDraw = prediction.draw;
           const normAway = prediction.away_win;
+          // Odds-informed forecast shown beside the independent one (pre-match only).
+          // It never feeds the value flags below, which compare the independent
+          // prediction with the bookmaker price.
+          let marketInformed = null;
+          if (match.status === "upcoming") {
+            try {
+              const { ensureMarketConsensus, marketInformedForecast } = await import("../lib/marketBlend");
+              const { ensureStrengthModel } = await import("../lib/strengthModel");
+              // The strength model retrains daily in the background; never wait on it here.
+              void ensureStrengthModel();
+              await ensureMarketConsensus();
+              marketInformed = marketInformedForecast(match);
+            } catch { marketInformed = null; }
+          }
           enhancedPred = {
             ...prediction,
+            market_informed: marketInformed,
             value_edges: {
               home: valueEdge(normHome, match.odds?.home_odds ?? null),
               draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),

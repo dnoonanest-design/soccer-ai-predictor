@@ -22,6 +22,9 @@
  *   step9-strength-ratings six opponent-adjusted team ratings (results, goals, xG, shots on target,
  *                         shots, corners) with per-league home advantage, H2H draw tendency and a
  *                         UEFA flag; calibrated goal markets (pattern audit, Oct 2026)
+ *   step10-market-blend   step 9 blended with the bookmakers' latest pre-kickoff consensus (odds test,
+ *                         Oct 2026). Scored like the others but never promoted: it is shown beside
+ *                         the independent prediction, which must stay free of odds
  *   legacy                the original formula, recorded once another model is champion
  */
 import { pool } from "@workspace/db";
@@ -36,6 +39,7 @@ import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type Calibratio
 import { logger } from "./logger";
 import { ensureStrengthModel, forecastStrength, getStrengthModelStatus } from "./strengthModel";
 import { getTeamSheetCoverage } from "./teamSheets";
+import { blendWithMarket, ensureMarketConsensus, getMarketConsensus, MARKET_BLEND_MODEL_WEIGHT } from "./marketBlend";
 
 type Unit = { home: number; draw: number; away: number };
 
@@ -50,6 +54,7 @@ export const CHALLENGER_IDS = [
   "step7-shots-stacked",
   "step8-home-calibrated",
   "step9-strength-ratings",
+  "step10-market-blend",
   "legacy",
 ] as const;
 export type ChallengerId = (typeof CHALLENGER_IDS)[number];
@@ -65,8 +70,15 @@ const DESCRIPTIONS: Record<ChallengerId, string> = {
   "step7-shots-stacked": "Stacking model on team ratings fitted on goals and on shots (on and off target)",
   "step8-home-calibrated": "Original formula with a home/draw/confidence correction fitted on its own settled forecasts",
   "step9-strength-ratings": "Six opponent-adjusted team ratings (results, goals, xG, shots on target, shots, corners) with per-league home advantage and calibrated goal markets",
+  "step10-market-blend": "Step 9 blended with the bookmakers' latest pre-kickoff consensus (shown beside the prediction; never replaces it)",
   legacy: "The original formula",
 };
+
+/**
+ * Scored but never promoted. A champion built on odds would make the value
+ * flags compare the market with itself.
+ */
+export const NON_PROMOTABLE: ReadonlySet<string> = new Set(["step10-market-blend"]);
 
 export const PROMOTION_RULES = {
   minMatches: Number(process.env.CHALLENGER_MIN_MATCHES ?? 300),
@@ -162,6 +174,13 @@ export async function computeChallengerDetail(
       const f = forecastStrength(match.league_id, match.home_team.id, match.away_team.id);
       return f ? { probs: f.probs, markets: f.markets } : null;
     }
+    case "step10-market-blend": {
+      const f = forecastStrength(match.league_id, match.home_team.id, match.away_team.id);
+      const market = getMarketConsensus(match.id, Date.now());
+      if (!f || !market) return null;
+      // Goal markets stay step 9's: only 1X2 prices are stored.
+      return { probs: blendWithMarket(f.probs, market, MARKET_BLEND_MODEL_WEIGHT), markets: f.markets };
+    }
     case "step6-no-form": return stats ? computeLegacyVariantDetail(match, stats, { disableForm: true }, null) : null;
     case "step6-no-h2h": return stats ? computeLegacyVariantDetail(match, stats, { disableH2H: true }, null) : null;
     case "step6-no-players": return stats ? computeLegacyVariantDetail(match, stats, { disablePlayerFactors: true }, null) : null;
@@ -193,6 +212,7 @@ export async function recordChallengerPredictions(
   if (!match.kickoff || new Date(match.kickoff).getTime() <= Date.now()) return 0;
   await ensureTeamRatings();
   await ensureStrengthModel();
+  await ensureMarketConsensus();
   const serving = await getServingState();
   let recorded = 0;
   for (const id of CHALLENGER_IDS) {
@@ -398,6 +418,7 @@ export async function getChallengerReport() {
     if (llGain == null || llGain <= 0) reasons.push("log loss must also improve");
     if (marketMatches < PROMOTION_RULES.minMarketMatches) reasons.push(`needs ${PROMOTION_RULES.minMarketMatches} matches with closing odds (has ${marketMatches})`);
     else if (marketGain == null || marketGain <= 0) reasons.push("must also improve on matches with closing odds (smaller gap to the market)");
+    if (NON_PROMOTABLE.has(String(r.challenger))) reasons.push("odds-informed benchmark: shown beside the prediction, never replaces the independent model");
     const goalMatches = Number(r.goal_matches ?? 0), o25Gain = n(r.o25_gain), bttsGain = n(r.btts_gain);
     if (goalMatches < PROMOTION_RULES.minGoalMarketMatches) reasons.push(`needs ${PROMOTION_RULES.minGoalMarketMatches} matches with goal markets stored (has ${goalMatches})`);
     else {
