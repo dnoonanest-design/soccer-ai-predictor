@@ -221,3 +221,73 @@ export function __setLivePricesForTests(entries: Array<[number, LivePrice[]]>): 
   livePrices = new Map(entries);
   liveRefreshedAt = Date.now();
 }
+
+// ── Pre-match odds movement (3 days, 2 days, 1 day, latest) ─────────────────
+
+export type MovementPoint = { label: string; hours_before: number; home: number; draw: number; away: number; bookmakers: number };
+export type OddsMovement = { points: MovementPoint[]; shortening: "home" | "draw" | "away" | null; drifting: "home" | "draw" | "away" | null };
+
+const MOVEMENT_TARGETS: Array<[string, number]> = [["3 days", 72], ["2 days", 48], ["1 day", 24]];
+/** A read within this many hours of a checkpoint stands for it. */
+const MOVEMENT_TOLERANCE_HOURS = 6;
+/** Moves under 2 points are noise in the movement test. */
+export const MOVEMENT_MIN_POINTS = 2;
+const movementCache = new Map<number, { at: number; value: OddsMovement | null }>();
+
+type Read = { book: string; hours: number; h: number; d: number; a: number };
+
+/** Pure: consensus at each checkpoint (each book's read nearest to it) plus the latest. */
+export function oddsMovementFrom(reads: Read[]): OddsMovement | null {
+  if (!reads.length) return null;
+  const books = [...new Set(reads.map((r) => r.book))];
+  const pick = (choose: (list: Read[]) => Read | undefined) =>
+    consensusFromRows(books.map((b) => choose(reads.filter((r) => r.book === b))).filter((r): r is Read => !!r)
+      .map((r) => ({ h: r.h, d: r.d, a: r.a, observedAt: -r.hours })));
+  const points: MovementPoint[] = [];
+  const pct = (v: number) => Math.round(v * 1000) / 10;
+  for (const [label, target] of MOVEMENT_TARGETS) {
+    const c = pick((list) => list.filter((r) => Math.abs(r.hours - target) <= MOVEMENT_TOLERANCE_HOURS)
+      .sort((x, y) => Math.abs(x.hours - target) - Math.abs(y.hours - target))[0]);
+    if (c) points.push({ label, hours_before: target, home: pct(c.home), draw: pct(c.draw), away: pct(c.away), bookmakers: c.bookmakers });
+  }
+  const latest = pick((list) => [...list].sort((x, y) => x.hours - y.hours)[0]);
+  if (latest) {
+    const hours = Math.round(-latest.observedAt * 10) / 10;
+    // Only add "latest" if it is a different moment from the last checkpoint.
+    if (!points.length || points[points.length - 1].hours_before - hours > MOVEMENT_TOLERANCE_HOURS / 2) {
+      points.push({ label: "Latest", hours_before: hours, home: pct(latest.home), draw: pct(latest.draw), away: pct(latest.away), bookmakers: latest.bookmakers });
+    }
+  }
+  if (points.length < 2) return { points, shortening: null, drifting: null };
+  const first = points[0], last = points[points.length - 1];
+  const moves = (["home", "draw", "away"] as const).map((k) => [k, last[k] - first[k]] as const);
+  const most = moves.reduce((a, b) => (b[1] > a[1] ? b : a)), least = moves.reduce((a, b) => (b[1] < a[1] ? b : a));
+  return {
+    points,
+    shortening: most[1] >= MOVEMENT_MIN_POINTS ? most[0] : null,
+    drifting: least[1] <= -MOVEMENT_MIN_POINTS ? least[0] : null,
+  };
+}
+
+/** Stored pre-match reads for one fixture, summarised; cached for two minutes. */
+export async function getOddsMovement(fixtureId: number): Promise<OddsMovement | null> {
+  const hit = movementCache.get(fixtureId);
+  if (hit && Date.now() - hit.at < REFRESH_MS) return hit.value;
+  let value: OddsMovement | null = null;
+  try {
+    const res = await pool.query(
+      `SELECT bookmaker_key, EXTRACT(EPOCH FROM (kickoff_at - observed_at)) / 3600 AS hours,
+              implied_home_prob h, implied_draw_prob d, implied_away_prob a
+         FROM market_odds_snapshots
+        WHERE fixture_id = $1 AND kickoff_at IS NOT NULL AND observed_at < kickoff_at
+          AND observed_at >= kickoff_at - INTERVAL '80 hours'`,
+      [fixtureId],
+    );
+    value = oddsMovementFrom(res.rows.map((r: any) => ({ book: String(r.bookmaker_key), hours: Number(r.hours), h: Number(r.h), d: Number(r.d), a: Number(r.a) })));
+  } catch (err) {
+    logger.warn({ err, fixtureId }, "odds movement unavailable");
+  }
+  movementCache.set(fixtureId, { at: Date.now(), value });
+  if (movementCache.size > 2000) movementCache.delete(movementCache.keys().next().value!);
+  return value;
+}

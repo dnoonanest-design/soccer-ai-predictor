@@ -13,7 +13,7 @@ import {
   type RawOddsEvent,
 } from "./marketIntelligenceService";
 import { getOddsOptimizationStatus } from "./oddsOptimizationService";
-import { isBeforeOddsCaptureCutoff, oddsSnapshotCadenceMs } from "./marketOddsSamplingPolicy";
+import { CHECKPOINT_WINDOW_HOURS, isBeforeOddsCaptureCutoff, isOddsCaptureDue } from "./marketOddsSamplingPolicy";
 import { waitForRateLimit } from "./rateLimiter";
 import {
   fetchFootball,
@@ -31,7 +31,8 @@ const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 const SEASON = String(configuredFootballSeason());
 
 const ENABLED = process.env.MARKET_FUTURE_SAMPLER_ENABLED === "true";
-const WINDOW_HOURS = 72;
+// 3-day checkpoint plus its early window; see PREMATCH_CHECKPOINT_HOURS.
+const WINDOW_HOURS = CHECKPOINT_WINDOW_HOURS;
 // Check each minute so a match close to kickoff is not missed by a coarse scan.
 const SCAN_INTERVAL_MS = 60_000;
 const FIXTURE_REFRESH_MS = clampNumber(
@@ -57,7 +58,6 @@ const MAX_ODDS_CALLS_PER_DAY = clampNumber(
 
 const NEAR_INTERVAL_MS = 15 * 60_000;
 const MID_INTERVAL_MS = 60 * 60_000;
-const FAR_INTERVAL_MS = 2 * 60 * 60_000;
 const FINAL_HOUR_INTERVAL_MS = 5 * 60_000;
 const FINAL_FIVE_MINUTES_INTERVAL_MS = 60_000;
 const EMPTY_SPORT_KEY_COOLDOWN_MS = 6 * 60 * 60_000;
@@ -169,7 +169,7 @@ export function getFutureMarketSamplerStatus() {
       maxOddsCallsPerRun: MAX_ODDS_CALLS_PER_RUN,
       maxOddsCallsPerDay: MAX_ODDS_CALLS_PER_DAY,
       cadence: {
-        moreThan24HoursBeforeKickoffMs: FAR_INTERVAL_MS,
+        checkpointsHoursBeforeKickoff: [72, 48, 24],
         sixTo24HoursBeforeKickoffMs: MID_INTERVAL_MS,
         oneToSixHoursBeforeKickoffMs: NEAR_INTERVAL_MS,
         fiveMinutesToOneHourBeforeKickoffMs: FINAL_HOUR_INTERVAL_MS,
@@ -237,8 +237,12 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       ) return false;
 
       const latest = latestByFixture.get(fixture.fixture.id);
-      if (!latest) return true;
-      return nowMs - latest.getTime() >= cadenceForHours(hoursToKickoff);
+      // 3 days, 2 days and 1 day before kickoff, then the match-day cadence.
+      return isOddsCaptureDue(
+        hoursToKickoff,
+        latest ? (kickoffMs - latest.getTime()) / 3_600_000 : null,
+        latest ? nowMs - latest.getTime() : null,
+      );
     });
 
     fixturesDue = dueFixtures.length;
@@ -267,7 +271,10 @@ export async function runFutureMarketSampler(): Promise<SamplerResult | { skippe
       .sort((a, b) => {
         const urgency = (group: typeof a) => {
           const hours = (new Date(group.fixtures[0].fixture.date).getTime() - nowMs) / 3_600_000;
-          return hours <= 1 ? 0 : hours <= 6 ? 1 : hours <= 24 ? 2 : 3;
+          // The 3-day / 2-day / 1-day checkpoints are read once each, so they
+          // come straight after the final hour and are not crowded out by
+          // the hourly match-day reads when the daily cap is tight.
+          return hours <= 1 ? 0 : hours > 24 ? 1 : hours <= 6 ? 2 : 3;
         };
         const priority = (group: typeof a) => {
           const competition = getTrackedCompetition(group.fixtures[0].league.id);
@@ -691,10 +698,6 @@ async function recordSamplerJob(
   } catch (err) {
     logger.warn({ err }, "future market sampler: failed to record job run");
   }
-}
-
-function cadenceForHours(hoursToKickoff: number) {
-  return oddsSnapshotCadenceMs(hoursToKickoff);
 }
 
 function isFutureStatus(status: string | undefined) {

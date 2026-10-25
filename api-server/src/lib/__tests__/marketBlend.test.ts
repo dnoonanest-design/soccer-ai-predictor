@@ -5,7 +5,7 @@ vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: (
 const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: number; draw: number; away: number } } }));
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
-const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast } = await import("../marketBlend");
+const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, oddsMovementFrom } = await import("../marketBlend");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
 const match = { id: 5, league_id: 39, status: "upcoming", kickoff: "2026-10-25T15:00:00Z", home_team: { id: 1 }, away_team: { id: 2 } };
@@ -80,5 +80,29 @@ describe("odds-informed in-play forecast", () => {
   it("is in-play only", () => {
     __setLivePricesForTests([[9, [price({})]]]);
     expect(liveMarketInformedForecast({ ...live, status: "upcoming" }, served, now)).toBeNull();
+  });
+});
+
+describe("pre-match odds movement", () => {
+  const read = (book: string, hours: number, h: number, d: number, a: number) => ({ book, hours, h, d, a });
+
+  it("summarises 3 days, 2 days, 1 day and the latest read, and names the moves", () => {
+    const m = oddsMovementFrom([
+      read("a", 72.5, 40, 30, 30), read("a", 49, 44, 29, 27), read("a", 25, 47, 28, 25), read("a", 0.1, 50, 27, 23),
+      read("b", 71, 40, 30, 30), read("b", 0.2, 50, 27, 23),
+    ])!;
+    expect(m.points.map((p) => p.label)).toEqual(["3 days", "2 days", "1 day", "Latest"]);
+    expect(m.points[0].home).toBe(40);
+    expect(m.points[0].bookmakers).toBe(2);
+    expect(m.points[3].home).toBe(50);
+    expect(m.shortening).toBe("home");
+    expect(m.drifting).toBe("away");
+  });
+
+  it("leaves out checkpoints with no read nearby and ignores moves under 2 points", () => {
+    const m = oddsMovementFrom([read("a", 30, 40, 30, 30), read("a", 1, 41, 30, 29)])!;
+    expect(m.points.map((p) => p.label)).toEqual(["1 day", "Latest"]);
+    expect(m.shortening).toBeNull();
+    expect(m.drifting).toBeNull();
   });
 });
