@@ -19,6 +19,9 @@
  *   step7-shots-stacked   softmax on goal-rating and shot-rating strengths (wider-stats study)  [7]
  *   step8-home-calibrated original formula plus a 3-way calibration fitted on its own settled
  *                         forecasts (corrects home under-rating, draw over-rating, overconfidence)
+ *   step9-strength-ratings six opponent-adjusted team ratings (results, goals, xG, shots on target,
+ *                         shots, corners) with per-league home advantage, H2H draw tendency and a
+ *                         UEFA flag; calibrated goal markets (pattern audit, Oct 2026)
  *   legacy                the original formula, recorded once another model is champion
  */
 import { pool } from "@workspace/db";
@@ -31,6 +34,7 @@ import { ensureTeamRatings, forecastFromRatings, forecastStacked, getLeagueRatin
 import { runInPlayCycle } from "./inPlayModelService";
 import { applyCalibration, fitCalibration, IDENTITY_CALIBRATION, type CalibrationParams, type Outcome } from "./outcomeCalibration";
 import { logger } from "./logger";
+import { ensureStrengthModel, forecastStrength, getStrengthModelStatus } from "./strengthModel";
 
 type Unit = { home: number; draw: number; away: number };
 
@@ -44,6 +48,7 @@ export const CHALLENGER_IDS = [
   "step6-no-players",
   "step7-shots-stacked",
   "step8-home-calibrated",
+  "step9-strength-ratings",
   "legacy",
 ] as const;
 export type ChallengerId = (typeof CHALLENGER_IDS)[number];
@@ -58,6 +63,7 @@ const DESCRIPTIONS: Record<ChallengerId, string> = {
   "step6-no-players": "Original formula without injury and lineup factors",
   "step7-shots-stacked": "Stacking model on team ratings fitted on goals and on shots (on and off target)",
   "step8-home-calibrated": "Original formula with a home/draw/confidence correction fitted on its own settled forecasts",
+  "step9-strength-ratings": "Six opponent-adjusted team ratings (results, goals, xG, shots on target, shots, corners) with per-league home advantage and calibrated goal markets",
   legacy: "The original formula",
 };
 
@@ -151,6 +157,10 @@ export async function computeChallengerDetail(
       if (params.samples < 50) return null;
       return { ...base, probs: applyCalibration(base.probs, params) };
     }
+    case "step9-strength-ratings": {
+      const f = forecastStrength(match.league_id, match.home_team.id, match.away_team.id);
+      return f ? { probs: f.probs, markets: f.markets } : null;
+    }
     case "step6-no-form": return stats ? computeLegacyVariantDetail(match, stats, { disableForm: true }, null) : null;
     case "step6-no-h2h": return stats ? computeLegacyVariantDetail(match, stats, { disableH2H: true }, null) : null;
     case "step6-no-players": return stats ? computeLegacyVariantDetail(match, stats, { disablePlayerFactors: true }, null) : null;
@@ -181,6 +191,7 @@ export async function recordChallengerPredictions(
 ): Promise<number> {
   if (!match.kickoff || new Date(match.kickoff).getTime() <= Date.now()) return 0;
   await ensureTeamRatings();
+  await ensureStrengthModel();
   const serving = await getServingState();
   let recorded = 0;
   for (const id of CHALLENGER_IDS) {
@@ -410,6 +421,7 @@ export async function getChallengerReport() {
     calibration,
     legacyCalibration,
     ratings: getTeamRatingsStatus(),
+    strengthModel: getStrengthModelStatus(),
     standings,
     lastRun,
     pendingTotal: [...pendingBy.values()].reduce((sum, v) => sum + v, 0),
@@ -533,6 +545,7 @@ export async function applyServingChampion(match: PredictionMatch, result: Canon
   if (serving.champion === "legacy") return result;
   try {
     if (/^step[2347]/.test(serving.champion)) await ensureTeamRatings();
+    if (serving.champion === "step9-strength-ratings") await ensureStrengthModel();
     const detail = await computeChallengerDetail(serving.champion, match, result.stats, serving.calibration);
     if (!detail) return result;
     const p = detail.probs, m = detail.markets;
@@ -567,6 +580,7 @@ export async function runChallengerCycle() {
   let settled = 0, promoted: string | null = null, error: string | null = null;
   try {
     settled = await settleChallengerPredictions();
+    await ensureStrengthModel();
     await refitCalibration();
     await refitLegacyCalibration();
     promoted = await runPromotionGate();
@@ -583,7 +597,7 @@ export async function runChallengerCycle() {
 export function startChallengerWorker() {
   if (workerTimer || process.env.MODEL_CHALLENGERS_ENABLED === "false") return;
   const interval = Number(process.env.CHALLENGER_CYCLE_MS ?? 30 * 60_000);
-  const first = setTimeout(() => { void ensureTeamRatings(); void runChallengerCycle(); }, 90_000);
+  const first = setTimeout(() => { void ensureTeamRatings(); void ensureStrengthModel(); void runChallengerCycle(); }, 90_000);
   first.unref();
   workerTimer = setInterval(() => { void runChallengerCycle(); }, interval);
   workerTimer.unref();
