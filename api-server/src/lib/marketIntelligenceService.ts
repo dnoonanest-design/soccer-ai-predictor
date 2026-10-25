@@ -187,11 +187,12 @@ export async function captureMarketSnapshots(
   }
 }
 
-const INPLAY_BUCKET_MINUTES = 2;
+// One minute, so a stored price is never older than the 2-minute freshness rule in marketBlend.ts.
+const INPLAY_BUCKET_MINUTES = 1;
 
 /**
  * Keep the live prices already returned by the odds request for matches in
- * play, one row per fixture and bookmaker every two minutes, with the minute
+ * play, one row per fixture and bookmaker each minute, with the minute
  * and score. Makes no API call of its own. Used only to test the live model
  * against the in-play market; nothing serves from these rows yet.
  */

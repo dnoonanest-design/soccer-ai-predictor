@@ -725,6 +725,19 @@ async function captureLiveCheckpointsUnlocked() {
           },
           capture.inplayAlternative,
         ).catch((err) => logger.warn({ err, fixtureId: match.id }, "in-play challenger capture failed"));
+        // Odds-informed in-play forecast, scored beside the live model at the same checkpoint.
+        await (async () => {
+          const { ensureLiveMarket, liveMarketInformedForecast, INPLAY_MARKET_CHALLENGER } = await import("./marketBlend");
+          await ensureLiveMarket();
+          const m = liveMarketInformedForecast(match, capture.prediction);
+          if (!m) return;
+          await recordInPlayChallenger(
+            match,
+            checkpoint,
+            { home: capture.prediction.home / 100, draw: capture.prediction.draw / 100, away: capture.prediction.away / 100 },
+            { model: INPLAY_MARKET_CHALLENGER, home: m.home, draw: m.draw, away: m.away },
+          );
+        })().catch((err) => logger.warn({ err, fixtureId: match.id }, "in-play market capture failed"));
       }
     } catch (err) {
       errors++;
