@@ -91,9 +91,18 @@ router.get("/matches/:match_id/stats", async (req, res) => {
               marketInformed = liveMarketInformedForecast(match, { home: prediction.home_win, draw: prediction.draw, away: prediction.away_win });
             } catch { marketInformed = null; }
           }
+          // Pre-match odds at 3 days, 2 days, 1 day and the latest read (stored reads only).
+          let oddsMovement: unknown = null;
+          if (match.status === "upcoming" || match.status === "live") {
+            try {
+              const { getOddsMovement } = await import("../lib/marketBlend");
+              oddsMovement = await getOddsMovement(match.id);
+            } catch { oddsMovement = null; }
+          }
           enhancedPred = {
             ...prediction,
             market_informed: marketInformed,
+            odds_movement: oddsMovement,
             value_edges: {
               home: valueEdge(normHome, match.odds?.home_odds ?? null),
               draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),

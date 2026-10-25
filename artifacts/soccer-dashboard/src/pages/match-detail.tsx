@@ -736,6 +736,27 @@ function XGPanel({
                 </div>
               </div>
             )}
+            {enhanced.odds_movement?.points?.length >= 2 && (
+              <div className="rounded-lg border border-border/40 p-2 space-y-1" data-testid="odds-movement">
+                <div className="text-[8px] uppercase tracking-widest text-muted-foreground">Odds movement (bookmaker chance)</div>
+                <div className="grid gap-1 text-center" style={{ gridTemplateColumns: `3rem repeat(${enhanced.odds_movement.points.length}, minmax(0, 1fr))` }}>
+                  <div />
+                  {enhanced.odds_movement.points.map((p: any) => (
+                    <div key={p.label} className="text-[8px] uppercase text-muted-foreground">{p.label}</div>
+                  ))}
+                  {(['home', 'draw', 'away'] as const).map((side) => (
+                    <Fragment key={side}>
+                      <div className={`text-[9px] uppercase text-left ${enhanced.odds_movement.shortening === side ? 'text-primary font-bold' : enhanced.odds_movement.drifting === side ? 'text-amber-500' : 'text-muted-foreground'}`}>
+                        {side}{enhanced.odds_movement.shortening === side ? ' ↑' : enhanced.odds_movement.drifting === side ? ' ↓' : ''}
+                      </div>
+                      {enhanced.odds_movement.points.map((p: any) => (
+                        <div key={p.label} className="font-mono text-[11px]">{Number(p[side]).toFixed(1)}%</div>
+                      ))}
+                    </Fragment>
+                  ))}
+                </div>
+              </div>
+            )}
             {enhanced.value_edges && (
               <div className="text-[10px] text-muted-foreground" data-testid="value-experimental-note">
                 Value flags are experimental: bookmakers' closing odds have been more accurate than this model so far, so a gap is more often model error than real value.
@@ -747,8 +768,16 @@ function XGPanel({
                   <div key={label} className={`rounded-lg p-2 ${edge.is_value ? 'bg-primary/15' : 'bg-muted/30'}`}>
                     <div className="text-[8px] uppercase text-muted-foreground">{label} value</div>
                     <div className="font-mono font-black">{edge.edge_pct > 0 ? '+' : ''}{edge.edge_pct}%</div>
+                    {edge.is_value && enhanced.odds_movement?.drifting === String(label).toLowerCase() && (
+                      <div className="text-[8px] text-amber-500 mt-0.5" data-testid="value-drift-warning">Odds drifting · caution</div>
+                    )}
                   </div>
                 ))}
+              </div>
+            )}
+            {enhanced.value_edges && enhanced.odds_movement?.drifting && (
+              <div className="text-[9px] text-muted-foreground/70">
+                Backing a side whose odds are drifting lost value against the closing price in testing.
               </div>
             )}
             {enhanced.correct_scores?.length > 0 && (
