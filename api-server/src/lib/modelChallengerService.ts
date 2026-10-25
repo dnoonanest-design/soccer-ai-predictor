@@ -17,6 +17,8 @@
  *   step6-no-h2h          original formula without the head-to-head blend                       [6]
  *   step6-no-players      original formula without injury and lineup factors                    [6]
  *   step7-shots-stacked   softmax on goal-rating and shot-rating strengths (wider-stats study)  [7]
+ *   step8-home-calibrated original formula plus a 3-way calibration fitted on its own settled
+ *                         forecasts (corrects home under-rating, draw over-rating, overconfidence)
  *   legacy                the original formula, recorded once another model is champion
  */
 import { pool } from "@workspace/db";
@@ -41,6 +43,7 @@ export const CHALLENGER_IDS = [
   "step6-no-h2h",
   "step6-no-players",
   "step7-shots-stacked",
+  "step8-home-calibrated",
   "legacy",
 ] as const;
 export type ChallengerId = (typeof CHALLENGER_IDS)[number];
@@ -54,6 +57,7 @@ const DESCRIPTIONS: Record<ChallengerId, string> = {
   "step6-no-h2h": "Original formula without the head-to-head blend",
   "step6-no-players": "Original formula without injury and lineup factors",
   "step7-shots-stacked": "Stacking model on team ratings fitted on goals and on shots (on and off target)",
+  "step8-home-calibrated": "Original formula with a home/draw/confidence correction fitted on its own settled forecasts",
   legacy: "The original formula",
 };
 
@@ -75,6 +79,7 @@ export const PROMOTION_RULES = {
 };
 
 let calibration: CalibrationParams = IDENTITY_CALIBRATION;
+let legacyCalibration: CalibrationParams = IDENTITY_CALIBRATION;
 let servingCache: { champion: string; since: Date | null; calibration: CalibrationParams | null; at: number } | null = null;
 let workerTimer: NodeJS.Timeout | null = null;
 let lastRun: { at: string; settled: number; promoted: string | null; error: string | null } | null = null;
@@ -136,6 +141,15 @@ export async function computeChallengerDetail(
           over15: g.over15, over25: g.over25, over35: g.over35, btts: g.btts, correctScores: g.correctScores,
         },
       };
+    }
+    case "step8-home-calibrated": {
+      if (!stats) return null;
+      const base = await computeLegacyVariantDetail(match, stats, {}, null);
+      if (!base) return null;
+      const params = calibrationOverride ?? legacyCalibration;
+      // Until enough settled forecasts exist this would duplicate the original formula.
+      if (params.samples < 50) return null;
+      return { ...base, probs: applyCalibration(base.probs, params) };
     }
     case "step6-no-form": return stats ? computeLegacyVariantDetail(match, stats, { disableForm: true }, null) : null;
     case "step6-no-h2h": return stats ? computeLegacyVariantDetail(match, stats, { disableH2H: true }, null) : null;
@@ -255,6 +269,30 @@ export async function refitCalibration(): Promise<CalibrationParams> {
   return calibration;
 }
 
+/**
+ * Fit the step-8 correction on the original formula's own settled forecasts:
+ * the champion columns of rows recorded while the original formula was
+ * serving, latest pre-match capture per fixture. Only forecasts made before
+ * kickoff are stored, so every row is out-of-sample for the fit.
+ */
+export async function refitLegacyCalibration(): Promise<CalibrationParams> {
+  const rows = await pool.query(
+    `SELECT DISTINCT ON (fixture_id)
+            champion_home_prob, champion_draw_prob, champion_away_prob, actual_outcome
+       FROM model_challenger_predictions
+      WHERE settled_at IS NOT NULL
+        AND actual_outcome IN ('home','draw','away')
+        AND COALESCE(details->>'champion', 'legacy') = 'legacy'
+      ORDER BY fixture_id, captured_at DESC
+      LIMIT 5000`,
+  );
+  legacyCalibration = fitCalibration(rows.rows.map((r: any) => ({
+    probs: { home: Number(r.champion_home_prob), draw: Number(r.champion_draw_prob), away: Number(r.champion_away_prob) },
+    actual: String(r.actual_outcome) as Outcome,
+  })));
+  return legacyCalibration;
+}
+
 // ── Report and promotion gate ────────────────────────────────────────────────
 
 export type ChallengerStanding = {
@@ -370,6 +408,7 @@ export async function getChallengerReport() {
     championDescription: DESCRIPTIONS[serving.champion as ChallengerId] ?? serving.champion,
     rules: PROMOTION_RULES,
     calibration,
+    legacyCalibration,
     ratings: getTeamRatingsStatus(),
     standings,
     lastRun,
@@ -425,7 +464,11 @@ export async function runPromotionGate(): Promise<string | null> {
   );
   if (recent.rowCount) return null;
   const winner = eligible[0];
-  const calibrationSnapshot = winner.challenger === "step4-calibrated" ? calibration : null;
+  // Freeze the correction that earned the promotion; the live fit keeps moving.
+  const calibrationSnapshot =
+    winner.challenger === "step4-calibrated" ? calibration
+      : winner.challenger === "step8-home-calibrated" ? legacyCalibration
+        : null;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -525,6 +568,7 @@ export async function runChallengerCycle() {
   try {
     settled = await settleChallengerPredictions();
     await refitCalibration();
+    await refitLegacyCalibration();
     promoted = await runPromotionGate();
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);

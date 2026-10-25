@@ -118,4 +118,32 @@ describe("three-way calibration (plan step 4)", () => {
     const after = samples.reduce((s, x) => s + brier(applyCalibration(x.probs, c), x.actual), 0);
     expect(after).toBeLessThan(before);
   });
+
+  // Step 8: the production audit showed the original formula giving home
+  // teams ~40% when they won ~46%, and draws ~24% when they happened ~20%.
+  it("corrects a formula that under-rates home teams and over-rates draws (step 8)", () => {
+    const u = rng(23);
+    const make = (n: number) => Array.from({ length: n }, () => {
+      const trueHome = 0.3 + 0.35 * u();
+      const truth = { home: trueHome, draw: 0.2, away: 0.8 - trueHome };
+      // Biased forecast: home shaved, draw padded, renormalised.
+      const raw = { home: truth.home * 0.82, draw: truth.draw * 1.2, away: truth.away * 1.05 };
+      const t = raw.home + raw.draw + raw.away;
+      const probs = { home: raw.home / t, draw: raw.draw / t, away: raw.away / t };
+      const x = u();
+      const actual = (x < truth.home ? "home" : x < truth.home + truth.draw ? "draw" : "away") as "home" | "draw" | "away";
+      return { probs, actual };
+    });
+    const train = make(1000);
+    const test = make(1000); // unseen matches, like the promotion gate uses
+    const c = fitCalibration(train);
+    expect(c.homeBias).toBeGreaterThan(0);
+    expect(c.drawBias).toBeLessThan(c.homeBias);
+    const before = test.reduce((s, x) => s + brier(x.probs, x.actual), 0) / test.length;
+    const after = test.reduce((s, x) => s + brier(applyCalibration(x.probs, c), x.actual), 0) / test.length;
+    expect(after).toBeLessThan(before);
+    const meanHome = test.reduce((s, x) => s + applyCalibration(x.probs, c).home, 0) / test.length;
+    const actualHome = test.filter((x) => x.actual === "home").length / test.length;
+    expect(Math.abs(meanHome - actualHome)).toBeLessThan(0.03);
+  });
 });
