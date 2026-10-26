@@ -94,6 +94,28 @@ router.post("/model/challengers/run", async (_req, res) => {
   }
 });
 
+// API-Football odds collection: coverage, and (admin) backfill of last week's final pre-match odds.
+router.get("/model/odds/coverage", async (_req, res) => {
+  try {
+    const { getApifOddsCoverage } = await import("../lib/apiFootballOdds");
+    return res.json(await getApifOddsCoverage());
+  } catch (err) {
+    logger.error({ err }, "odds coverage failed");
+    return res.status(500).json({ error: "Odds coverage unavailable" });
+  }
+});
+
+router.post("/model/odds/backfill", async (req, res) => {
+  try {
+    const { backfillApifOdds } = await import("../lib/apiFootballOdds");
+    const days = Number(req.body?.days ?? 7) || 7, maxCalls = Number(req.body?.maxCalls ?? 300) || 300;
+    return res.json(await backfillApifOdds(days, maxCalls));
+  } catch (err) {
+    logger.error({ err }, "odds backfill failed");
+    return res.status(500).json({ error: "Odds backfill failed" });
+  }
+});
+
 // Admin: put the original formula back in charge, with a logged reason.
 router.post("/model/challengers/rollback", async (req, res) => {
   try {

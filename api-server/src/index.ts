@@ -54,6 +54,7 @@ const server = app.listen(port, () => {
   startChallengerWorker();
   startInPlayWorker();
   startShotStatisticsBackfill();
+  void import("./lib/apiFootballOdds").then(({ startApifOddsWorkers }) => startApifOddsWorkers());
   if (process.env.MATCH_SNAPSHOT_PREWARM_ENABLED !== "false") {
     void warmMatchSnapshot()
       .then((result) => logger.info(result, "weekly dashboard snapshot prewarmed"))
