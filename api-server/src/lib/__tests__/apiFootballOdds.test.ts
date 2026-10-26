@@ -5,7 +5,7 @@ vi.mock("../soccerService", () => ({ fetchFootball: async () => [], getAllMatche
 vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: () => {} } }));
 vi.mock("../leagueConfig", () => ({ isTrackedLeague: () => true }));
 
-const { apifReadDue, parseLive, parsePrematch, readMarkets } = await import("../apiFootballOdds");
+const { apifReadDue, displayOddsFrom, fillMissingOdds, noOddsBackoffHours, parseLive, parsePrematch, readMarkets } = await import("../apiFootballOdds");
 
 const prematch = {
   league: { id: 39 }, fixture: { id: 1001, date: "2026-10-27T15:00:00+00:00" }, update: "2026-10-26T12:00:00+00:00",
@@ -77,5 +77,36 @@ describe("API-Football pre-match read schedule", () => {
     expect(apifReadDue(4, 1)).toBe(true);
     expect(apifReadDue(0.6, 0.5)).toBe(true);
     expect(apifReadDue(-0.1, null)).toBe(false);
+  });
+});
+
+describe("API-Football fixtures with no odds yet", () => {
+  it("waits before re-reading a fixture that returned nothing, so later fixtures get their turn", () => {
+    expect(noOddsBackoffHours(60)).toBe(6);
+    expect(noOddsBackoffHours(12)).toBe(2);
+    expect(noOddsBackoffHours(3)).toBe(0.5);
+  });
+});
+
+describe("API-Football price on match cards", () => {
+  const row = (bookId: number, name: string, h: number, d: number, a: number) => ({ bookId, name, h, d, a, updated: "2026-10-26T10:00:00.000Z" });
+
+  it("prefers Bet365 and shows its prices with the margin removed", () => {
+    const o = displayOddsFrom([row(11, "1xBet", 6, 4, 1.5), row(8, "Bet365", 5, 4, 1.6)])!;
+    expect(o.bookmaker).toBe("Bet365 (via API-Football)");
+    expect(o.bookmaker_key).toBe("apif-8");
+    expect(o.away_odds).toBe(1.6);
+    expect(o.home_win + o.draw + o.away_win).toBeCloseTo(100, 6);
+    expect(o.away_win).toBeGreaterThan(o.home_win);
+  });
+
+  it("falls back to any bookmaker, and ignores invalid prices", () => {
+    expect(displayOddsFrom([row(99, "Other", 2, 3, 4)])!.bookmaker_key).toBe("apif-99");
+    expect(displayOddsFrom([row(8, "Bet365", 1, 3, 4)])).toBeNull();
+  });
+
+  it("leaves matches unchanged when there is nothing stored", async () => {
+    const m = [{ id: 1, status: "upcoming", odds: null }, { id: 2, status: "upcoming", odds: { home_odds: 2 } }];
+    expect(await fillMissingOdds(m)).toEqual(m);
   });
 });
