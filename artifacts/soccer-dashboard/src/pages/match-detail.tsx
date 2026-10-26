@@ -717,11 +717,16 @@ function XGPanel({
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">BTTS</div><div className="font-mono font-black">{enhanced.btts?.toFixed?.(1) ?? enhanced.btts}%</div></div>
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">Fair H</div><div className="font-mono font-black">{enhanced.fair_home_odds}</div></div>
             </div>
-            {enhanced.market_blend && enhanced.independent && (
+            {(enhanced.market_blend || enhanced.goal_market_blend) && enhanced.independent && (
               <div className="rounded-lg border border-primary/25 bg-primary/5 p-2 text-[10px] text-muted-foreground" data-testid="market-blend-note">
-                <span className="font-semibold text-primary">Includes bookmaker odds</span> ({enhanced.market_blend.bookmakers} book{enhanced.market_blend.bookmakers === 1 ? '' : 's'}), the most accurate pre-match estimate in testing.
-                {' '}Model alone: H {Number(enhanced.independent.home).toFixed(1)}% · D {Number(enhanced.independent.draw).toFixed(1)}% · A {Number(enhanced.independent.away).toFixed(1)}%.
-                {' '}Value flags compare the model alone with the price.
+                <span className="font-semibold text-primary">Includes bookmaker odds</span>
+                {enhanced.market_blend ? ` for the result (${enhanced.market_blend.bookmakers} book${enhanced.market_blend.bookmakers === 1 ? '' : 's'})` : ''}
+                {enhanced.goal_market_blend ? `${enhanced.market_blend ? ' and' : ' for'} ${enhanced.goal_market_blend.markets.map((m: string) => m === 'over_25' ? 'over 2.5' : 'both teams to score').join(' and ')}` : ''}
+                , the most accurate pre-match estimates in testing.
+                {enhanced.market_blend ? ` Model alone: H ${Number(enhanced.independent.home).toFixed(1)}% · D ${Number(enhanced.independent.draw).toFixed(1)}% · A ${Number(enhanced.independent.away).toFixed(1)}%.` : ''}
+                {enhanced.goal_market_blend && enhanced.independent.over_25 != null ? ` Model over 2.5: ${Number(enhanced.independent.over_25).toFixed(1)}%.` : ''}
+                {enhanced.goal_market_blend && enhanced.independent.btts != null ? ` Model BTTS: ${Number(enhanced.independent.btts).toFixed(1)}%.` : ''}
+                {' '}Value flags compare the odds-free model with the price.
               </div>
             )}
             {enhanced.market_informed && (

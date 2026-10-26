@@ -31,6 +31,41 @@ const MAX_PRICE_AGE_MS = 36 * 60 * 60_000;
 export type MarketConsensus = Unit & { bookmakers: number; observedAt: number };
 
 let consensus = new Map<number, MarketConsensus>();
+
+/**
+ * 1X2 odds from both providers as no-vig percentages, one row per read.
+ * API-Football rows (added 26 Oct 2026: they cover the ~60% of fixtures The
+ * Odds API does not, and beat the formula there by 0.051 Brier on 96 unseen
+ * matches) are dated by the provider's own update time. Set
+ * APIF_ODDS_IN_PREDICTION=false to use The Odds API only.
+ */
+export const APIF_ODDS_IN_PREDICTION = process.env.APIF_ODDS_IN_PREDICTION !== "false";
+const ODDS_1X2_SOURCE = `(
+  SELECT fixture_id, bookmaker_key, implied_home_prob h, implied_draw_prob d, implied_away_prob a, observed_at, kickoff_at
+    FROM market_odds_snapshots
+  ${APIF_ODDS_IN_PREDICTION ? `UNION ALL
+  SELECT fixture_id, 'apif-' || bookmaker_id,
+         100 * (1 / home_odds) / (1 / home_odds + 1 / draw_odds + 1 / away_odds),
+         100 * (1 / draw_odds) / (1 / home_odds + 1 / draw_odds + 1 / away_odds),
+         100 * (1 / away_odds) / (1 / home_odds + 1 / draw_odds + 1 / away_odds),
+         provider_updated_at AT TIME ZONE 'UTC', kickoff_at AT TIME ZONE 'UTC'
+    FROM apif_odds_snapshots
+   WHERE phase = 'prematch' AND home_odds > 1 AND draw_odds > 1 AND away_odds > 1` : ""}
+) odds`;
+
+/** Bookmakers' no-vig chance of over 2.5 goals and of both teams scoring (0-1). */
+export type GoalConsensus = { over25: number | null; btts: number | null; bookmakers: number; observedAt: number };
+let goalConsensus = new Map<number, GoalConsensus>();
+
+/** Pure: average each bookmaker's no-vig two-way price. */
+export function goalConsensusFrom(rows: Array<{ o: number | null; u: number | null; y: number | null; n: number | null; observedAt: number }>): GoalConsensus | null {
+  const two = (a: number | null, b: number | null) => (a && b && a > 1 && b > 1 ? (1 / a) / (1 / a + 1 / b) : null);
+  const over = rows.map((r) => two(r.o, r.u)).filter((v): v is number => v != null);
+  const btts = rows.map((r) => two(r.y, r.n)).filter((v): v is number => v != null);
+  if (!over.length && !btts.length) return null;
+  const avg = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
+  return { over25: avg(over), btts: avg(btts), bookmakers: Math.max(over.length, btts.length), observedAt: Math.max(...rows.map((r) => r.observedAt)) };
+}
 let refreshedAt = 0;
 let refreshing: Promise<void> | null = null;
 
@@ -59,8 +94,8 @@ export function blendWithMarket(model: Unit, market: Unit, modelWeight = MARKET_
 async function refresh(): Promise<void> {
   const res = await pool.query(
     `SELECT DISTINCT ON (fixture_id, bookmaker_key)
-            fixture_id, implied_home_prob h, implied_draw_prob d, implied_away_prob a, observed_at
-       FROM market_odds_snapshots
+            fixture_id, h, d, a, observed_at
+       FROM ${ODDS_1X2_SOURCE}
       WHERE kickoff_at > NOW() - INTERVAL '3 hours'
         AND kickoff_at < NOW() + INTERVAL '8 days'
         AND observed_at < kickoff_at
@@ -77,6 +112,26 @@ async function refresh(): Promise<void> {
   const next = new Map<number, MarketConsensus>();
   for (const [id, rows] of grouped) { const c = consensusFromRows(rows); if (c) next.set(id, c); }
   consensus = next;
+  // Goal markets (API-Football only; The Odds API plan carries 1X2 only).
+  const goals = await pool.query(
+    `SELECT DISTINCT ON (fixture_id, bookmaker_id)
+            fixture_id, over25_odds o, under25_odds u, btts_yes_odds y, btts_no_odds n, provider_updated_at t
+       FROM apif_odds_snapshots
+      WHERE phase = 'prematch' AND kickoff_at > NOW() - INTERVAL '3 hours' AND kickoff_at < NOW() + INTERVAL '8 days'
+        AND provider_updated_at > NOW() - INTERVAL '36 hours'
+        AND (over25_odds IS NOT NULL OR btts_yes_odds IS NOT NULL)
+      ORDER BY fixture_id, bookmaker_id, provider_updated_at DESC`,
+  ).catch(() => ({ rows: [] as any[] }));
+  const gGrouped = new Map<number, Array<{ o: number | null; u: number | null; y: number | null; n: number | null; observedAt: number }>>();
+  for (const r of goals.rows as any[]) {
+    const id = Number(r.fixture_id); const list = gGrouped.get(id) ?? [];
+    const num = (v: unknown) => (v == null ? null : Number(v));
+    list.push({ o: num(r.o), u: num(r.u), y: num(r.y), n: num(r.n), observedAt: new Date(r.t).getTime() });
+    gGrouped.set(id, list);
+  }
+  const gNext = new Map<number, GoalConsensus>();
+  for (const [id, list] of gGrouped) { const c = goalConsensusFrom(list); if (c) gNext.set(id, c); }
+  goalConsensus = gNext;
   refreshedAt = Date.now();
 }
 
@@ -90,6 +145,13 @@ export async function ensureMarketConsensus(): Promise<void> {
 }
 
 /** Latest stored consensus for a fixture, only if it was observed before `asOf`. */
+/** Latest stored goal-market consensus for a fixture, only if observed before `asOf`. */
+export function getGoalConsensus(fixtureId: number, asOf = Date.now()): GoalConsensus | null {
+  const c = goalConsensus.get(fixtureId);
+  if (!c || c.observedAt > asOf || asOf - c.observedAt > MAX_PRICE_AGE_MS) return null;
+  return c;
+}
+
 export function getMarketConsensus(fixtureId: number, asOf = Date.now()): MarketConsensus | null {
   const c = consensus.get(fixtureId);
   if (!c || c.observedAt > asOf || asOf - c.observedAt > MAX_PRICE_AGE_MS) return null;
@@ -127,8 +189,9 @@ export function marketInformedForecast(match: MatchLike, now = Date.now()): Mark
 }
 
 /** Test hook. */
-export function __setMarketConsensusForTests(entries: Array<[number, MarketConsensus]>): void {
+export function __setMarketConsensusForTests(entries: Array<[number, MarketConsensus]>, goals: Array<[number, GoalConsensus]> = []): void {
   consensus = new Map(entries);
+  goalConsensus = new Map(goals);
   refreshedAt = Date.now();
 }
 
@@ -276,9 +339,8 @@ export async function getOddsMovement(fixtureId: number): Promise<OddsMovement |
   let value: OddsMovement | null = null;
   try {
     const res = await pool.query(
-      `SELECT bookmaker_key, EXTRACT(EPOCH FROM (kickoff_at - observed_at)) / 3600 AS hours,
-              implied_home_prob h, implied_draw_prob d, implied_away_prob a
-         FROM market_odds_snapshots
+      `SELECT bookmaker_key, EXTRACT(EPOCH FROM (kickoff_at - observed_at)) / 3600 AS hours, h, d, a
+         FROM ${ODDS_1X2_SOURCE}
         WHERE fixture_id = $1 AND kickoff_at IS NOT NULL AND observed_at < kickoff_at
           AND observed_at >= kickoff_at - INTERVAL '80 hours'`,
       [fixtureId],
@@ -342,4 +404,46 @@ export async function marketForServedPrediction(fixtureId: number, status: strin
   await ensureMarketConsensus();
   const market = getMarketConsensus(fixtureId, now);
   return market ? servedWithMarket(served, servingModel, market) : null;
+}
+
+/**
+ * Goal markets (26 Oct 2026 test, 185 settled matches with API-Football odds):
+ * over 2.5 — app 0.255 Brier (said 62%, actual 55.7%), constant guess 0.247,
+ * bookmakers 0.240; the fitted blend left 0% on the app. BTTS — app 0.253,
+ * constant 0.247, bookmakers 0.245 (gain not yet certain on this sample).
+ * So where these prices are stored, the served over 2.5 and BTTS are the
+ * bookmakers' consensus. Over 1.5 / over 3.5 are kept consistent with it.
+ */
+export const GOAL_MARKETS_FROM_ODDS = process.env.GOAL_MARKETS_FROM_ODDS !== "false";
+export type ServedGoals = { over_15: number | null; over_25: number | null; over_35: number | null; btts: number | null };
+export type GoalsApplied = {
+  goals: ServedGoals;
+  independent_goals: { over_25: number | null; btts: number | null };
+  goal_market_blend: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts"> };
+};
+
+/** Pure: replace over 2.5 / BTTS with the bookmakers' consensus and keep over 1.5 >= over 2.5 >= over 3.5. */
+export function goalsWithMarket(served: ServedGoals, market: GoalConsensus): GoalsApplied | null {
+  const pct = (v: number) => Math.round(v * 10_000) / 100;
+  const over25 = market.over25 != null ? pct(market.over25) : served.over_25;
+  const btts = market.btts != null ? pct(market.btts) : served.btts;
+  const markets = [...(market.over25 != null ? ["over_25" as const] : []), ...(market.btts != null ? ["btts" as const] : [])];
+  if (!markets.length) return null;
+  return {
+    goals: {
+      over_15: served.over_15 == null || over25 == null ? served.over_15 : Math.max(served.over_15, over25),
+      over_25: over25,
+      over_35: served.over_35 == null || over25 == null ? served.over_35 : Math.min(served.over_35, over25),
+      btts,
+    },
+    independent_goals: { over_25: served.over_25, btts: served.btts },
+    goal_market_blend: { bookmakers: market.bookmakers, odds_observed_at: new Date(market.observedAt).toISOString(), markets },
+  };
+}
+
+export async function goalMarketsForServedPrediction(fixtureId: number, status: string, kickoff: string, served: ServedGoals, now = Date.now()): Promise<GoalsApplied | null> {
+  if (!MARKET_IN_PREDICTION_ENABLED || !GOAL_MARKETS_FROM_ODDS || status !== "upcoming" || !(Date.parse(kickoff) > now)) return null;
+  await ensureMarketConsensus();
+  const market = getGoalConsensus(fixtureId, now);
+  return market ? goalsWithMarket(served, market) : null;
 }

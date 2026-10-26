@@ -388,13 +388,18 @@ async function getUpcomingAuditMatches(now: Date): Promise<Match[]> {
   );
 }
 
+/** Percent (0-100) to 0-1, null when missing. */
+function unitOrNull(v: number | null | undefined): number | null {
+  return v == null ? null : v / 100;
+}
+
 type AuditCapture = {
   prediction: AuditPrediction;
   stats: Awaited<ReturnType<typeof createCanonicalPrediction>>["stats"];
   rawComponents: RawPredictionComponents | null;
   inplayAlternative?: { model: string; home: number; draw: number; away: number };
   /** The serving model's own percentages before the bookmaker blend, when odds were blended in. */
-  independent?: { home: number; draw: number; away: number; model: string } | null;
+  independent?: { home: number; draw: number; away: number; model: string; over_25?: number | null; btts?: number | null } | null;
 };
 
 async function computeAuditCapture(
@@ -637,8 +642,9 @@ async function capturePrematchCheckpoints(now: Date) {
             home: championOwn.home / 100,
             draw: championOwn.draw / 100,
             away: championOwn.away / 100,
-            over25: capture.prediction.over25 == null ? null : capture.prediction.over25 / 100,
-            btts: capture.prediction.btts == null ? null : capture.prediction.btts / 100,
+            // Goal markets likewise: the model's own over 2.5 / BTTS before any bookmaker prices.
+            over25: unitOrNull(capture.independent?.over_25 !== undefined ? capture.independent.over_25 : capture.prediction.over25),
+            btts: unitOrNull(capture.independent?.btts !== undefined ? capture.independent.btts : capture.prediction.btts),
           },
           capture.stats,
         ).catch((err) => logger.warn({ err, fixtureId: match.id }, "challenger capture failed"));

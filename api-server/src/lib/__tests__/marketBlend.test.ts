@@ -5,7 +5,7 @@ vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: (
 const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: number; draw: number; away: number } } }));
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
-const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket } = await import("../marketBlend");
+const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket, goalConsensusFrom, goalsWithMarket, goalMarketsForServedPrediction } = await import("../marketBlend");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
 const match = { id: 5, league_id: 39, status: "upcoming", kickoff: "2026-10-25T15:00:00Z", home_team: { id: 1 }, away_team: { id: 2 } };
@@ -131,5 +131,36 @@ describe("bookmaker odds in the served prediction", () => {
     expect(await marketForServedPrediction(5, "live", "2026-10-25T15:00:00Z", served, "legacy", now)).toBeNull();
     expect(await marketForServedPrediction(6, "upcoming", "2026-10-25T15:00:00Z", served, "legacy", now)).toBeNull();
     expect(await marketForServedPrediction(5, "upcoming", "2026-10-25T11:00:00Z", served, "legacy", now)).toBeNull();
+  });
+});
+
+describe("bookmaker goal markets in the served prediction", () => {
+  it("averages each bookmaker's no-vig over 2.5 and BTTS prices", () => {
+    const c = goalConsensusFrom([
+      { o: 1.9, u: 1.9, y: 1.8, n: 2.0, observedAt: 1 },
+      { o: 2.1, u: 1.75, y: null, n: null, observedAt: 2 },
+    ])!;
+    expect(c.over25).toBeCloseTo((0.5 + (1 / 2.1) / (1 / 2.1 + 1 / 1.75)) / 2, 6);
+    expect(c.btts).toBeCloseTo((1 / 1.8) / (1 / 1.8 + 1 / 2), 6);
+    expect(c.bookmakers).toBe(2);
+    expect(goalConsensusFrom([{ o: null, u: null, y: null, n: null, observedAt: 1 }])).toBeNull();
+  });
+
+  it("serves the market's over 2.5 and BTTS, keeps the model's, and keeps over 1.5 >= 2.5 >= 3.5", () => {
+    const r = goalsWithMarket({ over_15: 70, over_25: 62, over_35: 40, btts: 61 }, { over25: 0.75, btts: 0.5, bookmakers: 6, observedAt: now })!;
+    expect(r.goals).toEqual({ over_15: 75, over_25: 75, over_35: 40, btts: 50 });
+    expect(r.independent_goals).toEqual({ over_25: 62, btts: 61 });
+    expect(r.goal_market_blend.markets).toEqual(["over_25", "btts"]);
+    const low = goalsWithMarket({ over_15: 70, over_25: 62, over_35: 45, btts: null }, { over25: 0.4, btts: null, bookmakers: 1, observedAt: now })!;
+    expect(low.goals.over_35).toBe(40);
+    expect(low.goal_market_blend.markets).toEqual(["over_25"]);
+  });
+
+  it("only changes upcoming matches with stored goal prices", async () => {
+    __setMarketConsensusForTests([], [[5, { over25: 0.6, btts: 0.55, bookmakers: 3, observedAt: now - 60_000 }]]);
+    const served = { over_15: 75, over_25: 60, over_35: 35, btts: 58 };
+    expect(await goalMarketsForServedPrediction(5, "upcoming", "2026-10-25T15:00:00Z", served, now)).not.toBeNull();
+    expect(await goalMarketsForServedPrediction(5, "live", "2026-10-25T15:00:00Z", served, now)).toBeNull();
+    expect(await goalMarketsForServedPrediction(6, "upcoming", "2026-10-25T15:00:00Z", served, now)).toBeNull();
   });
 });
