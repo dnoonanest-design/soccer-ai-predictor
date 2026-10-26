@@ -10,6 +10,7 @@ import {
 import { useParams, Link } from "wouter";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment } from "react";
+import { RecentFormPanel } from "@/components/team-recent-results";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -1526,6 +1527,14 @@ export default function MatchDetail() {
         matchId={match.id}
         homeTeamName={match.home_team.name}
         awayTeamName={match.away_team.name}
+      />
+
+      {/* Each team's last 8 matches in all competitions */}
+      <RecentFormPanel
+        homeId={match.home_team.id}
+        homeName={match.home_team.name}
+        awayId={match.away_team.id}
+        awayName={match.away_team.name}
       />
 
       {/* Match timeline — shows for live and finished matches */}

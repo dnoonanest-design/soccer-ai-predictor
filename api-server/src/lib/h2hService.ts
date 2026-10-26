@@ -13,10 +13,14 @@ interface CacheEntry<T> {
 
 const cache = new Map<string, CacheEntry<unknown>>();
 
-function getCached<T>(key: string): T | null {
+// A team's completed results only change after its next match, and the match
+// page now asks for both teams on every view.
+const TEAM_RESULTS_TTL_MS = 30 * 60 * 1000;
+
+function getCached<T>(key: string, ttlMs = CACHE_TTL_MS): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
   if (!entry) return null;
-  if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
+  if (Date.now() - entry.fetchedAt > ttlMs) return null;
   return entry.data;
 }
 
@@ -93,7 +97,7 @@ export async function getTeamRecentResults(
   teamName = "Team",
 ): Promise<TeamRecentResults> {
   const cacheKey = `team-results:${teamId}`;
-  const cached = getCached<TeamRecentResults>(cacheKey);
+  const cached = getCached<TeamRecentResults>(cacheKey, TEAM_RESULTS_TTL_MS);
   if (cached) return cached;
 
   const data = (await fetchFootball(
