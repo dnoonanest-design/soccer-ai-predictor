@@ -37,10 +37,10 @@ const PREFERRED_BOOKMAKERS = (process.env.MARKET_INTELLIGENCE_BOOKMAKERS ?? DEFA
   .filter(Boolean);
 
 export const MARKET_INTELLIGENCE_POLICY = Object.freeze({
-  corePredictionUsesBookmakerOdds: false,
-  bookmakerDataRole: "evaluation_and_learning_only",
+  corePredictionUsesBookmakerOdds: true,
+  bookmakerDataRole: "blended_into_served_prematch_prediction",
   explanation:
-    "Bookmaker prices are tracked as a separate market-intelligence dataset. They do not alter the core statistical prediction probabilities or calibration weights.",
+    "Since 26 Oct 2026 the served pre-match 1X2 prediction is blended with the bookmakers' latest stored consensus when odds are available (tested: 0.569 vs 0.637 Brier). Model code never reads odds; the blend is applied afterwards from stored snapshots. Value flags and model trials use the odds-free numbers. In-play predictions and goal markets do not use odds.",
 });
 
 type MarketSnapshot = typeof marketOddsSnapshots.$inferSelect;

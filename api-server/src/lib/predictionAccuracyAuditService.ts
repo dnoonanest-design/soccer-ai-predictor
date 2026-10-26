@@ -393,6 +393,8 @@ type AuditCapture = {
   stats: Awaited<ReturnType<typeof createCanonicalPrediction>>["stats"];
   rawComponents: RawPredictionComponents | null;
   inplayAlternative?: { model: string; home: number; draw: number; away: number };
+  /** The serving model's own percentages before the bookmaker blend, when odds were blended in. */
+  independent?: { home: number; draw: number; away: number; model: string } | null;
 };
 
 async function computeAuditCapture(
@@ -424,7 +426,7 @@ async function computeAuditCapture(
       ? `${raw.data_tier}+context-recorded`
       : raw.data_tier,
   };
-  return { prediction, stats, rawComponents: raw.raw_components ?? null, inplayAlternative: raw.inplay_alternative };
+  return { prediction, stats, rawComponents: raw.raw_components ?? null, inplayAlternative: raw.inplay_alternative, independent: raw.independent ?? null };
 }
 
 /** Plan step 5: what the sealed champion forecast was built from. */
@@ -625,13 +627,16 @@ async function capturePrematchCheckpoints(now: Date) {
         if (capture.rawComponents) await storeRawComponents(match, checkpoint, capture.rawComponents);
         // Challengers are recorded beside the sealed champion forecast, before
         // kickoff, and judged on the same fixtures after full time.
+        // Model trials compare odds-free models, so the champion's own numbers
+        // (before any bookmaker blend) sit beside each challenger.
+        const championOwn = capture.independent ?? capture.prediction;
         await recordChallengerPredictions(
           match,
           checkpoint,
           {
-            home: capture.prediction.home / 100,
-            draw: capture.prediction.draw / 100,
-            away: capture.prediction.away / 100,
+            home: championOwn.home / 100,
+            draw: championOwn.draw / 100,
+            away: championOwn.away / 100,
             over25: capture.prediction.over25 == null ? null : capture.prediction.over25 / 100,
             btts: capture.prediction.btts == null ? null : capture.prediction.btts / 100,
           },

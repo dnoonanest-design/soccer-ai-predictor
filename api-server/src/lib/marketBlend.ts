@@ -291,3 +291,55 @@ export async function getOddsMovement(fixtureId: number): Promise<OddsMovement |
   if (movementCache.size > 2000) movementCache.delete(movementCache.keys().next().value!);
   return value;
 }
+
+// ── Odds in the served pre-match prediction (25-26 Oct 2026 decision) ──────
+//
+// Test on 476 settled, sealed pre-match predictions with odds stored before
+// the prediction was captured: the original formula 0.637 Brier / 46.6%
+// correct; bookmakers' consensus at that moment 0.569 / 56.3% (gain 0.068
+// ±0.022); the fitted blend put 0% on the formula; adding opening-to-latest
+// movement made it slightly worse (0.574). For step 9 the tested best was
+// 10% step 9 / 90% odds.
+//
+// So, where odds are stored, the served pre-match 1X2 numbers are the market
+// consensus blended with the serving model at the weight below. Value flags
+// and model-vs-model trials keep using the odds-free numbers (`independent`),
+// otherwise they would compare the market with itself. Goal markets are not
+// changed (only 1X2 prices are stored).
+
+/** Weight left on each serving model when odds are available (the rest is the market). */
+export const SERVED_MODEL_WEIGHT: Record<string, number> = {
+  legacy: Number(process.env.SERVED_LEGACY_MODEL_WEIGHT ?? 0),
+  "step9-strength-ratings": MARKET_BLEND_MODEL_WEIGHT,
+};
+export const SERVED_DEFAULT_MODEL_WEIGHT = MARKET_BLEND_MODEL_WEIGHT;
+export const MARKET_IN_PREDICTION_ENABLED = process.env.MARKET_IN_PREDICTION_ENABLED !== "false";
+
+export type ServedPercent = { home_win: number; draw: number; away_win: number };
+export type MarketApplied = {
+  probs: ServedPercent;
+  independent: { home: number; draw: number; away: number; model: string };
+  market_blend: { model_weight: number; bookmakers: number; odds_observed_at: string };
+};
+
+/** Pure: blend the served percentages with a consensus (0-1) at the serving model's weight. */
+export function servedWithMarket(served: ServedPercent, servingModel: string, market: MarketConsensus): MarketApplied | null {
+  const t = served.home_win + served.draw + served.away_win;
+  if (!(t > 0)) return null;
+  const weight = Math.min(1, Math.max(0, SERVED_MODEL_WEIGHT[servingModel] ?? SERVED_DEFAULT_MODEL_WEIGHT));
+  const p = blendWithMarket({ home: served.home_win / t, draw: served.draw / t, away: served.away_win / t }, market, weight);
+  const home = Math.round(p.home * 10_000) / 100, draw = Math.round(p.draw * 10_000) / 100;
+  return {
+    probs: { home_win: home, draw, away_win: Math.round((100 - home - draw) * 100) / 100 },
+    independent: { home: served.home_win, draw: served.draw, away: served.away_win, model: servingModel },
+    market_blend: { model_weight: weight, bookmakers: market.bookmakers, odds_observed_at: new Date(market.observedAt).toISOString() },
+  };
+}
+
+/** Odds-adjusted served numbers for an upcoming fixture, or null without fresh stored odds. */
+export async function marketForServedPrediction(fixtureId: number, status: string, kickoff: string, served: ServedPercent, servingModel: string, now = Date.now()): Promise<MarketApplied | null> {
+  if (!MARKET_IN_PREDICTION_ENABLED || status !== "upcoming" || !(Date.parse(kickoff) > now)) return null;
+  await ensureMarketConsensus();
+  const market = getMarketConsensus(fixtureId, now);
+  return market ? servedWithMarket(served, servingModel, market) : null;
+}

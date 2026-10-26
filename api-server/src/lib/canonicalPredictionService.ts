@@ -49,6 +49,13 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
    * numbers at live checkpoints (percentages).
    */
   inplay_alternative?: { model: string; home: number; draw: number; away: number };
+  /**
+   * Pre-match, when bookmaker odds are stored: the model's own numbers before
+   * the odds were blended in (percentages). Value flags and model trials use these.
+   */
+  independent?: { home: number; draw: number; away: number; model: string };
+  /** How the served 1X2 numbers were blended with the bookmakers' consensus. */
+  market_blend?: { model_weight: number; bookmakers: number; odds_observed_at: string };
 };
 
 export type RawPredictionComponents = {
@@ -239,6 +246,42 @@ async function buildFallbackPrediction(match: PredictionMatch): Promise<Canonica
 }
 
 /** The only supported route from match data to a user-facing probability table. */
+/**
+ * Blend the served pre-match 1X2 numbers with the bookmakers' latest stored
+ * consensus (see marketBlend.ts for the test behind this). Model code never
+ * sees odds: this runs after the model, from stored snapshots only. Without
+ * fresh odds the model's numbers are served unchanged.
+ */
+async function applyMarketToPrediction(match: PredictionMatch, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
+  try {
+    const { marketForServedPrediction } = await import("./marketBlend");
+    const pred = result.prediction;
+    const servingModel = pred.serving_model ?? "legacy";
+    const applied = await marketForServedPrediction(match.id, match.status, match.kickoff, pred, servingModel);
+    if (!applied) return result;
+    const fair = (v: number) => (v > 0 ? Math.round((100 / v) * 100) / 100 : 0);
+    const { home_win, draw, away_win } = applied.probs;
+    return {
+      ...result,
+      prediction: {
+        ...pred,
+        home_win, draw, away_win,
+        fair_home_odds: fair(home_win), fair_draw_odds: fair(draw), fair_away_odds: fair(away_win),
+        independent: applied.independent,
+        market_blend: applied.market_blend,
+        pipeline_version: `${pred.pipeline_version}+market`,
+        reasons: [
+          `Includes bookmaker odds (${applied.market_blend.bookmakers} bookmaker${applied.market_blend.bookmakers === 1 ? "" : "s"}): the most accurate pre-match estimate in testing. Model alone: home ${applied.independent.home}% · draw ${applied.independent.draw}% · away ${applied.independent.away}%.`,
+          ...(pred.reasons ?? []),
+        ],
+      },
+    };
+  } catch (err) {
+    logger.warn({ err, fixtureId: match.id }, "market blend unavailable; serving model numbers");
+    return result;
+  }
+}
+
 export async function createCanonicalPrediction(
   match: Match,
   options: CanonicalPredictionOptions = {},
@@ -258,11 +301,13 @@ export async function createCanonicalPrediction(
     );
   } catch (err) {
     logger.warn({ err, fixtureId: match.id }, "canonical prediction: stats unavailable; attempting fallback");
-    return { prediction: await buildFallbackPrediction(predictionMatch), stats: null, circumstances: null };
+    const fallback = { prediction: await buildFallbackPrediction(predictionMatch), stats: null, circumstances: null };
+    return options.legacyOnly ? fallback : applyMarketToPrediction(predictionMatch, fallback);
   }
 
   if (!stats.home || !stats.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) {
-    return { prediction: await buildFallbackPrediction(predictionMatch), stats, circumstances: null };
+    const fallback = { prediction: await buildFallbackPrediction(predictionMatch), stats, circumstances: null };
+    return options.legacyOnly ? fallback : applyMarketToPrediction(predictionMatch, fallback);
   }
 
   const live = predictionMatch.status === "live";
@@ -318,7 +363,8 @@ export async function createCanonicalPrediction(
   // model is computed beside the live model and serves only once promoted.
   if (!live && !options.legacyOnly) {
     const { applyServingChampion } = await import("./modelChallengerService");
-    return applyServingChampion(predictionMatch, result);
+    const served = await applyServingChampion(predictionMatch, result);
+    return applyMarketToPrediction(predictionMatch, served);
   }
   if (live && !options.legacyOnly) {
     const { applyInPlayModel } = await import("./inPlayModelService");
