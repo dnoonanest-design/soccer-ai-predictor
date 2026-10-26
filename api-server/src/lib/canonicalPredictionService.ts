@@ -53,9 +53,11 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
    * Pre-match, when bookmaker odds are stored: the model's own numbers before
    * the odds were blended in (percentages). Value flags and model trials use these.
    */
-  independent?: { home: number; draw: number; away: number; model: string };
+  independent?: { home: number; draw: number; away: number; model: string; over_25?: number | null; btts?: number | null };
   /** How the served 1X2 numbers were blended with the bookmakers' consensus. */
   market_blend?: { model_weight: number; bookmakers: number; odds_observed_at: string };
+  /** Over 2.5 / BTTS taken from the bookmakers' consensus (API-Football). */
+  goal_market_blend?: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts"> };
 };
 
 export type RawPredictionComponents = {
@@ -254,11 +256,25 @@ async function buildFallbackPrediction(match: PredictionMatch): Promise<Canonica
  */
 async function applyMarketToPrediction(match: PredictionMatch, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
   try {
-    const { marketForServedPrediction } = await import("./marketBlend");
+    const { marketForServedPrediction, goalMarketsForServedPrediction } = await import("./marketBlend");
     const pred = result.prediction;
     const servingModel = pred.serving_model ?? "legacy";
     const applied = await marketForServedPrediction(match.id, match.status, match.kickoff, pred, servingModel);
-    if (!applied) return result;
+    const goals = await goalMarketsForServedPrediction(match.id, match.status, match.kickoff, {
+      over_15: pred.over_15 ?? null, over_25: pred.over_25 ?? null, over_35: pred.over_35 ?? null, btts: pred.btts ?? null,
+    });
+    if (!applied && !goals) return result;
+    if (!applied) {
+      return {
+        ...result,
+        prediction: {
+          ...pred, ...goals!.goals,
+          independent: { home: pred.home_win, draw: pred.draw, away: pred.away_win, model: servingModel, ...goals!.independent_goals },
+          goal_market_blend: goals!.goal_market_blend,
+          pipeline_version: `${pred.pipeline_version}+goal-odds`,
+        },
+      };
+    }
     const fair = (v: number) => (v > 0 ? Math.round((100 / v) * 100) / 100 : 0);
     const { home_win, draw, away_win } = applied.probs;
     return {
@@ -267,8 +283,10 @@ async function applyMarketToPrediction(match: PredictionMatch, result: Canonical
         ...pred,
         home_win, draw, away_win,
         fair_home_odds: fair(home_win), fair_draw_odds: fair(draw), fair_away_odds: fair(away_win),
-        independent: applied.independent,
+        ...(goals ? goals.goals : {}),
+        independent: { ...applied.independent, ...(goals ? goals.independent_goals : {}) },
         market_blend: applied.market_blend,
+        ...(goals ? { goal_market_blend: goals.goal_market_blend } : {}),
         pipeline_version: `${pred.pipeline_version}+market`,
         reasons: [
           `Includes bookmaker odds (${applied.market_blend.bookmakers} bookmaker${applied.market_blend.bookmakers === 1 ? "" : "s"}): the most accurate pre-match estimate in testing. Model alone: home ${applied.independent.home}% · draw ${applied.independent.draw}% · away ${applied.independent.away}%.`,
