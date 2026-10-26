@@ -5,7 +5,7 @@ import { createCanonicalPrediction } from "./canonicalPredictionService";
 import { getUnsettledPredictionFixtureIds, saveOutcomeWithStatus, savePrediction, getCalibrationReport } from "./predictionStore";
 import { runTrainingPipeline, saveLiveAlert, savePredictionSnapshot, settleTrackedBet } from "./predictionPlatformService";
 import { logger } from "./logger";
-import { valueEdge } from "./mathUtils";
+import { valueSignalsFor } from "./valueSignals";
 import { analyzeCircumstanceInfluence, getCircumstanceLearningReport } from "./circumstanceLearningService";
 import { getAiAwarenessReport, runAiAwarenessCycle } from "./aiAwareLearningService";
 import { generateBiweeklyAiUpdate, getAiMemoryUpdateReport } from "./aiMemoryUpdateService";
@@ -72,13 +72,9 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function buildValueEdges(match: Match, home: number, draw: number, away: number) {
-  const edge = valueEdge;
-  return {
-    home: edge(home, match.odds?.home_odds ?? null),
-    draw: edge(draw, match.odds?.draw_odds ?? null),
-    away: edge(away, match.odds?.away_odds ?? null),
-  };
+/** Same rule as the match page: step 9 against the price, pre-match only (see valueSignals.ts). */
+function buildValueEdges(match: Match) {
+  return match.status === "upcoming" ? valueSignalsFor(match) : null;
 }
 
 async function recordJob(
@@ -138,7 +134,7 @@ async function computeAndStoreMatch(match: Match) {
   const { prediction: raw, circumstances, stats } = await createCanonicalPrediction(match, {
     collectCircumstances: true,
   });
-  const valueEdges = buildValueEdges(match, raw.home_win, raw.draw, raw.away_win);
+  const valueEdges = buildValueEdges(match);
   const liveMomentum = raw.live_momentum;
 
   await savePredictionSnapshot({

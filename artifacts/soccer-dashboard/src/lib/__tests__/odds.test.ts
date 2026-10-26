@@ -28,9 +28,19 @@ describe("dashboard model/market quality gates", () => {
       { outcome: "HOME", delta: 56, market: 90, history: 34 },
       { outcome: "AWAY", delta: 34, market: 3, history: 37 },
     ]);
-    expect(findModelEdges(market, model, 5)).toEqual([
-      { outcome: "DRAW", delta: 22, market: 7, modelProbability: 29 },
+    // The draw gap (22 points at a 7% market price) is a long shot with an
+    // implausible gap, so it is not an edge either.
+    expect(findModelEdges(market, model, 5)).toEqual([]);
+  });
+
+  it("flags only believable gaps on non-long-shot prices", () => {
+    expect(findModelEdges({ home_win: 45, draw: 28, away_win: 27 }, { home_win: 52, draw: 26, away_win: 22 }, 5)).toEqual([
+      { outcome: "HOME", delta: 7, market: 45, modelProbability: 52 },
     ]);
+    // 15 points above the market: more likely model error.
+    expect(findModelEdges({ home_win: 45, draw: 28, away_win: 27 }, { home_win: 60, draw: 22, away_win: 18 }, 5)).toEqual([]);
+    // Odds longer than 6.0 (market under 16.7%).
+    expect(findModelEdges({ home_win: 70, draw: 18, away_win: 12 }, { home_win: 60, draw: 20, away_win: 20 }, 5)).toEqual([]);
   });
 });
 
