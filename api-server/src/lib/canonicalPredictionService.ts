@@ -58,6 +58,8 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
   market_blend?: { model_weight: number; bookmakers: number; odds_observed_at: string };
   /** Over 2.5 / BTTS taken from the bookmakers' consensus (API-Football). */
   goal_market_blend?: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts"> };
+  /** Cup tie between divisions: each club's tier and the formula's numbers before the division-gap forecast. */
+  cross_division?: { home_tier: number; away_tier: number; formula: { home_win: number; draw: number; away_win: number } };
 };
 
 export type RawPredictionComponents = {
@@ -300,6 +302,37 @@ async function applyMarketToPrediction(match: PredictionMatch, result: Canonical
   }
 }
 
+/**
+ * Cup ties between clubs from different divisions: serve the division-gap
+ * forecast (crossDivision.ts) with a small share of the formula. Pre-match
+ * only; same-division ties and league matches are unchanged.
+ */
+async function applyCrossDivision(match: PredictionMatch, result: CanonicalPredictionResult): Promise<CanonicalPredictionResult> {
+  try {
+    if (match.status !== "upcoming") return result;
+    const { teamDivision, blendCrossDivision } = await import("./crossDivision");
+    const [homeTier, awayTier] = await Promise.all([teamDivision(match.home_team.id, match.league_id), teamDivision(match.away_team.id, match.league_id)]);
+    const pred = result.prediction;
+    const blended = blendCrossDivision(pred, homeTier, awayTier);
+    if (!blended) return result;
+    const fair = (v: number) => (v > 0 ? Math.round((100 / v) * 100) / 100 : 0);
+    return {
+      ...result,
+      prediction: {
+        ...pred,
+        ...blended,
+        fair_home_odds: fair(blended.home_win), fair_draw_odds: fair(blended.draw), fair_away_odds: fair(blended.away_win),
+        cross_division: { home_tier: homeTier!, away_tier: awayTier!, formula: { home_win: pred.home_win, draw: pred.draw, away_win: pred.away_win } },
+        reasons: [...(pred.reasons ?? []), `Cup tie between divisions (tier ${homeTier} v tier ${awayTier}): the division gap drives this forecast.`],
+        pipeline_version: `${pred.pipeline_version}+cross-division`,
+      },
+    };
+  } catch (err) {
+    logger.warn({ err, fixtureId: match.id }, "cross-division adjustment unavailable");
+    return result;
+  }
+}
+
 export async function createCanonicalPrediction(
   match: Match,
   options: CanonicalPredictionOptions = {},
@@ -319,12 +352,12 @@ export async function createCanonicalPrediction(
     );
   } catch (err) {
     logger.warn({ err, fixtureId: match.id }, "canonical prediction: stats unavailable; attempting fallback");
-    const fallback = { prediction: await buildFallbackPrediction(predictionMatch), stats: null, circumstances: null };
+    const fallback = await applyCrossDivision(predictionMatch, { prediction: await buildFallbackPrediction(predictionMatch), stats: null, circumstances: null });
     return options.legacyOnly ? fallback : applyMarketToPrediction(predictionMatch, fallback);
   }
 
   if (!stats.home || !stats.away || stats.home.matches_played <= 0 || stats.away.matches_played <= 0) {
-    const fallback = { prediction: await buildFallbackPrediction(predictionMatch), stats, circumstances: null };
+    const fallback = await applyCrossDivision(predictionMatch, { prediction: await buildFallbackPrediction(predictionMatch), stats, circumstances: null });
     return options.legacyOnly ? fallback : applyMarketToPrediction(predictionMatch, fallback);
   }
 
@@ -347,7 +380,7 @@ export async function createCanonicalPrediction(
     });
   }
 
-  const result: CanonicalPredictionResult = {
+  const formulaResult: CanonicalPredictionResult = {
     stats,
     circumstances,
     prediction: {
@@ -375,6 +408,7 @@ export async function createCanonicalPrediction(
       serving_model: "legacy",
     },
   };
+  const result = live ? formulaResult : await applyCrossDivision(predictionMatch, formulaResult);
 
   // A challenger that has passed the promotion gate serves pre-match 1X2
   // numbers in place of the original formula. In play, the fitted in-play
