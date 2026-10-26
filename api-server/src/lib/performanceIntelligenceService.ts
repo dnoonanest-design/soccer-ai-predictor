@@ -118,7 +118,7 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
                  ORDER BY samples DESC`, [cutoff]),
     // Market benchmark on identical fixtures. "Closing" = each bookmaker's
     // last no-vig price observed before kickoff, averaged across bookmakers.
-    // Odds are compared after the fact only; they never feed the model.
+    // Compares the sealed served prediction with the closing market (served pre-match numbers include stored odds since 26 Oct 2026).
     query(`${canonical}, audited AS (
              SELECT fixture_id, kickoff_at, home_win_prob, draw_prob, away_win_prob,
                     actual_outcome, correct, brier_score
@@ -241,8 +241,10 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
     dailyTrend: metricRows(recentDays.rows).map((row) => ({ ...row, day: row.day })),
     lifecycleWarnings: Array.from(warnings.entries()).map(([reason, samples]) => ({ reason, samples })).sort((a,b) => b.samples-a.samples),
     marketBenchmark: {
-      policy: "external-evaluation-only",
-      corePredictionUsesBookmakerOdds: false,
+      // Served pre-match predictions include stored odds since 26 Oct 2026; this
+      // compares the served (sealed) prediction with the closing market.
+      policy: "served-prediction-vs-closing-market",
+      corePredictionUsesBookmakerOdds: true,
       samples: Number(marketRow.samples ?? 0),
       averageMarketMovementPctPoints: n(marketRow.avg_market_movement),
       averageModelMarketGapPctPoints: n(marketRow.avg_model_market_gap),
@@ -259,7 +261,7 @@ export async function getPerformanceIntelligenceReport(daysInput = 14) {
     learningSafety: {
       minimumPromotionSamples: 500,
       minimumResidualSamples: 100,
-      principle: "Promote only after chronological holdout improvement; bookmaker prices are excluded from training.",
+      principle: "Promote only after chronological holdout improvement; bookmaker prices are excluded from model training and model trials (they are blended into the served pre-match numbers afterwards).",
     },
   };
 }

@@ -101,12 +101,16 @@ router.get("/matches/:match_id/stats", async (req, res) => {
           }
           enhancedPred = {
             ...prediction,
-            market_informed: marketInformed,
+            // The served prediction already includes the odds when it has a market blend.
+            market_informed: prediction.market_blend ? null : marketInformed,
             odds_movement: oddsMovement,
+            // Value flags compare the odds-free model with the price. The served
+            // numbers include the odds when they are stored, so using them here
+            // would compare the market with itself.
             value_edges: {
-              home: valueEdge(normHome, match.odds?.home_odds ?? null),
-              draw: valueEdge(normDraw, match.odds?.draw_odds ?? null),
-              away: valueEdge(normAway, match.odds?.away_odds ?? null),
+              home: valueEdge(prediction.independent?.home ?? normHome, match.odds?.home_odds ?? null),
+              draw: valueEdge(prediction.independent?.draw ?? normDraw, match.odds?.draw_odds ?? null),
+              away: valueEdge(prediction.independent?.away ?? normAway, match.odds?.away_odds ?? null),
             },
           };
 

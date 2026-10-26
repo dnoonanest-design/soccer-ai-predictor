@@ -717,6 +717,13 @@ function XGPanel({
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">BTTS</div><div className="font-mono font-black">{enhanced.btts?.toFixed?.(1) ?? enhanced.btts}%</div></div>
               <div className="rounded-lg bg-muted/40 p-2"><div className="text-[8px] uppercase text-muted-foreground">Fair H</div><div className="font-mono font-black">{enhanced.fair_home_odds}</div></div>
             </div>
+            {enhanced.market_blend && enhanced.independent && (
+              <div className="rounded-lg border border-primary/25 bg-primary/5 p-2 text-[10px] text-muted-foreground" data-testid="market-blend-note">
+                <span className="font-semibold text-primary">Includes bookmaker odds</span> ({enhanced.market_blend.bookmakers} book{enhanced.market_blend.bookmakers === 1 ? '' : 's'}), the most accurate pre-match estimate in testing.
+                {' '}Model alone: H {Number(enhanced.independent.home).toFixed(1)}% · D {Number(enhanced.independent.draw).toFixed(1)}% · A {Number(enhanced.independent.away).toFixed(1)}%.
+                {' '}Value flags compare the model alone with the price.
+              </div>
+            )}
             {enhanced.market_informed && (
               <div className="rounded-lg border border-border/40 p-2 space-y-1" data-testid="market-informed">
                 <div className="flex items-center justify-between">

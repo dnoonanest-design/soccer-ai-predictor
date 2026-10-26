@@ -5,7 +5,7 @@ vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: (
 const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: number; draw: number; away: number } } }));
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
-const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, oddsMovementFrom } = await import("../marketBlend");
+const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket } = await import("../marketBlend");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
 const match = { id: 5, league_id: 39, status: "upcoming", kickoff: "2026-10-25T15:00:00Z", home_team: { id: 1 }, away_team: { id: 2 } };
@@ -104,5 +104,32 @@ describe("pre-match odds movement", () => {
     expect(m.points.map((p) => p.label)).toEqual(["1 day", "Latest"]);
     expect(m.shortening).toBeNull();
     expect(m.drifting).toBeNull();
+  });
+});
+
+describe("bookmaker odds in the served prediction", () => {
+  const market = { home: 0.5, draw: 0.3, away: 0.2, bookmakers: 4, observedAt: now - 60_000 };
+  const served = { home_win: 30, draw: 30, away_win: 40 };
+
+  it("serves the market for the original formula (tested weight 0) and keeps the model's own numbers", () => {
+    const r = servedWithMarket(served, "legacy", market)!;
+    expect(r.probs.home_win).toBe(50);
+    expect(r.probs.home_win + r.probs.draw + r.probs.away_win).toBeCloseTo(100, 6);
+    expect(r.independent).toEqual({ home: 30, draw: 30, away: 40, model: "legacy" });
+    expect(r.market_blend.model_weight).toBe(0);
+    expect(r.market_blend.bookmakers).toBe(4);
+  });
+
+  it("keeps 10% of step 9 when it serves", () => {
+    const r = servedWithMarket(served, "step9-strength-ratings", market)!;
+    expect(r.probs.home_win).toBeCloseTo(48, 1); // 0.1 * 30 + 0.9 * 50
+  });
+
+  it("only changes upcoming matches with fresh stored odds", async () => {
+    __setMarketConsensusForTests([[5, market]]);
+    expect(await marketForServedPrediction(5, "upcoming", "2026-10-25T15:00:00Z", served, "legacy", now)).not.toBeNull();
+    expect(await marketForServedPrediction(5, "live", "2026-10-25T15:00:00Z", served, "legacy", now)).toBeNull();
+    expect(await marketForServedPrediction(6, "upcoming", "2026-10-25T15:00:00Z", served, "legacy", now)).toBeNull();
+    expect(await marketForServedPrediction(5, "upcoming", "2026-10-25T11:00:00Z", served, "legacy", now)).toBeNull();
   });
 });
