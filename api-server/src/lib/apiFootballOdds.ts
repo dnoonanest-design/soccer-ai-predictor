@@ -146,6 +146,16 @@ export function apifReadDue(hoursToKickoff: number, hoursSinceLastRead: number |
 }
 
 const MAX_CALLS_PER_RUN = Math.max(1, Number(process.env.APIF_ODDS_MAX_CALLS_PER_RUN ?? 30));
+/**
+ * Fixtures read without any odds coming back. Without this the same soonest
+ * 30 fixtures (no API-Football odds yet) were picked every run and later
+ * fixtures were never reached (26 Oct: 35 of 269 covered, Copa del Rey none).
+ */
+const lastAttemptAt = new Map<number, number>();
+/** How long to wait before re-reading a fixture that returned no odds. */
+export function noOddsBackoffHours(hoursToKickoff: number): number {
+  return hoursToKickoff > 24 ? 6 : hoursToKickoff > 6 ? 2 : 0.5;
+}
 let samplerRunning = false;
 let lastSampler: Record<string, unknown> | null = null;
 
@@ -168,11 +178,20 @@ export async function runApifOddsSampler() {
     }
     const due = upcoming
       .map((m) => ({ m, h: (Date.parse(m.kickoff) - now) / 3.6e6, since: last.has(m.id) ? (now - last.get(m.id)!) / 3.6e6 : null }))
-      .filter((x) => apifReadDue(x.h, x.since))
+      .filter((x) => {
+        const tried = lastAttemptAt.get(x.m.id);
+        // A read that found nothing waits out a back-off instead of blocking the queue.
+        if (tried && (x.since == null || now - tried < x.since * 3.6e6) && now - tried < noOddsBackoffHours(x.h) * 3.6e6) return false;
+        return apifReadDue(x.h, x.since);
+      })
       .sort((a, b) => a.h - b.h)
       .slice(0, MAX_CALLS_PER_RUN);
     let stored = 0;
-    for (const { m } of due) stored += (await capturePrematchOdds(m.id, m.kickoff, "sampler").catch(() => ({ stored: 0 }))).stored;
+    for (const { m } of due) {
+      lastAttemptAt.set(m.id, Date.now());
+      stored += (await capturePrematchOdds(m.id, m.kickoff, "sampler").catch(() => ({ stored: 0 }))).stored;
+    }
+    if (lastAttemptAt.size > 5000) for (const k of [...lastAttemptAt.keys()].slice(0, 1000)) lastAttemptAt.delete(k);
     lastSampler = { at: new Date().toISOString(), upcoming: upcoming.length, due: due.length, stored };
     return lastSampler;
   } finally {
@@ -263,4 +282,69 @@ export function startApifOddsWorkers() {
   setTimeout(pre, 45_000);
   setInterval(pre, 5 * 60_000).unref?.();
   setInterval(live, 60_000).unref?.();
+}
+
+
+// ── Display odds for fixtures The Odds API does not price ───────────────────
+
+/** Preferred bookmakers for the single price shown on a card (API-Football ids). */
+const DISPLAY_BOOKMAKERS = [8, 16, 6, 1, 11];
+type DisplayOdds = { home_win: number; draw: number; away_win: number; home_odds: number; draw_odds: number; away_odds: number; bookmaker: string; bookmaker_key: string; last_updated: string };
+let displayOdds = new Map<number, DisplayOdds>();
+let displayRefreshedAt = 0;
+let displayRefreshing: Promise<void> | null = null;
+
+/** Pure: pick one bookmaker's latest 1X2 price and express it like The Odds API prices on a match. */
+export function displayOddsFrom(rows: Array<{ bookId: number; name: string | null; h: number; d: number; a: number; updated: string }>): DisplayOdds | null {
+  const usable = rows.filter((r) => r.h > 1 && r.d > 1 && r.a > 1);
+  if (!usable.length) return null;
+  const pick = DISPLAY_BOOKMAKERS.map((id) => usable.find((r) => r.bookId === id)).find(Boolean) ?? usable[0];
+  const q = [1 / pick.h, 1 / pick.d, 1 / pick.a]; const t = q[0] + q[1] + q[2];
+  const home = Math.round((q[0] / t) * 1000) / 10, draw = Math.round((q[1] / t) * 1000) / 10;
+  return {
+    home_win: home, draw, away_win: Math.round((100 - home - draw) * 10) / 10,
+    home_odds: pick.h, draw_odds: pick.d, away_odds: pick.a,
+    bookmaker: `${pick.name ?? "Bookmaker"} (via API-Football)`, bookmaker_key: `apif-${pick.bookId}`, last_updated: pick.updated,
+  };
+}
+
+async function refreshDisplayOdds() {
+  const res = await pool.query(
+    `SELECT DISTINCT ON (fixture_id, bookmaker_id) fixture_id, bookmaker_id, bookmaker_name, home_odds, draw_odds, away_odds, provider_updated_at
+       FROM apif_odds_snapshots
+      WHERE phase = 'prematch' AND kickoff_at > NOW() AND kickoff_at < NOW() + INTERVAL '8 days'
+        AND home_odds IS NOT NULL AND draw_odds IS NOT NULL AND away_odds IS NOT NULL
+      ORDER BY fixture_id, bookmaker_id, provider_updated_at DESC`,
+  );
+  const grouped = new Map<number, Array<{ bookId: number; name: string | null; h: number; d: number; a: number; updated: string }>>();
+  for (const r of res.rows as any[]) {
+    const id = Number(r.fixture_id); const l = grouped.get(id) ?? [];
+    l.push({ bookId: Number(r.bookmaker_id), name: r.bookmaker_name ?? null, h: Number(r.home_odds), d: Number(r.draw_odds), a: Number(r.away_odds), updated: new Date(r.provider_updated_at).toISOString() });
+    grouped.set(id, l);
+  }
+  const next = new Map<number, DisplayOdds>();
+  for (const [id, l] of grouped) { const o = displayOddsFrom(l); if (o) next.set(id, o); }
+  displayOdds = next;
+  displayRefreshedAt = Date.now();
+}
+
+/**
+ * For upcoming matches without a bookmaker price from The Odds API, show the
+ * latest API-Football price instead (cards, value flags and odds panels all
+ * read `match.odds`). Never throws; matches are returned unchanged on error.
+ */
+export async function fillMissingOdds<T extends { id: number; status: string; odds?: any }>(matches: T[]): Promise<T[]> {
+  try {
+    if (Date.now() - displayRefreshedAt > 2 * 60_000) {
+      displayRefreshing ??= refreshDisplayOdds().catch((err) => { displayRefreshedAt = Date.now(); logger.warn({ err }, "display odds refresh failed"); }).finally(() => { displayRefreshing = null; });
+      await displayRefreshing;
+    }
+    return matches.map((m) => {
+      if (m.status !== "upcoming" || m.odds?.home_odds) return m;
+      const o = displayOdds.get(m.id);
+      return o ? { ...m, odds: { ...(m.odds ?? {}), ...o } } : m;
+    });
+  } catch {
+    return matches;
+  }
 }

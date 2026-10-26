@@ -5,6 +5,7 @@ import { getFuturePredictionBaselineStatus } from "../lib/futurePredictionBaseli
 import { getTrackedCompetition, isTrackedLeague } from "../lib/leagueConfig";
 import { canonicalPrematchAuditCte } from "../lib/canonicalPrematchAudit";
 import { verifyPredictionAuditIntegrity } from "../lib/predictionAccuracyAuditService";
+import { withLatestMarket } from "../lib/servedPredictionMarket";
 
 const router = Router();
 const DAY_MS = 24 * 60 * 60_000;
@@ -170,7 +171,7 @@ async function readPredictions(start: Date, end: Date) {
     [start, end, integrity.validIds],
   );
 
-  return result.rows
+  const fixtures = result.rows
     .map((row) => {
       const home = Number(row.home_win_prob ?? 0);
       const draw = Number(row.draw_prob ?? 0);
@@ -205,6 +206,7 @@ async function readPredictions(start: Date, end: Date) {
       };
     })
     .filter((fixture) => fixture.league_id != null && isTrackedLeague(fixture.league_id));
+  return withLatestMarket(fixtures);
 }
 
 function grouped(fixtures: any[]) {

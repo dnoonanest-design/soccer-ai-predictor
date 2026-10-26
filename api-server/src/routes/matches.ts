@@ -7,6 +7,7 @@ import {
   isApiFootballProviderError,
 } from "../lib/apiFootballReliability";
 import { sortFixturesForDisplay } from "../lib/fixtureOrdering";
+import { fillMissingOdds } from "../lib/apiFootballOdds";
 
 const BLOCKED_NAME_KEYWORDS = [
   "reserve", "reserva", " res ", "res.", "u20", "u19", "u18", "u17", "u16", "u15",
@@ -59,7 +60,7 @@ router.get("/matches", async (req, res) => {
     }
 
     const matches = await getAllMatches(leagueId, status);
-    return res.json(sortFixturesForDisplay(matches.filter(inProductScope)));
+    return res.json(sortFixturesForDisplay(await fillMissingOdds(matches.filter(inProductScope))));
   } catch (err) {
     return handleMatchRouteError(err, res);
   }
@@ -68,7 +69,7 @@ router.get("/matches", async (req, res) => {
 router.get("/fixtures/upcoming", async (_req, res) => {
   try {
     const matches = await getAllMatches(null, "upcoming");
-    return res.json(sortFixturesForDisplay(matches.filter(inProductScope)));
+    return res.json(sortFixturesForDisplay(await fillMissingOdds(matches.filter(inProductScope))));
   } catch (err) {
     return handleMatchRouteError(err, res);
   }
@@ -86,7 +87,7 @@ router.get("/matches/:match_id", async (req, res) => {
       return res.status(404).json({ error: "Match not found" });
     }
 
-    return res.json(match);
+    return res.json((await fillMissingOdds([match]))[0]);
   } catch (err) {
     return handleMatchRouteError(err, res);
   }
