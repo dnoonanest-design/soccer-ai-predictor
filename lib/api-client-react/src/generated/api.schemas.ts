@@ -211,6 +211,44 @@ export interface PresentationTeam {
   top_scorer: PresentationPlayer | null;
   top_assister: PresentationPlayer | null;
   top_fouler: PresentationPlayer | null;
+  /** Top 5 lists, season to date (added Oct 2026; optional for older servers). */
+  star_players?: PresentationLeader[];
+  top_scorers?: PresentationLeader[];
+  top_assisters?: PresentationLeader[];
+  most_fouls?: PresentationLeader[];
+  /** Players on a goal-scoring run in the team's recent matches. */
+  scoring_form?: PresentationScoringForm[];
+  scoring_form_matches?: number;
+}
+
+/** starting | bench | not_in_squad | injured_or_suspended | doubtful; null until lineups or absences are known. */
+export type PresentationLineupStatus = "starting" | "bench" | "not_in_squad" | "injured_or_suspended" | "doubtful";
+
+export interface PresentationLeader extends PresentationPlayer {
+  goals: number;
+  assists: number;
+  fouls: number;
+  yellow_cards: number;
+  red_cards: number;
+  /** @nullable */
+  rating: number | null;
+  minutes?: number;
+  /** @nullable */
+  lineup_status?: PresentationLineupStatus | null;
+  /** @nullable */
+  absence_reason?: string | null;
+}
+
+export interface PresentationScoringForm {
+  id: number;
+  name: string;
+  scoring_streak: number;
+  goals_last5: number;
+  matches_last5: number;
+  /** @nullable */
+  last_goal_at: string | null;
+  /** @nullable */
+  lineup_status?: PresentationLineupStatus | null;
 }
 
 export interface MatchPresentation {

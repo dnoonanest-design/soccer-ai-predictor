@@ -210,7 +210,7 @@ async function quotaOptimizedFetch(input: FetchInput, init?: RequestInit): Promi
   }
 
   const cached = responseCache.get(url);
-  if (cached && Date.now() - cached.fetchedAt < cacheTtl(parsed)) {
+  if (cached && Date.now() - cached.fetchedAt < cacheTtl(parsed, cached.body)) {
     cacheHits++;
     estimatedCallsSaved++;
     return restore(cached);
@@ -545,7 +545,25 @@ function updateFixtureCaches(parsed: URL, stored: StoredResponse): void {
   }
 }
 
-function cacheTtl(parsed: URL): number {
+/**
+ * Lineups are published about 20-60 minutes before kickoff. An answer without
+ * both starting XIs is re-checked after 2 minutes; holding it for 30 minutes
+ * hid published lineups until close to kickoff.
+ */
+export const LINEUPS_PENDING_TTL_MS = 2 * 60_000;
+export const LINEUPS_PUBLISHED_TTL_MS = 30 * 60_000;
+export function lineupsCacheTtl(body: string | undefined): number {
+  try {
+    const json = JSON.parse(body ?? "") as { response?: Array<{ startXI?: unknown[] }> };
+    const teams = Array.isArray(json.response) ? json.response : [];
+    const published = teams.length >= 2 && teams.every((t) => Array.isArray(t.startXI) && t.startXI.length >= 11);
+    return published ? LINEUPS_PUBLISHED_TTL_MS : LINEUPS_PENDING_TTL_MS;
+  } catch {
+    return LINEUPS_PENDING_TTL_MS;
+  }
+}
+
+function cacheTtl(parsed: URL, body?: string): number {
   if (parsed.pathname === "/fixtures") {
     if (parsed.searchParams.has("date")) return SCHEDULE_REFRESH_MS;
     if (parsed.searchParams.has("ids") || parsed.searchParams.has("id")) return LIVE_POLL_MS;
@@ -558,7 +576,7 @@ function cacheTtl(parsed: URL): number {
   if (parsed.pathname === "/injuries") return 60 * 60_000;
   if (parsed.pathname === "/leagues") return 24 * 60 * 60_000;
   if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return LIVE_POLL_MS;
-  if (parsed.pathname === "/fixtures/lineups") return 30 * 60_000;
+  if (parsed.pathname === "/fixtures/lineups") return lineupsCacheTtl(body);
   return 5 * 60_000;
 }
 
