@@ -10,6 +10,29 @@ import { PredictionWarmupError } from "../lib/canonicalPredictionService";
 
 const router: IRouter = Router();
 
+/**
+ * Step 9's odds-free probabilities for upcoming fixtures with bookmaker odds,
+ * for the dashboard's value tab. Value is only judged against this model.
+ */
+router.get("/model/value-signals", async (_req, res) => {
+  try {
+    const { getAllMatches } = await import("../lib/soccerService");
+    const { ensureStrengthModel } = await import("../lib/strengthModel");
+    const { valueSignalsFor, VALUE_RULES } = await import("../lib/valueSignals");
+    void ensureStrengthModel();
+    const matches = (await getAllMatches(null, "upcoming")).filter((m) => m.status === "upcoming" && m.odds?.home_odds);
+    const fixtures = matches.flatMap((m) => {
+      const v = valueSignalsFor(m);
+      return v ? [{ fixture_id: m.id, ...v }] : [];
+    });
+    res.set("Cache-Control", "public, max-age=60");
+    return res.json({ rules: VALUE_RULES, fixtures });
+  } catch (err) {
+    logger.error({ err }, "value signals failed");
+    return res.status(500).json({ error: "Value signals are temporarily unavailable" });
+  }
+});
+
 /** Champion vs challengers on identical unseen fixtures, plus the promotion rules. */
 router.get("/model/challengers", async (_req, res) => {
   try {

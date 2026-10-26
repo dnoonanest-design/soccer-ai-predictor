@@ -765,7 +765,7 @@ function XGPanel({
             )}
             {enhanced.value_edges && (
               <div className="text-[10px] text-muted-foreground" data-testid="value-experimental-note">
-                Value flags are experimental: bookmakers' closing odds have been more accurate than this model so far, so a gap is more often model error than real value.
+                Value flags are experimental and come from step 9 only (odds-free), never long shots over 6.0 or gaps over 12 points. Closing odds are still more accurate than any model, so a gap is more often model error than real value.
               </div>
             )}
             {enhanced.value_edges && (
@@ -774,6 +774,9 @@ function XGPanel({
                   <div key={label} className={`rounded-lg p-2 ${edge.is_value ? 'bg-primary/15' : 'bg-muted/30'}`}>
                     <div className="text-[8px] uppercase text-muted-foreground">{label} value</div>
                     <div className="font-mono font-black">{edge.edge_pct > 0 ? '+' : ''}{edge.edge_pct}%</div>
+                    {edge.excluded && (
+                      <div className="text-[8px] text-muted-foreground mt-0.5">{edge.excluded === 'long_shot' ? 'Long shot · not flagged' : 'Gap too large · not flagged'}</div>
+                    )}
                     {edge.is_value && enhanced.odds_movement?.drifting === String(label).toLowerCase() && (
                       <div className="text-[8px] text-amber-500 mt-0.5" data-testid="value-drift-warning">Odds drifting · caution</div>
                     )}

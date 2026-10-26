@@ -382,12 +382,34 @@ export default function Dashboard() {
     return map;
   }, [xgData, storedData, visibleMatches]);
 
+  // Value is judged only against step 9 (odds-free); the original formula and
+  // the quick xG model are too far from the market for their gaps to mean value.
+  const { data: valueSignals } = useQuery({
+    queryKey: ["value-signals"],
+    queryFn: async () => {
+      const response = await fetch("/api/model/value-signals");
+      if (!response.ok) throw new Error("Value signals unavailable");
+      return response.json() as Promise<{ fixtures: Array<{ fixture_id: number; model_probabilities: { home: number; draw: number; away: number } }> }>;
+    },
+    refetchInterval: 2 * 60_000,
+    staleTime: 60_000,
+    gcTime: 10 * 60_000,
+    placeholderData: keepPreviousData,
+  });
+  const valueModelMap = useMemo(() => {
+    const map = new Map<number, { home_win: number; draw: number; away_win: number }>();
+    for (const f of valueSignals?.fixtures ?? []) {
+      map.set(f.fixture_id, { home_win: f.model_probabilities.home, draw: f.model_probabilities.draw, away_win: f.model_probabilities.away });
+    }
+    return map;
+  }, [valueSignals]);
+
   // A halftime-only backtest cannot price a live match state.
   const valueBetMap = useMemo<Map<number, ModelEdge[]>>(() => {
     if (!visibleMatches) return new Map();
     const map = new Map<number, ModelEdge[]>();
     for (const match of visibleMatches) {
-      const prediction = xgMap.get(match.id);
+      const prediction = valueModelMap.get(match.id);
       if (match.status !== "upcoming" || !match.odds || !prediction) {
         map.set(match.id, []);
         continue;
@@ -395,17 +417,17 @@ export default function Dashboard() {
       map.set(match.id, findModelEdges(match.odds, prediction, threshold));
     }
     return map;
-  }, [visibleMatches, xgMap, threshold]);
+  }, [visibleMatches, valueModelMap, threshold]);
 
   const modelGapMap = useMemo<Map<number, ModelGap[]>>(() => {
     const map = new Map<number, ModelGap[]>();
     for (const match of visibleMatches ?? []) {
-      const prediction = xgMap.get(match.id);
+      const prediction = valueModelMap.get(match.id);
       if (match.status !== "upcoming" || !match.odds || !prediction) continue;
       map.set(match.id, findModelGaps(match.odds, prediction));
     }
     return map;
-  }, [visibleMatches, xgMap]);
+  }, [visibleMatches, valueModelMap]);
 
   const totalValueBets = useMemo(() => {
     let count = 0;
@@ -596,7 +618,7 @@ export default function Dashboard() {
         valueSortedMatches.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-yellow-400/20 rounded-lg">
             <Zap className="w-12 h-12 mb-4 opacity-20 text-yellow-400" />
-            <p className="font-mono text-sm">No upcoming model edges at ≥{threshold} percentage-point threshold.</p>
+            <p className="font-mono text-sm">No upcoming step 9 edges at ≥{threshold} percentage points (odds 6.0 or shorter, gap up to 12 points).</p>
             <p className="text-xs mt-1">Edges compare the prematch model probability with the market-implied probability.</p>
           </div>
         ) : (

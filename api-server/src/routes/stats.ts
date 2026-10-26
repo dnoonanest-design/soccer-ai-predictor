@@ -7,7 +7,6 @@ import { logger } from "../lib/logger";
 import { savePrediction } from "../lib/predictionStore";
 import { saveLiveAlert, savePredictionSnapshot } from "../lib/predictionPlatformService";
 import { createCanonicalPrediction } from "../lib/canonicalPredictionService";
-import { valueEdge } from "../lib/mathUtils";
 
 const router = Router();
 
@@ -104,14 +103,16 @@ router.get("/matches/:match_id/stats", async (req, res) => {
             // The served prediction already includes the odds when it has a market blend.
             market_informed: prediction.market_blend ? null : marketInformed,
             odds_movement: oddsMovement,
-            // Value flags compare the odds-free model with the price. The served
-            // numbers include the odds when they are stored, so using them here
-            // would compare the market with itself.
-            value_edges: {
-              home: valueEdge(prediction.independent?.home ?? normHome, match.odds?.home_odds ?? null),
-              draw: valueEdge(prediction.independent?.draw ?? normDraw, match.odds?.draw_odds ?? null),
-              away: valueEdge(prediction.independent?.away ?? normAway, match.odds?.away_odds ?? null),
-            },
+            // Value flags: step 9 (odds-free) against the price, pre-match only,
+            // with the long-shot and implausible-gap guards in valueSignals.ts.
+            // Null when step 9 cannot forecast the match: no flag rather than a
+            // flag from the original formula.
+            value_edges: match.status === "upcoming" ? await (async () => {
+              const { valueSignalsFor } = await import("../lib/valueSignals");
+              const { ensureStrengthModel } = await import("../lib/strengthModel");
+              void ensureStrengthModel();
+              return valueSignalsFor(match);
+            })().catch(() => null) : null,
           };
 
           const confidenceScore = Number(prediction.confidence_score ?? 0);

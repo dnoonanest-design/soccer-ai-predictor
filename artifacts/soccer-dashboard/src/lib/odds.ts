@@ -51,6 +51,10 @@ const COMPLETE_MARKET_MAX = 110;
 const MODEL_TOTAL_MIN = 98;
 const MODEL_TOTAL_MAX = 102;
 const MODEL_GAP_REVIEW_THRESHOLD = 25;
+/** Same guards as the server (valueSignals.ts): no long shots (odds over 6.0)… */
+export const VALUE_MIN_MARKET_PCT = 100 / 6;
+/** …and no gap over 12 points, which in testing was model error far more often than value. */
+export const VALUE_MAX_GAP_POINTS = 12;
 
 function isProbability(value: number | null | undefined): value is number {
   return value != null && Number.isFinite(value) && value >= 0 && value <= 100;
@@ -129,8 +133,10 @@ export function findModelEdges(
     home_win_pct: model.home_win,
     draw_pct: model.draw,
     away_win_pct: model.away_win,
-  }, threshold).map(({ history, ...edge }) => ({
-    ...edge,
-    modelProbability: history,
-  }));
+  }, threshold)
+    .filter((edge) => edge.market >= VALUE_MIN_MARKET_PCT && edge.delta <= VALUE_MAX_GAP_POINTS)
+    .map(({ history, ...edge }) => ({
+      ...edge,
+      modelProbability: history,
+    }));
 }
