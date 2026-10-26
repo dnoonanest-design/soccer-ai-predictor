@@ -577,6 +577,9 @@ function cacheTtl(parsed: URL, body?: string): number {
   if (parsed.pathname === "/leagues") return 24 * 60 * 60_000;
   if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return LIVE_POLL_MS;
   if (parsed.pathname === "/fixtures/lineups") return lineupsCacheTtl(body);
+  // Live odds move every few seconds; pre-match odds are refreshed by the provider every few hours.
+  if (parsed.pathname === "/odds/live") return LIVE_POLL_MS;
+  if (parsed.pathname === "/odds") return 30 * 60_000;
   return 5 * 60_000;
 }
 
@@ -585,6 +588,8 @@ function priorityFor(parsed: URL): Priority {
   if (["/fixtures/events", "/fixtures/statistics", "/fixtures/players"].includes(parsed.pathname)) return "background";
   if (parsed.pathname === "/fixtures" && parsed.searchParams.has("date")) return "normal";
   if (parsed.pathname === "/fixtures/lineups" || parsed.pathname === "/injuries") return "normal";
+  if (parsed.pathname === "/odds/live") return "normal";
+  if (parsed.pathname === "/odds") return "background";
   if (["/teams/statistics", "/standings", "/fixtures/headtohead", "/players", "/leagues"].includes(parsed.pathname)) return "background";
   return "normal";
 }

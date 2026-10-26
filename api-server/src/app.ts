@@ -63,6 +63,7 @@ const adminMutationPaths = [
   /^\/live\/alerts$/,
   /^\/model\/challengers\/(?:run|rollback)$/,
   /^\/model\/inplay\/(?:run|rollback)$/,
+  /^\/model\/odds\/backfill$/,
   /^\/model\/ratings\/backfill$/,
 ];
 
