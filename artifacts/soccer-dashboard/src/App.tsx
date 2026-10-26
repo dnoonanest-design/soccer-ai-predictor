@@ -10,6 +10,7 @@ import Backtest from "@/pages/backtest";
 import Performance from "@/pages/performance";
 import IpadLive from "@/pages/ipad-live";
 import MatchSquad from "@/pages/match-squad";
+import MatchForm from "@/pages/match-form";
 import Team from "@/pages/team";
 import { Shell } from "@/components/layout/Shell";
 import { PwaInstallPrompt } from "@/components/PwaInstallPrompt";
@@ -30,6 +31,7 @@ function Router() {
         <Route path="/" component={Dashboard} />
         <Route path="/leagues" component={Leagues} />
         <Route path="/matches/:id/squad" component={MatchSquad} />
+        <Route path="/matches/:id/form" component={MatchForm} />
         <Route path="/teams/:id" component={Team} />
         <Route path="/matches/:id" component={MatchDetail} />
         <Route path="/backtest" component={Backtest} />
