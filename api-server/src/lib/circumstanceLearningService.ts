@@ -36,7 +36,9 @@ async function fetchFootball<T>(path: string, fallback: T): Promise<T> {
     }
     const json = await res.json() as { response?: T };
     const data = json.response ?? fallback;
-    setCached(path, data);
+    // An empty answer (lineups or injuries not yet published) is not held for
+    // 15 minutes; the API-Football layer already re-checks it every 2 minutes.
+    if (!(Array.isArray(data) && data.length === 0)) setCached(path, data);
     return data;
   } catch (err) {
     logger.warn({ err, path }, "circumstance API-Football request errored");
