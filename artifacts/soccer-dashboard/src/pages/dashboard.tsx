@@ -6,7 +6,7 @@ import {
   Match,
   XGPrediction,
 } from "@workspace/api-client-react";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { format } from "date-fns";
@@ -298,6 +298,12 @@ function competitionTheme(name: string, country: string) {
 }
 
 export default function Dashboard() {
+  // Once the matches are on screen, fetch the match page code in the background so tapping a match is instant.
+  useEffect(() => {
+    const load = () => { void import("@/pages/match-detail"); };
+    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number };
+    if (w.requestIdleCallback) w.requestIdleCallback(load); else setTimeout(load, 2000);
+  }, []);
   const [threshold, setThreshold] = useState<Threshold>(10);
   const [selectedFixtureDate, setSelectedFixtureDate] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());

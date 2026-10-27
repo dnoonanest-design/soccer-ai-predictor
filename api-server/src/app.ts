@@ -77,7 +77,7 @@ app.use("/api", (req, res, next) => {
   // the guard against the same normalised path the router will dispatch on.
   // Without this, POST /api/training/run/ or /api/Training/run skips the key.
   const routePath = req.path.toLowerCase().replace(/\/+$/, "") || "/";
-  if (req.method === "GET" && routePath === "/live/stream") {
+  if (req.method === "GET" && (routePath === "/live/stream" || routePath === "/live/updates")) {
     return sseConnectionLimit(req, res, next);
   }
   if (routePath === "/push/subscribe" && req.method === "POST") {
