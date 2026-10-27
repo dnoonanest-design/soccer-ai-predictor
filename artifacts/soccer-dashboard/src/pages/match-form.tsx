@@ -1,6 +1,7 @@
 import { useGetMatch, getGetMatchQueryKey } from "@workspace/api-client-react";
-import { useParams, Link } from "wouter";
-import { ArrowLeft, Swords } from "lucide-react";
+import { useParams } from "wouter";
+import { Swords } from "lucide-react";
+import { MatchBreadcrumb } from "@/components/match-breadcrumb";
 import { Skeleton } from "@/components/ui/skeleton";
 import { HeadToHead } from "@/components/head-to-head";
 import { RecentFormPanel } from "@/components/team-recent-results";
@@ -13,10 +14,7 @@ export default function MatchForm() {
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-5">
-      <Link href={`/matches/${matchId}`} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="h-4 w-4" />
-        Back to match
-      </Link>
+      <MatchBreadcrumb matchId={matchId} match={match} current="Head to head & form" />
       <div>
         <div className="flex items-center gap-2">
           <Swords className="h-5 w-5 text-primary" />
