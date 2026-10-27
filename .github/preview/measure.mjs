@@ -49,7 +49,7 @@ note({ index: idx, assets: a });
 {
   const ctl = new AbortController();
   const t = performance.now();
-  const r = await fetch(BASE + "/api/live/stream", { signal: ctl.signal, headers: { accept: "text/event-stream" } });
+  const r = await fetch(BASE + "/api/live/updates", { signal: ctl.signal, headers: { accept: "text/event-stream" } });
   const reader = r.body.getReader(); let text = ""; let firstEventMs = null;
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
