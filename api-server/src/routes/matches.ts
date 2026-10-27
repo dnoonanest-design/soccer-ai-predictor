@@ -9,7 +9,7 @@ import {
 import { sortFixturesForDisplay } from "../lib/fixtureOrdering";
 import { fillMissingOdds } from "../lib/apiFootballOdds";
 import { buildBettingAnalysis, loadLiveBookmakers, loadLiveReadings } from "../lib/bettingAnalysis";
-import { readPredictions } from "./predictions";
+import { readPredictions, upcomingPredictionRange } from "./predictions";
 
 const BLOCKED_NAME_KEYWORDS = [
   "reserve", "reserva", " res ", "res.", "u20", "u19", "u18", "u17", "u16", "u15",
@@ -105,7 +105,12 @@ router.get("/matches/:match_id/betting-analysis", async (req, res) => {
     const [match] = await fillMissingOdds([found]);
     const kickoff = new Date(match.kickoff);
     const [stored, liveRows, liveBooks] = await Promise.all([
-      readPredictions(new Date(kickoff.getTime() - 60_000), new Date(kickoff.getTime() + 60_000)).catch(() => []),
+      // Use the same read as the matches page when the kick-off falls in it, so it is usually already in memory.
+      (() => {
+        const upcoming = upcomingPredictionRange(new Date(), 8);
+        const inRange = kickoff >= upcoming.start && kickoff < upcoming.end;
+        return (inRange ? readPredictions(upcoming.start, upcoming.end) : readPredictions(new Date(kickoff.getTime() - 60_000), new Date(kickoff.getTime() + 60_000))).catch(() => []);
+      })(),
       match.status === "upcoming" ? Promise.resolve([]) : loadLiveReadings(id),
       match.status === "live" ? loadLiveBookmakers(id).catch(() => null) : Promise.resolve(null),
     ]);

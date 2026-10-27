@@ -114,7 +114,25 @@ function predictedOutcome(home: number, draw: number, away: number) {
   return "draw";
 }
 
-export async function readPredictions(start: Date, end: Date) {
+/**
+ * Each read checks the full list of verified audit ids in SQL, which costs
+ * close to a second, while the answer changes only when a checkpoint is
+ * sealed or odds arrive. Identical reads within 15 seconds share one result.
+ */
+const READ_MEMO_MS = 15_000;
+const readMemo = new Map<string, { at: number; value: Promise<Awaited<ReturnType<typeof readPredictionsUncached>>> }>();
+export function readPredictions(start: Date, end: Date) {
+  const key = `${start.getTime()}|${end.getTime()}`;
+  const hit = readMemo.get(key);
+  if (hit && Date.now() - hit.at < READ_MEMO_MS) return hit.value;
+  const value = readPredictionsUncached(start, end);
+  value.catch(() => readMemo.delete(key));
+  readMemo.set(key, { at: Date.now(), value });
+  if (readMemo.size > 200) for (const [k, v] of readMemo) if (Date.now() - v.at >= READ_MEMO_MS) readMemo.delete(k);
+  return value;
+}
+
+async function readPredictionsUncached(start: Date, end: Date) {
   const integrity = await verifyPredictionAuditIntegrity();
   const canonicalCte = canonicalPrematchAuditCte("$3");
   const result = await pool.query(
