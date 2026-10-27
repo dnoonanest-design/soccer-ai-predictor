@@ -94,7 +94,23 @@ function MatchStatus({ status, detail, minute }: { status: string; detail: strin
   return <div className="text-primary/80 font-mono font-bold text-xs">{detail}</div>;
 }
 
-function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction }) {
+type ThreeWay = { home_win: number; draw: number; away_win: number };
+
+/** One-line betting note for a card: who our prediction has winning, live as the match goes on. */
+function predictionNote(match: Match, current: ThreeWay, kickoff?: ThreeWay) {
+  const ranked = ([["home_win", `${match.home_team.name} to win`], ["draw", "Draw"], ["away_win", `${match.away_team.name} to win`]] as const)
+    .map(([k, label]) => ({ k, label, p: current[k] })).sort((a, b) => b.p - a.p);
+  const top = ranked[0];
+  const close = top.p - ranked[1].p < 5;
+  const change = match.status === "live" && kickoff ? current[top.k] - kickoff[top.k] : null;
+  return {
+    prefix: match.status === "live" ? `${match.minute != null ? `${match.minute}'` : "LIVE"} ·` : "",
+    text: close ? `Too close to call · ${top.label} ${top.p.toFixed(0)}%` : `${top.label} ${top.p.toFixed(0)}%`,
+    change: change != null && Math.abs(change) >= 1 ? change : null,
+  };
+}
+
+function MatchCard({ match, valueBets, modelGaps, xg, kickoffPrediction }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction; kickoffPrediction?: ThreeWay }) {
   const oddsFormat = useOddsFormat();
   const isLive = match.status === "live";
   const hasValue = valueBets.length > 0;
@@ -198,7 +214,7 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
               ))}
             </div>
             <div className="mt-1.5 text-center font-mono text-[8px] uppercase tracking-wider text-muted-foreground">
-              Odds display only · never used in prediction
+              Bookmaker prices · also an input to our prediction
             </div>
           </div>
         )}
@@ -238,6 +254,16 @@ function MatchCard({ match, valueBets, modelGaps, xg }: { match: Match; valueBet
               <span className="flex gap-3"><span className="text-primary">{xg.home_win.toFixed(1)}%</span><span className="text-muted-foreground">{xg.draw.toFixed(1)}%</span><span className="text-chart-2">{xg.away_win.toFixed(1)}%</span></span>
             </div>
             <ProbabilityBar home={xg.home_win} draw={xg.draw} away={xg.away_win}/>
+            {(match.status === "live" || match.status === "upcoming") && (() => {
+              const n = predictionNote(match, xg, kickoffPrediction);
+              return (
+                <div className="flex items-center gap-1 font-mono text-[10px]" data-testid={`card-prediction-note-${match.id}`}>
+                  {n.prefix && <span className="text-red-500">{n.prefix}</span>}
+                  <span className="font-semibold">{n.text}</span>
+                  {n.change != null && <span className={n.change > 0 ? "text-emerald-500" : "text-red-500"}>{n.change > 0 ? "▲" : "▼"}{Math.abs(n.change).toFixed(0)} since KO</span>}
+                </div>
+              );
+            })()}
           </div> : <div className="flex items-center justify-between font-mono text-[10px] text-amber-300"><span>{isLive ? "LIVE PREDICTION UNAVAILABLE" : "PREDICTION PENDING"}</span><span className="text-muted-foreground">{isLive ? "no live forecast received" : "building team baseline"}</span></div>}
         </div>
       </Card>
@@ -381,6 +407,13 @@ export default function Dashboard() {
     }
     return map;
   }, [xgData, storedData, visibleMatches]);
+
+  // Sealed pre-match numbers, kept for live matches too so cards can show the change since kick-off.
+  const kickoffMap = useMemo(() => {
+    const map = new Map<number, ThreeWay>();
+    for (const f of storedData?.fixtures ?? []) map.set(f.fixture_id, { home_win: f.prediction.home_win, draw: f.prediction.draw, away_win: f.prediction.away_win });
+    return map;
+  }, [storedData]);
 
   // Value is judged only against step 9 (odds-free); the original formula and
   // the quick xG model are too far from the market for their gaps to mean value.
@@ -646,7 +679,7 @@ export default function Dashboard() {
                         {match.league_name} · {match.country}
                       </span>
                     </div>
-                    <MatchCard match={match} valueBets={bets} modelGaps={modelGapMap.get(match.id) ?? []} xg={xgMap.get(match.id)} />
+                    <MatchCard match={match} valueBets={bets} modelGaps={modelGapMap.get(match.id) ?? []} xg={xgMap.get(match.id)} kickoffPrediction={kickoffMap.get(match.id)} />
                   </div>
                 );
               })}
@@ -700,6 +733,7 @@ export default function Dashboard() {
                     valueBets={valueBetMap.get(match.id) ?? []}
                     modelGaps={modelGapMap.get(match.id) ?? []}
                     xg={xgMap.get(match.id)}
+                    kickoffPrediction={kickoffMap.get(match.id)}
                   />
                 ))}
               </div>

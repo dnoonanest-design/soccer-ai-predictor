@@ -114,7 +114,7 @@ function predictedOutcome(home: number, draw: number, away: number) {
   return "draw";
 }
 
-async function readPredictions(start: Date, end: Date) {
+export async function readPredictions(start: Date, end: Date) {
   const integrity = await verifyPredictionAuditIntegrity();
   const canonicalCte = canonicalPrematchAuditCte("$3");
   const result = await pool.query(
