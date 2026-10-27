@@ -6,7 +6,7 @@ const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: numb
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
 const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket, goalConsensusFrom, goalsWithMarket, goalMarketsForServedPrediction } = await import("../marketBlend");
-const { withLatestMarket } = await import("../servedPredictionMarket");
+const { sealedWithoutOdds, withLatestMarket } = await import("../servedPredictionMarket");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
 const match = { id: 5, league_id: 39, status: "upcoming", kickoff: "2026-10-25T15:00:00Z", home_team: { id: 1 }, away_team: { id: 2 } };
@@ -112,18 +112,18 @@ describe("bookmaker odds in the served prediction", () => {
   const market = { home: 0.5, draw: 0.3, away: 0.2, bookmakers: 4, observedAt: now - 60_000 };
   const served = { home_win: 30, draw: 30, away_win: 40 };
 
-  it("serves the market for the original formula (tested weight 0) and keeps the model's own numbers", () => {
+  it("keeps 70% of our own prediction and takes 30% from the bookmakers, keeping our own numbers", () => {
     const r = servedWithMarket(served, "legacy", market)!;
-    expect(r.probs.home_win).toBe(50);
+    expect(r.probs.home_win).toBeCloseTo(36, 1); // 0.7 * 30 + 0.3 * 50
     expect(r.probs.home_win + r.probs.draw + r.probs.away_win).toBeCloseTo(100, 6);
     expect(r.independent).toEqual({ home: 30, draw: 30, away: 40, model: "legacy" });
-    expect(r.market_blend.model_weight).toBe(0);
+    expect(r.market_blend.model_weight).toBe(0.7);
     expect(r.market_blend.bookmakers).toBe(4);
   });
 
-  it("keeps 10% of step 9 when it serves", () => {
+  it("uses the same 70/30 balance for step 9 if it serves", () => {
     const r = servedWithMarket(served, "step9-strength-ratings", market)!;
-    expect(r.probs.home_win).toBeCloseTo(48, 1); // 0.1 * 30 + 0.9 * 50
+    expect(r.probs.home_win).toBeCloseTo(36, 1);
   });
 
   it("only changes upcoming matches with fresh stored odds", async () => {
@@ -147,13 +147,14 @@ describe("bookmaker goal markets in the served prediction", () => {
     expect(goalConsensusFrom([{ o: null, u: null, y: null, n: null, observedAt: 1 }])).toBeNull();
   });
 
-  it("serves the market's over 2.5 and BTTS, keeps the model's, and keeps over 1.5 >= 2.5 >= 3.5", () => {
-    const r = goalsWithMarket({ over_15: 70, over_25: 62, over_35: 40, btts: 61 }, { over25: 0.75, btts: 0.5, bookmakers: 6, observedAt: now })!;
-    expect(r.goals).toEqual({ over_15: 75, over_25: 75, over_35: 40, btts: 50 });
+  it("blends over 2.5 and BTTS 70/30 with the bookmakers, keeps the model's, and keeps over 1.5 >= 2.5 >= 3.5", () => {
+    const r = goalsWithMarket({ over_15: 60, over_25: 62, over_35: 40, btts: 61 }, { over25: 0.75, btts: 0.5, bookmakers: 6, observedAt: now })!;
+    expect(r.goals).toEqual({ over_15: 65.9, over_25: 65.9, over_35: 40, btts: 57.7 });
     expect(r.independent_goals).toEqual({ over_25: 62, btts: 61 });
     expect(r.goal_market_blend.markets).toEqual(["over_25", "btts"]);
-    const low = goalsWithMarket({ over_15: 70, over_25: 62, over_35: 45, btts: null }, { over25: 0.4, btts: null, bookmakers: 1, observedAt: now })!;
-    expect(low.goals.over_35).toBe(40);
+    const low = goalsWithMarket({ over_15: 70, over_25: 62, over_35: 60, btts: null }, { over25: 0.4, btts: null, bookmakers: 1, observedAt: now })!;
+    expect(low.goals.over_25).toBe(55.4);
+    expect(low.goals.over_35).toBe(55.4);
     expect(low.goal_market_blend.markets).toEqual(["over_25"]);
   });
 
@@ -168,26 +169,36 @@ describe("bookmaker goal markets in the served prediction", () => {
 
 describe("bookmaker odds on stored predictions", () => {
   const fixture = (over: Record<string, unknown> = {}) => ({
-    fixture_id: 5, kickoff: "2026-10-25T15:00:00Z", model_version: "v4",
+    fixture_id: 5, kickoff: "2026-10-25T15:00:00Z", model_version: "v4", generated_at: "2026-10-25T08:00:00Z",
     prediction: { home_win: 50, draw: 25, away_win: 25, predicted_outcome: "home", over_25: 50, btts: 50, pick_confidence: 50 },
     ...over,
   });
+  const market = () => __setMarketConsensusForTests([[5, { home: 0.2, draw: 0.25, away: 0.55, bookmakers: 5, observedAt: now - 60_000 }]], [[5, { over25: 0.7, btts: 0.6, bookmakers: 5, observedAt: now - 60_000 }]]);
 
-  it("applies the latest odds to a sealed prediction before kickoff and keeps the formula's own numbers", async () => {
-    __setMarketConsensusForTests([[5, { home: 0.2, draw: 0.25, away: 0.55, bookmakers: 5, observedAt: now - 60_000 }]], [[5, { over25: 0.7, btts: 0.6, bookmakers: 5, observedAt: now - 60_000 }]]);
-    const [f] = await withLatestMarket([fixture()], now);
-    expect(f.prediction.away_win).toBe(55);
-    expect(f.prediction.predicted_outcome).toBe("away");
-    expect(f.prediction.pick_confidence).toBe(55);
-    expect(f.prediction.over_25).toBe(70);
+  it("blends 70/30 into a prediction sealed before the odds arrived, keeping our own numbers", async () => {
+    market();
+    const [f] = await withLatestMarket([fixture()], now, new Map([[5, Date.parse("2026-10-25T10:00:00Z")]]));
+    expect(f.prediction.home_win).toBeCloseTo(41, 1); // 0.7 * 50 + 0.3 * 20
+    expect(f.prediction.away_win).toBeCloseTo(34, 1);
+    expect(f.prediction.predicted_outcome).toBe("home");
+    expect(f.prediction.over_25).toBe(56);
     expect((f.prediction as any).model_only.home_win).toBe(50);
   });
 
+  it("never adds odds twice: a prediction sealed after the first price already includes them", async () => {
+    market();
+    const sealedWithOdds = fixture({ generated_at: "2026-10-27T08:00:00Z" });
+    expect(await withLatestMarket([sealedWithOdds], now, new Map([[5, Date.parse("2026-10-27T07:00:00Z")]]))).toEqual([sealedWithOdds]);
+    expect(sealedWithoutOdds("2026-10-27T08:00:00Z", Date.parse("2026-10-27T09:00:00Z"))).toBe(true);
+    expect(sealedWithoutOdds("2026-10-25T08:00:00Z", Date.parse("2026-10-24T09:00:00Z"))).toBe(true); // before blending existed
+    expect(sealedWithoutOdds(null, null)).toBe(false);
+  });
+
   it("leaves started matches, matches without odds and other serving models unchanged", async () => {
-    __setMarketConsensusForTests([[5, { home: 0.2, draw: 0.25, away: 0.55, bookmakers: 5, observedAt: now - 60_000 }]]);
+    market();
     const started = fixture({ kickoff: "2026-10-25T11:00:00Z" });
     const noOdds = fixture({ fixture_id: 6 });
     const step9 = fixture({ model_version: "step9-strength-ratings" });
-    expect(await withLatestMarket([started, noOdds, step9], now)).toEqual([started, noOdds, step9]);
+    expect(await withLatestMarket([started, noOdds, step9], now, new Map())).toEqual([started, noOdds, step9]);
   });
 });

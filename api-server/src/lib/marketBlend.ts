@@ -363,18 +363,25 @@ export async function getOddsMovement(fixtureId: number): Promise<OddsMovement |
 // movement made it slightly worse (0.574). For step 9 the tested best was
 // 10% step 9 / 90% odds.
 //
-// So, where odds are stored, the served pre-match 1X2 numbers are the market
-// consensus blended with the serving model at the weight below. Value flags
+// 27 Oct 2026 owner decision: the app's own process leads and the bookmakers
+// are a minority input, 70% own / 30% odds, for every serving model. Cost on
+// 609 settled matches: right result 50.4% (own only 45.5%, odds only 54.7%),
+// Brier 0.612 (own 0.643, odds 0.572); disagrees with the bookmakers' pick on
+// about 1 match in 5. Override with SERVED_OWN_WEIGHT.
+//
+// Where odds are stored, the served pre-match 1X2 numbers are the serving
+// model blended with the market consensus at the weight below. Value flags
 // and model-vs-model trials keep using the odds-free numbers (`independent`),
 // otherwise they would compare the market with itself. Goal markets are not
 // changed (only 1X2 prices are stored).
 
-/** Weight left on each serving model when odds are available (the rest is the market). */
+/** Share of the served prediction from the app's own process when odds are available (the rest is the market). */
+export const SERVED_OWN_WEIGHT = Math.min(1, Math.max(0.5, Number(process.env.SERVED_OWN_WEIGHT ?? 0.7)));
 export const SERVED_MODEL_WEIGHT: Record<string, number> = {
-  legacy: Number(process.env.SERVED_LEGACY_MODEL_WEIGHT ?? 0),
-  "step9-strength-ratings": MARKET_BLEND_MODEL_WEIGHT,
+  legacy: SERVED_OWN_WEIGHT,
+  "step9-strength-ratings": SERVED_OWN_WEIGHT,
 };
-export const SERVED_DEFAULT_MODEL_WEIGHT = MARKET_BLEND_MODEL_WEIGHT;
+export const SERVED_DEFAULT_MODEL_WEIGHT = SERVED_OWN_WEIGHT;
 export const MARKET_IN_PREDICTION_ENABLED = process.env.MARKET_IN_PREDICTION_ENABLED !== "false";
 
 export type ServedPercent = { home_win: number; draw: number; away_win: number };
@@ -411,22 +418,25 @@ export async function marketForServedPrediction(fixtureId: number, status: strin
  * over 2.5 — app 0.255 Brier (said 62%, actual 55.7%), constant guess 0.247,
  * bookmakers 0.240; the fitted blend left 0% on the app. BTTS — app 0.253,
  * constant 0.247, bookmakers 0.245 (gain not yet certain on this sample).
- * So where these prices are stored, the served over 2.5 and BTTS are the
- * bookmakers' consensus. Over 1.5 / over 3.5 are kept consistent with it.
+ * Since 27 Oct (owner decision) the served over 2.5 and BTTS are 70% the app's
+ * own number and 30% the bookmakers' consensus (on 192 settled matches: over
+ * 2.5 Brier 0.250 at 75% own v 0.240 odds only). Over 1.5 / over 3.5 are kept
+ * consistent with it.
  */
 export const GOAL_MARKETS_FROM_ODDS = process.env.GOAL_MARKETS_FROM_ODDS !== "false";
 export type ServedGoals = { over_15: number | null; over_25: number | null; over_35: number | null; btts: number | null };
 export type GoalsApplied = {
   goals: ServedGoals;
   independent_goals: { over_25: number | null; btts: number | null };
-  goal_market_blend: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts"> };
+  goal_market_blend: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts">; own_weight: number };
 };
 
-/** Pure: replace over 2.5 / BTTS with the bookmakers' consensus and keep over 1.5 >= over 2.5 >= over 3.5. */
-export function goalsWithMarket(served: ServedGoals, market: GoalConsensus): GoalsApplied | null {
+/** Pure: blend over 2.5 / BTTS with the bookmakers' consensus and keep over 1.5 >= over 2.5 >= over 3.5. */
+export function goalsWithMarket(served: ServedGoals, market: GoalConsensus, ownWeight = SERVED_OWN_WEIGHT): GoalsApplied | null {
   const pct = (v: number) => Math.round(v * 10_000) / 100;
-  const over25 = market.over25 != null ? pct(market.over25) : served.over_25;
-  const btts = market.btts != null ? pct(market.btts) : served.btts;
+  const mix = (own: number | null, odds: number) => (own == null ? pct(odds) : Math.round((ownWeight * own + (1 - ownWeight) * odds * 100) * 100) / 100);
+  const over25 = market.over25 != null ? mix(served.over_25, market.over25) : served.over_25;
+  const btts = market.btts != null ? mix(served.btts, market.btts) : served.btts;
   const markets = [...(market.over25 != null ? ["over_25" as const] : []), ...(market.btts != null ? ["btts" as const] : [])];
   if (!markets.length) return null;
   return {
@@ -437,7 +447,7 @@ export function goalsWithMarket(served: ServedGoals, market: GoalConsensus): Goa
       btts,
     },
     independent_goals: { over_25: served.over_25, btts: served.btts },
-    goal_market_blend: { bookmakers: market.bookmakers, odds_observed_at: new Date(market.observedAt).toISOString(), markets },
+    goal_market_blend: { bookmakers: market.bookmakers, odds_observed_at: new Date(market.observedAt).toISOString(), markets, own_weight: ownWeight },
   };
 }
 
