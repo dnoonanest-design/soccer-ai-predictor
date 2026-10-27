@@ -14,13 +14,15 @@ export default function Team() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
-      <Link
-        href="/"
-        className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to matches
-      </Link>
+      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm text-muted-foreground">
+        <button type="button" onClick={() => window.history.length > 1 ? window.history.back() : (window.location.href = "/")} className="inline-flex items-center gap-1.5 hover:text-foreground">
+          <ArrowLeft className="h-4 w-4" />Back
+        </button>
+        <span aria-hidden>·</span>
+        <Link href="/" className="hover:text-foreground">Matches</Link>
+        <span aria-hidden>›</span>
+        <span className="text-foreground">{data?.team_name ?? teamName}</span>
+      </nav>
       <div className="flex items-center gap-3 border-b border-border/50 pb-4">
         <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
           <Shield className="h-5 w-5" />

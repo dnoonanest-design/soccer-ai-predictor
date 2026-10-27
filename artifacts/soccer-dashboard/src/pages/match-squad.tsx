@@ -3,8 +3,9 @@ import {
   useGetMatchPresentation, getGetMatchPresentationQueryKey,
   PresentationPlayer, PresentationTeam, PresentationLeader, PresentationScoringForm, PresentationLineupStatus,
 } from "@workspace/api-client-react";
-import { useParams, Link } from "wouter";
-import { ArrowLeft, Flame, Star, Users } from "lucide-react";
+import { useParams } from "wouter";
+import { Flame, Star, Users } from "lucide-react";
+import { MatchBreadcrumb } from "@/components/match-breadcrumb";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -124,20 +125,25 @@ function TeamSquad({ team, side }: { team: PresentationTeam; side: "home" | "awa
   </div>;
 }
 
-export default function MatchSquad() {
-  const { id } = useParams<{ id: string }>();
-  const matchId = Number(id);
-  const { data: match } = useGetMatch(matchId, { query: { queryKey: getGetMatchQueryKey(matchId) } });
+/** Lineups and player stats for one match (used on the match page's Teams tab and on its own page). */
+export function SquadPanel({ matchId }: { matchId: number }) {
   const { data, isLoading, isError } = useGetMatchPresentation(matchId, { query: {
     // Every minute until lineups are published (the server re-checks the provider every 2 minutes near kickoff).
     refetchInterval: (q) => (q.state.data?.lineups_announced ? 5 * 60_000 : 60_000),
     queryKey: getGetMatchPresentationQueryKey(matchId),
   } });
+  return <Card className="overflow-hidden border-border/50"><div className="space-y-5 p-5">
+    {isLoading ? <div className="grid gap-4 sm:grid-cols-2"><Skeleton className="h-72"/><Skeleton className="h-72"/></div> : isError || !data ? <p className="py-8 text-center text-xs text-muted-foreground">Lineup and player data are temporarily unavailable.</p> : <><div className={`rounded-lg border px-3 py-2 font-mono text-[10px] ${data.lineups_announced ? "border-primary/25 bg-primary/5 text-primary" : "border-amber-400/25 bg-amber-400/5 text-amber-300"}`}><span className="inline-flex items-center gap-1.5"><Star className="h-3 w-3"/>{data.note}</span></div><div className="grid gap-6 lg:grid-cols-2 lg:divide-x lg:divide-border/50"><TeamSquad team={data.home} side="home"/><div className="lg:pl-6"><TeamSquad team={data.away} side="away"/></div></div><p className="font-mono text-[9px] text-muted-foreground/60">Source: {data.source}. Player leaders are season-to-date and never derived from this fixture's result.</p></>}
+  </div></Card>;
+}
+
+export default function MatchSquad() {
+  const { id } = useParams<{ id: string }>();
+  const matchId = Number(id);
+  const { data: match } = useGetMatch(matchId, { query: { queryKey: getGetMatchQueryKey(matchId) } });
   return <div className="mx-auto max-w-[1400px] space-y-5">
-    <Link href={`/matches/${matchId}`} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4"/>Back to match</Link>
+    <MatchBreadcrumb matchId={matchId} match={match} current="Lineups & players" />
     <div><div className="flex items-center gap-2"><Users className="h-5 w-5 text-primary"/><h1 className="text-2xl font-bold">Team lineups & player stats</h1></div><p className="mt-1 text-sm text-muted-foreground">{match ? `${match.home_team.name} vs ${match.away_team.name}` : "Match squad intelligence"}</p></div>
-    <Card className="overflow-hidden border-border/50"><div className="space-y-5 p-5">
-      {isLoading ? <div className="grid gap-4 sm:grid-cols-2"><Skeleton className="h-72"/><Skeleton className="h-72"/></div> : isError || !data ? <p className="py-8 text-center text-xs text-muted-foreground">Lineup and player data are temporarily unavailable.</p> : <><div className={`rounded-lg border px-3 py-2 font-mono text-[10px] ${data.lineups_announced ? "border-primary/25 bg-primary/5 text-primary" : "border-amber-400/25 bg-amber-400/5 text-amber-300"}`}><span className="inline-flex items-center gap-1.5"><Star className="h-3 w-3"/>{data.note}</span></div><div className="grid gap-6 lg:grid-cols-2 lg:divide-x lg:divide-border/50"><TeamSquad team={data.home} side="home"/><div className="lg:pl-6"><TeamSquad team={data.away} side="away"/></div></div><p className="font-mono text-[9px] text-muted-foreground/60">Source: {data.source}. Player leaders are season-to-date and never derived from this fixture's result.</p></>}
-    </div></Card>
+    <SquadPanel matchId={matchId} />
   </div>;
 }

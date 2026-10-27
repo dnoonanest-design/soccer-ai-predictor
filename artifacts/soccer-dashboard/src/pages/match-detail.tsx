@@ -6,7 +6,12 @@ import {
   useGetMatchPresentation, getGetMatchPresentationQueryKey,
   BacktestScenario, MatchEvent, TeamStats, PresentationPlayer, PresentationTeam,
 } from "@workspace/api-client-react";
-import { useParams, Link } from "wouter";
+import { useParams, Link, useLocation, useSearch } from "wouter";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MatchBreadcrumb } from "@/components/match-breadcrumb";
+import { SquadPanel } from "@/pages/match-squad";
+import { HeadToHead } from "@/components/head-to-head";
+import { RecentFormPanel } from "@/components/team-recent-results";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment } from "react";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
@@ -1346,6 +1351,10 @@ export default function MatchDetail() {
   const oddsFormat = useOddsFormat();
   const params = useParams();
   const matchId = Number(params.id);
+  const [, navigate] = useLocation();
+  const search = useSearch();
+  const requestedTab = new URLSearchParams(search).get("tab");
+  const tab = ["overview", "prediction", "stats", "odds", "teams"].includes(requestedTab ?? "") ? requestedTab! : "overview";
 
   const { data: match, isLoading, isError } = useGetMatch(matchId, {
     query: {
@@ -1387,217 +1396,192 @@ export default function MatchDetail() {
   const hasHtScore = match.score_ht?.home != null && match.score_ht?.away != null;
   const showOverlay = isSecondHalf && hasHtScore;
 
+  const tabs = [
+    { key: "overview", label: "Summary" },
+    { key: "prediction", label: "Prediction" },
+    { key: "stats", label: isLive ? "Live stats" : "Stats" },
+    { key: "odds", label: "Odds" },
+    { key: "teams", label: "Teams & form" },
+  ] as const;
+  const goTo = (key: string) => navigate(key === "overview" ? `/matches/${match.id}` : `/matches/${match.id}?tab=${key}`, { replace: true });
+
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <Link href="/" className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors mb-2">
-        <ArrowLeft className="w-4 h-4 mr-2" />
-        Back to Dashboard
-      </Link>
+    <div className="mx-auto max-w-5xl space-y-4">
+      <MatchBreadcrumb matchId={match.id} match={match} />
 
-      <div className="flex items-center gap-3 text-sm text-muted-foreground uppercase tracking-wider mb-6 font-semibold">
-        {match.league_logo ? (
-          <img src={match.league_logo} alt="" className="w-5 h-5 object-contain" />
-        ) : (
-          <Trophy className="w-4 h-4" />
-        )}
-        <span>{match.country} / {match.league_name}</span>
-      </div>
-
-      <Card className="p-8 border-border/50 bg-card overflow-hidden relative">
-        {isLive && <div className="absolute inset-0 bg-destructive/5 pointer-events-none" />}
-
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-muted/50 border border-border text-xs font-mono font-bold tracking-widest mb-4">
+      <Card className="relative overflow-hidden border-border/50 bg-card p-4 sm:p-6">
+        {isLive && <div className="pointer-events-none absolute inset-0 bg-destructive/5" />}
+        <div className="mb-4 flex flex-wrap items-center justify-center gap-2 text-xs">
+          <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+            {match.league_logo ? <img src={match.league_logo} alt="" className="h-4 w-4 object-contain" /> : <Trophy className="h-3.5 w-3.5" />}
+            {match.league_name} · {match.country}
+          </span>
+          <span className="inline-flex items-center gap-2 rounded-full border border-border bg-muted/50 px-3 py-0.5 font-mono font-bold">
             {isLive ? (
-              <>
-                <div className="w-2 h-2 rounded-full bg-destructive pulse-dot" />
-                <span className="text-destructive">{match.minute ? `${match.minute}'` : match.status_detail}</span>
-              </>
+              <><span className="h-2 w-2 rounded-full bg-destructive pulse-dot" /><span className="text-destructive">{match.minute ? `${match.minute}'` : match.status_detail}</span></>
             ) : match.status === "upcoming" ? (
-              <span className="text-primary">{format(new Date(match.kickoff), "MMM dd, HH:mm")}</span>
+              <span className="text-primary">{format(new Date(match.kickoff), "EEE d MMM, HH:mm")}</span>
             ) : (
               <span className="text-muted-foreground">{match.status_detail}</span>
             )}
-          </div>
-
-          {/* HT score badge when in 2nd half */}
+          </span>
           {hasHtScore && isSecondHalf && (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted/30 border border-border/50 text-[11px] font-mono text-muted-foreground ml-2">
-              HT: {match.score_ht!.home} – {match.score_ht!.away}
-            </div>
+            <span className="rounded-full border border-border/50 bg-muted/30 px-3 py-0.5 font-mono text-[11px] text-muted-foreground">HT {match.score_ht!.home} – {match.score_ht!.away}</span>
           )}
         </div>
-
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex-1 flex flex-col items-center text-center">
-            {match.home_team.logo ? (
-              <img src={match.home_team.logo} alt="" className="w-20 h-20 sm:w-24 sm:h-24 object-contain mb-4" />
-            ) : (
-              <div className="w-24 h-24 rounded-full bg-muted mb-4" />
-            )}
-            <Link href={`/teams/${match.home_team.id}?name=${encodeURIComponent(match.home_team.name)}`} className="text-xl sm:text-2xl font-bold hover:text-primary">{match.home_team.name}<span className="sr-only"> recent results</span></Link>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 flex-col items-center text-center">
+            {match.home_team.logo ? <img src={match.home_team.logo} alt="" className="mb-2 h-12 w-12 object-contain sm:h-16 sm:w-16" /> : <div className="mb-2 h-12 w-12 rounded-full bg-muted sm:h-16 sm:w-16" />}
+            <Link href={`/teams/${match.home_team.id}?name=${encodeURIComponent(match.home_team.name)}`} className="max-w-full truncate text-base font-bold hover:text-primary sm:text-xl">{match.home_team.name}<span className="sr-only"> recent results</span></Link>
           </div>
-
-          <div className="flex-shrink-0 px-4 sm:px-8">
-            <div className="text-5xl sm:text-7xl font-mono font-black tracking-tighter">
-              {(isLive || match.status === "finished") ? (
-                <>
-                  <span className="text-foreground">{match.score?.home ?? 0}</span>
-                  <span className="text-muted-foreground/30 mx-2">-</span>
-                  <span className="text-foreground">{match.score?.away ?? 0}</span>
-                </>
-              ) : (
-                <span className="text-muted-foreground/30">VS</span>
-              )}
-            </div>
+          <div className="shrink-0 px-2 font-mono text-4xl font-black tracking-tighter sm:text-6xl">
+            {(isLive || match.status === "finished") ? (
+              <><span>{match.score?.home ?? 0}</span><span className="mx-2 text-muted-foreground/30">-</span><span>{match.score?.away ?? 0}</span></>
+            ) : <span className="text-2xl text-muted-foreground/40 sm:text-4xl">VS</span>}
           </div>
-
-          <div className="flex-1 flex flex-col items-center text-center">
-            {match.away_team.logo ? (
-              <img src={match.away_team.logo} alt="" className="w-20 h-20 sm:w-24 sm:h-24 object-contain mb-4" />
-            ) : (
-              <div className="w-24 h-24 rounded-full bg-muted mb-4" />
-            )}
-            <Link href={`/teams/${match.away_team.id}?name=${encodeURIComponent(match.away_team.name)}`} className="text-xl sm:text-2xl font-bold hover:text-chart-2">{match.away_team.name}<span className="sr-only"> recent results</span></Link>
+          <div className="flex min-w-0 flex-1 flex-col items-center text-center">
+            {match.away_team.logo ? <img src={match.away_team.logo} alt="" className="mb-2 h-12 w-12 object-contain sm:h-16 sm:w-16" /> : <div className="mb-2 h-12 w-12 rounded-full bg-muted sm:h-16 sm:w-16" />}
+            <Link href={`/teams/${match.away_team.id}?name=${encodeURIComponent(match.away_team.name)}`} className="max-w-full truncate text-base font-bold hover:text-chart-2 sm:text-xl">{match.away_team.name}<span className="sr-only"> recent results</span></Link>
           </div>
         </div>
       </Card>
 
-      <BettingAnalysisCard matchId={match.id} status={match.status} />
-
-      <FixtureOddsMovement fixtureId={match.id} kickoff={match.kickoff} status={match.status} />
-
-      <ExplanationCard matchId={match.id} status={match.status} />
-
-      {/* Stats panel — always visible */}
-      <MatchStatsPanel
-        matchId={match.id}
-        homeTeamName={match.home_team.name}
-        awayTeamName={match.away_team.name}
-      />
-
-      <Link href={`/matches/${match.id}/squad`}>
-        <Card className="border-primary/25 bg-primary/5 p-5 transition-colors hover:bg-primary/10" data-testid="link-lineups-player-page">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <Users className="h-5 w-5 text-primary" />
-              <div>
-                <div className="font-semibold">Team lineups & player stats</div>
-                <div className="mt-1 text-xs text-muted-foreground">Starting XI, substitutes, star players and season leaders</div>
-              </div>
-            </div>
-            <span className="font-mono text-xs text-primary">VIEW →</span>
-          </div>
-        </Card>
-      </Link>
-
-      {/* Head-to-head and each team's last 8 matches live on their own page */}
-      <Link href={`/matches/${match.id}/form`}>
-        <Card className="border-border/50 p-5 transition-colors hover:bg-muted/30" data-testid="link-form-page">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <Swords className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <div className="font-semibold">Head to head & recent form</div>
-                <div className="mt-1 text-xs text-muted-foreground">Previous meetings and each team's last 8 matches in all competitions</div>
-              </div>
-            </div>
-            <span className="font-mono text-xs text-muted-foreground">VIEW →</span>
-          </div>
-        </Card>
-      </Link>
-
-      {/* Match timeline — shows for live and finished matches */}
-      {(isLive || match.status === "finished") && (
-        <MatchTimeline
-          matchId={match.id}
-          homeTeamName={match.home_team.name}
-          awayTeamName={match.away_team.name}
-        />
-      )}
-
-      {/* HT Overlay panel — shows only in 2nd half with known HT score */}
-      {showOverlay && (
-        <HalftimeOverlay
-          htHome={match.score_ht!.home!}
-          htAway={match.score_ht!.away!}
-          marketHome={match.odds?.home_win}
-          marketDraw={match.odds?.draw}
-          marketAway={match.odds?.away_win}
-          homeTeam={match.home_team.name}
-          awayTeam={match.away_team.name}
-        />
-      )}
-
-      {/* xG Model panel — pre-match and live */}
-      <XGPanel
-        matchId={match.id}
-        homeTeamName={match.home_team.name}
-        awayTeamName={match.away_team.name}
-        marketHome={match.odds?.home_win}
-        marketDraw={match.odds?.draw}
-        marketAway={match.odds?.away_win}
-      />
-
-      {match.odds && (
-        <div className="space-y-4">
-          <h3 className="font-mono text-sm text-muted-foreground uppercase tracking-widest">
-            {isLive ? "Live" : "Pre-Match"} Probabilities & Odds
-          </h3>
-          <div className="grid grid-cols-3 gap-4">
-            <Card className="p-4 border-border/50 border-t-4 border-t-primary bg-card/50" data-testid="card-home-win">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Home Win</div>
-              <Tip text="Bookmaker-implied probability that the home team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
-                <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.home_win?.toFixed(1)}%</div>
-              </Tip>
-              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
-                <div className="text-sm font-mono text-primary bg-primary/10 inline-block px-2 py-0.5 rounded cursor-default">
-                  {formatOdds(match.odds.home_odds, oddsFormat)}
-                </div>
-              </Tip>
-            </Card>
-
-            <Card className="p-4 border-border/50 border-t-4 border-t-muted-foreground bg-card/50" data-testid="card-draw">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Draw</div>
-              <Tip text="Bookmaker-implied probability of the match ending level after 90 minutes — calculated from the draw odds minus the overround">
-                <div className="text-3xl font-mono font-bold mb-1 text-muted-foreground cursor-default">{match.odds.draw?.toFixed(1)}%</div>
-              </Tip>
-              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
-                <div className="text-sm font-mono bg-muted inline-block px-2 py-0.5 rounded cursor-default">
-                  {formatOdds(match.odds.draw_odds, oddsFormat)}
-                </div>
-              </Tip>
-            </Card>
-
-            <Card className="p-4 border-border/50 border-t-4 border-t-chart-2 bg-card/50" data-testid="card-away-win">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Away Win</div>
-              <Tip text="Bookmaker-implied probability that the away team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
-                <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.away_win?.toFixed(1)}%</div>
-              </Tip>
-              <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
-                <div className="text-sm font-mono text-chart-2 bg-chart-2/10 inline-block px-2 py-0.5 rounded cursor-default">
-                  {formatOdds(match.odds.away_odds, oddsFormat)}
-                </div>
-              </Tip>
-            </Card>
-          </div>
-
-          {match.odds.home_win != null && (
-            <Card className="p-6 border-border/50">
-              <div className="flex justify-between text-sm font-mono mb-2">
-                <span className="text-primary font-bold">{match.home_team.name}</span>
-                <span className="text-muted-foreground font-bold">DRAW</span>
-                <span className="text-chart-2 font-bold">{match.away_team.name}</span>
-              </div>
-              <div className="w-full flex h-4 rounded-full overflow-hidden bg-muted">
-                <div className="bg-primary h-full transition-all duration-1000" style={{ width: `${match.odds.home_win}%` }} />
-                <div className="bg-muted-foreground h-full transition-all duration-1000" style={{ width: `${match.odds.draw}%` }} />
-                <div className="bg-chart-2 h-full transition-all duration-1000" style={{ width: `${match.odds.away_win}%` }} />
-              </div>
-            </Card>
-          )}
+      <Tabs value={tab} onValueChange={goTo}>
+        <div className="sticky top-14 z-30 -mx-4 bg-background/95 px-4 py-2 backdrop-blur md:mx-0 md:px-0">
+          <TabsList className="h-auto w-full justify-start overflow-x-auto bg-muted/50 md:w-auto">
+            {tabs.map((t) => (
+              <TabsTrigger key={t.key} value={t.key} className="px-3.5 py-1.5" data-testid={`tab-${t.key}`}>
+                {t.key === "stats" && isLive && <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-destructive pulse-dot" />}
+                {t.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </div>
-      )}
+
+        <TabsContent value="overview" className="space-y-4">
+          <BettingAnalysisCard matchId={match.id} status={match.status} />
+          <ExplanationCard matchId={match.id} status={match.status} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <TabLink onClick={() => goTo("stats")} icon={<Activity className="h-5 w-5 text-primary" />} title={isLive ? "Live stats & timeline" : "Match stats"} text="Shots, possession, corners, cards and key moments" />
+            <TabLink onClick={() => goTo("teams")} icon={<Users className="h-5 w-5 text-primary" />} title="Lineups, players & form" text="Starting XI, star players, last 8 matches and head to head" />
+            <TabLink onClick={() => goTo("prediction")} icon={<BarChart2 className="h-5 w-5 text-primary" />} title="How the prediction is built" text="Expected goals, goal markets and model detail" />
+            <TabLink onClick={() => goTo("odds")} icon={<TrendingUp className="h-5 w-5 text-primary" />} title="Bookmaker odds" text="Prices, implied chances and how they have moved" />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="prediction" className="space-y-4">
+          {showOverlay && (
+            <HalftimeOverlay
+              htHome={match.score_ht!.home!}
+              htAway={match.score_ht!.away!}
+              marketHome={match.odds?.home_win}
+              marketDraw={match.odds?.draw}
+              marketAway={match.odds?.away_win}
+              homeTeam={match.home_team.name}
+              awayTeam={match.away_team.name}
+            />
+          )}
+          <XGPanel
+            matchId={match.id}
+            homeTeamName={match.home_team.name}
+            awayTeamName={match.away_team.name}
+            marketHome={match.odds?.home_win}
+            marketDraw={match.odds?.draw}
+            marketAway={match.odds?.away_win}
+          />
+        </TabsContent>
+
+        <TabsContent value="stats" className="space-y-4">
+          <MatchStatsPanel matchId={match.id} homeTeamName={match.home_team.name} awayTeamName={match.away_team.name} />
+          {(isLive || match.status === "finished") && (
+            <MatchTimeline matchId={match.id} homeTeamName={match.home_team.name} awayTeamName={match.away_team.name} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="odds" className="space-y-4">
+          {match.odds?.home_odds != null && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="font-semibold">Bookmaker odds {isLive ? "(live)" : "(pre-match)"}</h3>
+                <p className="text-xs text-muted-foreground">The chance each price implies, with the bookmaker's margin removed. Prices are a 30% input to our prediction.</p>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <Card className="p-4 border-border/50 border-t-4 border-t-primary bg-card/50" data-testid="card-home-win">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Home Win</div>
+                  <Tip text="Bookmaker-implied probability that the home team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
+                    <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.home_win?.toFixed(1)}%</div>
+                  </Tip>
+                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
+                    <div className="text-sm font-mono text-primary bg-primary/10 inline-block px-2 py-0.5 rounded cursor-default">
+                      {formatOdds(match.odds.home_odds, oddsFormat)}
+                    </div>
+                  </Tip>
+                </Card>
+
+                <Card className="p-4 border-border/50 border-t-4 border-t-muted-foreground bg-card/50" data-testid="card-draw">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Draw</div>
+                  <Tip text="Bookmaker-implied probability of the match ending level after 90 minutes — calculated from the draw odds minus the overround">
+                    <div className="text-3xl font-mono font-bold mb-1 text-muted-foreground cursor-default">{match.odds.draw?.toFixed(1)}%</div>
+                  </Tip>
+                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
+                    <div className="text-sm font-mono bg-muted inline-block px-2 py-0.5 rounded cursor-default">
+                      {formatOdds(match.odds.draw_odds, oddsFormat)}
+                    </div>
+                  </Tip>
+                </Card>
+
+                <Card className="p-4 border-border/50 border-t-4 border-t-chart-2 bg-card/50" data-testid="card-away-win">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-mono">Away Win</div>
+                  <Tip text="Bookmaker-implied probability that the away team wins — calculated by converting the odds and adjusting for the overround (bookmaker margin)">
+                    <div className="text-3xl font-mono font-bold mb-1 cursor-default">{match.odds.away_win?.toFixed(1)}%</div>
+                  </Tip>
+                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."} side="bottom">
+                    <div className="text-sm font-mono text-chart-2 bg-chart-2/10 inline-block px-2 py-0.5 rounded cursor-default">
+                      {formatOdds(match.odds.away_odds, oddsFormat)}
+                    </div>
+                  </Tip>
+                </Card>
+              </div>
+
+              {match.odds.home_win != null && (
+                <Card className="p-6 border-border/50">
+                  <div className="flex justify-between text-sm font-mono mb-2">
+                    <span className="text-primary font-bold">{match.home_team.name}</span>
+                    <span className="text-muted-foreground font-bold">DRAW</span>
+                    <span className="text-chart-2 font-bold">{match.away_team.name}</span>
+                  </div>
+                  <div className="w-full flex h-4 rounded-full overflow-hidden bg-muted">
+                    <div className="bg-primary h-full transition-all duration-1000" style={{ width: `${match.odds.home_win}%` }} />
+                    <div className="bg-muted-foreground h-full transition-all duration-1000" style={{ width: `${match.odds.draw}%` }} />
+                    <div className="bg-chart-2 h-full transition-all duration-1000" style={{ width: `${match.odds.away_win}%` }} />
+                  </div>
+                </Card>
+              )}
+            </div>
+          )}
+          {!match.odds?.home_odds && <Card className="p-4 text-sm text-muted-foreground border-border/50">No bookmaker prices for this match yet.</Card>}
+          <FixtureOddsMovement fixtureId={match.id} kickoff={match.kickoff} status={match.status} />
+        </TabsContent>
+
+        <TabsContent value="teams" className="space-y-4">
+          <SquadPanel matchId={match.id} />
+          <HeadToHead matchId={match.id} homeTeamName={match.home_team.name} awayTeamName={match.away_team.name} />
+          <RecentFormPanel homeId={match.home_team.id} homeName={match.home_team.name} awayId={match.away_team.id} awayName={match.away_team.name} />
+        </TabsContent>
+      </Tabs>
     </div>
+  );
+}
+
+function TabLink({ onClick, icon, title, text }: { onClick: () => void; icon: React.ReactNode; title: string; text: string }) {
+  return (
+    <button type="button" onClick={onClick} className="flex items-center gap-3 rounded-xl border border-border/50 bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/40">
+      {icon}
+      <span className="min-w-0 flex-1">
+        <span className="block font-semibold">{title}</span>
+        <span className="block text-xs text-muted-foreground">{text}</span>
+      </span>
+      <span className="text-muted-foreground">›</span>
+    </button>
   );
 }

@@ -10,7 +10,7 @@ import { useState, useMemo } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { format } from "date-fns";
-import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays } from "lucide-react";
+import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays, ChevronDown } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -110,161 +110,112 @@ function predictionNote(match: Match, current: ThreeWay, kickoff?: ThreeWay) {
   };
 }
 
-function MatchCard({ match, valueBets, modelGaps, xg, kickoffPrediction }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction; kickoffPrediction?: ThreeWay }) {
+function PickLine({ match, xg, kickoff }: { match: Match; xg: XGPrediction; kickoff?: ThreeWay }) {
+  const n = predictionNote(match, xg, kickoff);
+  return (
+    <div className="flex items-baseline justify-between gap-2" data-testid={`card-prediction-note-${match.id}`}>
+      <span className="min-w-0 truncate text-sm font-semibold">
+        {n.prefix && <span className="mr-1 font-mono text-xs text-destructive">{n.prefix}</span>}
+        {n.text}
+      </span>
+      {n.change != null && (
+        <span className={`shrink-0 font-mono text-[10px] ${n.change > 0 ? "text-emerald-500" : "text-red-500"}`} title="Change since kick-off">
+          {n.change > 0 ? "▲" : "▼"}{Math.abs(n.change).toFixed(0)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function TeamRow({ team, score, showScore, price, oddsFormat }: { team: Match["home_team"]; score?: number | null; showScore: boolean; price?: number | null; oddsFormat: ReturnType<typeof useOddsFormat> }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
+        {team.logo ? <img src={team.logo} alt="" className="h-5 w-5 shrink-0 object-contain" loading="lazy" decoding="async" /> : <span className="h-5 w-5 shrink-0 rounded-full bg-muted" />}
+        <span className="truncate font-medium">{team.name}</span>
+      </div>
+      {showScore ? <span className="font-mono text-lg font-bold">{score ?? "-"}</span>
+        : price ? <span className="font-mono text-[11px] text-muted-foreground" title="Bookmaker price">{formatOdds(price, oddsFormat)}</span> : null}
+    </div>
+  );
+}
+
+function MatchCard({ match, valueBets, modelGaps, xg, kickoffPrediction, showEdgeDetail = false }: { match: Match; valueBets: ModelEdge[]; modelGaps: ModelGap[]; xg?: XGPrediction; kickoffPrediction?: ThreeWay; showEdgeDetail?: boolean }) {
   const oddsFormat = useOddsFormat();
   const isLive = match.status === "live";
+  const isFinished = match.status === "finished";
   const hasValue = valueBets.length > 0;
   const needsReview = modelGaps.length > 0;
   const odds = match.odds;
-  const hasCompleteOdds = odds?.home_win != null && odds.draw != null && odds.away_win != null;
   const hasPrices = odds?.home_odds != null || odds?.draw_odds != null || odds?.away_odds != null;
+  const showScore = isLive || isFinished;
 
   return (
-    <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`}>
+    <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`} className="block h-full">
       <Card
-        className={`p-3 hover:bg-muted/50 transition-colors border-border/50 group cursor-pointer h-full flex flex-col justify-between ${
-          hasValue ? "ring-1 ring-yellow-400/40 border-yellow-400/30" : needsReview ? "ring-1 ring-amber-400/30 border-amber-400/25" : ""
-        }`}
+        className={`group flex h-full cursor-pointer flex-col gap-3 border-border/50 p-4 transition-colors hover:border-primary/40 hover:bg-muted/40 ${
+          isLive ? "border-l-2 border-l-destructive" : ""
+        } ${hasValue ? "ring-1 ring-yellow-400/40" : needsReview ? "ring-1 ring-amber-400/30" : ""}`}
       >
-        <div>
-          <div className="flex justify-between items-start mb-3">
-            <div className="flex items-center gap-2 flex-wrap">
-              <MatchStatus status={match.status} detail={match.status_detail} minute={match.minute} />
-              {hasValue && <ValueBadge bets={valueBets} />}
-              {needsReview && (
-                <span
-                  className="inline-flex items-center gap-1 rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider text-amber-300"
-                  data-testid="badge-model-gap-review"
-                  title={`Largest model/market probability gap is ${modelGaps[0].delta.toFixed(1)} percentage points. Hidden from model edges pending review.`}
-                >
-                  REVIEW · {Math.round(modelGaps[0].delta)} pp gap
-                </span>
-              )}
-            </div>
-            {match.status === "upcoming" && (
-              <div className="text-xs text-muted-foreground font-mono">
-                {format(new Date(match.kickoff), "EEE d MMM · HH:mm")}
-              </div>
+        <div className="flex items-center justify-between gap-2">
+          {match.status === "upcoming"
+            ? <span className="font-mono text-xs text-primary/90">{format(new Date(match.kickoff), "EEE d MMM · HH:mm")}</span>
+            : <MatchStatus status={match.status} detail={match.status_detail} minute={match.minute} />}
+          <div className="flex items-center gap-1.5">
+            {hasValue && <ValueBadge bets={valueBets} />}
+            {needsReview && (
+              <span
+                className="inline-flex items-center rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase tracking-wider text-amber-300"
+                data-testid="badge-model-gap-review"
+                title={`Largest model/market probability gap is ${modelGaps[0].delta.toFixed(1)} percentage points. Hidden from model edges pending review.`}
+              >
+                Review
+              </span>
             )}
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-2 font-medium truncate">
-                {match.home_team.logo && (
-                  <img src={match.home_team.logo} alt={match.home_team.name} className="w-4 h-4 object-contain" loading="lazy" decoding="async" />
-                )}
-                <span className="truncate">{match.home_team.name}</span>
-                {match.odds?.home_odds && (
-                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."}>
-                    <span className="text-[10px] text-muted-foreground font-mono bg-muted px-1 rounded cursor-default">
-                      {formatOdds(match.odds.home_odds, oddsFormat)}
-                    </span>
-                  </Tip>
-                )}
-              </div>
-              <div className={`font-mono text-lg font-bold ${(isLive || match.status === "finished") ? "text-foreground" : "text-transparent"}`}>
-                {match.score?.home ?? "-"}
-              </div>
-            </div>
-
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-2 font-medium truncate">
-                {match.away_team.logo && (
-                  <img src={match.away_team.logo} alt={match.away_team.name} className="w-4 h-4 object-contain" loading="lazy" decoding="async" />
-                )}
-                <span className="truncate">{match.away_team.name}</span>
-                {match.odds?.away_odds && (
-                  <Tip text={oddsFormat === "fractional" ? "Fractional bookmaker odds; the fraction is profit per 1 unit staked." : "Decimal bookmaker odds; decimal prices include stake in total return."}>
-                    <span className="text-[10px] text-muted-foreground font-mono bg-muted px-1 rounded cursor-default">
-                      {formatOdds(match.odds.away_odds, oddsFormat)}
-                    </span>
-                  </Tip>
-                )}
-              </div>
-              <div className={`font-mono text-lg font-bold ${(isLive || match.status === "finished") ? "text-foreground" : "text-transparent"}`}>
-                {match.score?.away ?? "-"}
-              </div>
-            </div>
           </div>
         </div>
 
-        {!hasPrices && (
-          <div className="mt-3 text-[9px] font-mono uppercase tracking-wider text-muted-foreground" title="Odds are unavailable or incomplete, so this fixture is excluded from model edge calculations.">
-            Bookmaker odds unavailable
-          </div>
-        )}
+        <div className="space-y-1.5">
+          <TeamRow team={match.home_team} score={match.score?.home} showScore={showScore} price={odds?.home_odds} oddsFormat={oddsFormat} />
+          <TeamRow team={match.away_team} score={match.score?.away} showScore={showScore} price={odds?.away_odds} oddsFormat={oddsFormat} />
+        </div>
 
-        {hasPrices && (
-          <div className="mt-3 rounded border border-border/50 bg-muted/20 px-2.5 py-2" data-testid={`fixture-bookmaker-odds-${match.id}`}>
-            <div className="mb-2 flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              <span className="truncate">{odds.bookmaker || odds.bookmaker_key || "Bookmaker"} · {isLive ? "LIVE" : "PRE-MATCH"}</span>
-              <span className="shrink-0" title={odds.last_updated ?? undefined}>{oddsUpdatedLabel(odds.last_updated)}</span>
-            </div>
-            <div className="grid grid-cols-3 gap-2 text-center font-mono">
-              {([
-                ["HOME", odds.home_odds],
-                ["DRAW", odds.draw_odds],
-                ["AWAY", odds.away_odds],
-              ] as const).map(([label, price]) => (
-                <div key={label} className="rounded bg-background/70 px-1 py-1">
-                  <div className="text-[8px] text-muted-foreground">{label}</div>
-                  <div className="text-xs font-bold">{formatOdds(price, oddsFormat)}</div>
-                </div>
+        <div className="mt-auto space-y-1.5 border-t border-border/40 pt-3">
+          {xg ? (
+            <>
+              {(isLive || match.status === "upcoming") && <PickLine match={match} xg={xg} kickoff={kickoffPrediction} />}
+              <ProbabilityBar home={xg.home_win} draw={xg.draw} away={xg.away_win} />
+              <div className="flex justify-between font-mono text-[10px] text-muted-foreground">
+                <span><span className="text-primary">{xg.home_win.toFixed(0)}%</span> home</span>
+                <span>draw {xg.draw.toFixed(0)}%</span>
+                <span>away <span className="text-chart-2">{xg.away_win.toFixed(0)}%</span></span>
+              </div>
+            </>
+          ) : (
+            <div className="text-xs text-amber-300">{isLive ? "Live prediction not available yet" : isFinished ? "No prediction recorded" : "Prediction being prepared"}</div>
+          )}
+          {showEdgeDetail && hasValue && (
+            <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 font-mono text-[10px]">
+              {valueBets.map((vb) => (
+                <span key={vb.outcome} className={`${OUTCOME_COLORS[vb.outcome]} flex items-center gap-0.5`}>
+                  <Zap className="h-2.5 w-2.5" />
+                  {OUTCOME_LABELS[vb.outcome]}: model {vb.modelProbability.toFixed(0)}% vs market {vb.market.toFixed(0)}%
+                </span>
               ))}
             </div>
-            <div className="mt-1.5 text-center font-mono text-[8px] uppercase tracking-wider text-muted-foreground">
-              Bookmaker prices · also an input to our prediction
-            </div>
-          </div>
-        )}
-
-        {odds && odds.home_win != null && odds.draw != null && odds.away_win != null && (
-          <div className="mt-4 pt-3 border-t border-border/50">
-            {/* Value bet breakdown row */}
-            {hasValue && (
-              <div className="flex gap-3 text-[9px] font-mono mb-2">
-                {valueBets.map((vb) => (
-                  <span key={vb.outcome} className={`${OUTCOME_COLORS[vb.outcome]} flex items-center gap-0.5`}>
-                    <Zap className="w-2 h-2" />
-                    {OUTCOME_LABELS[vb.outcome]}: model {vb.modelProbability.toFixed(0)}% vs market {vb.market.toFixed(0)}%
-                  </span>
-                ))}
-              </div>
+          )}
+          <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-muted-foreground" data-testid={`fixture-bookmaker-odds-${match.id}`}>
+            {hasPrices ? (
+              <>
+                <span title={`Home · draw · away. ${odds.bookmaker || odds.bookmaker_key || "Bookmaker"}, ${isLive ? "live" : "pre-match"}. Bookmaker prices are a 30% input to our prediction.`}>
+                  Odds {formatOdds(odds.home_odds, oddsFormat)} · {formatOdds(odds.draw_odds, oddsFormat)} · {formatOdds(odds.away_odds, oddsFormat)}
+                </span>
+                <span className="truncate" title={odds.last_updated ?? undefined}>{odds.bookmaker || odds.bookmaker_key || "Bookmaker"}</span>
+              </>
+            ) : (
+              <span title="Odds are unavailable or incomplete, so this fixture is excluded from model edge calculations.">No bookmaker odds yet</span>
             )}
-            <div className="flex justify-between text-[10px] font-mono text-muted-foreground mb-1">
-              <Tip text="Market-implied home win probability from the bookmaker's odds">
-                <span className="text-primary cursor-default">{odds.home_win.toFixed(1)}%</span>
-              </Tip>
-              <Tip text="Market-implied draw probability from the bookmaker's odds">
-                <span className="cursor-default">{odds.draw.toFixed(1)}%</span>
-              </Tip>
-              <Tip text="Market-implied away win probability from the bookmaker's odds">
-                <span className="text-chart-2 cursor-default">{odds.away_win.toFixed(1)}%</span>
-              </Tip>
-            </div>
-            <ProbabilityBar home={odds.home_win} draw={odds.draw} away={odds.away_win} />
-
           </div>
-        )}
-        <div className="mt-3 border-t border-border/50 pt-3">
-          {xg ? <div className="space-y-1">
-            <div className="flex items-center justify-between font-mono text-[10px]">
-              <span className="uppercase tracking-widest text-muted-foreground">AI prediction</span>
-              <span className="flex gap-3"><span className="text-primary">{xg.home_win.toFixed(1)}%</span><span className="text-muted-foreground">{xg.draw.toFixed(1)}%</span><span className="text-chart-2">{xg.away_win.toFixed(1)}%</span></span>
-            </div>
-            <ProbabilityBar home={xg.home_win} draw={xg.draw} away={xg.away_win}/>
-            {(match.status === "live" || match.status === "upcoming") && (() => {
-              const n = predictionNote(match, xg, kickoffPrediction);
-              return (
-                <div className="flex items-center gap-1 font-mono text-[10px]" data-testid={`card-prediction-note-${match.id}`}>
-                  {n.prefix && <span className="text-red-500">{n.prefix}</span>}
-                  <span className="font-semibold">{n.text}</span>
-                  {n.change != null && <span className={n.change > 0 ? "text-emerald-500" : "text-red-500"}>{n.change > 0 ? "▲" : "▼"}{Math.abs(n.change).toFixed(0)} since KO</span>}
-                </div>
-              );
-            })()}
-          </div> : <div className="flex items-center justify-between font-mono text-[10px] text-amber-300"><span>{isLive ? "LIVE PREDICTION UNAVAILABLE" : "PREDICTION PENDING"}</span><span className="text-muted-foreground">{isLive ? "no live forecast received" : "building team baseline"}</span></div>}
         </div>
       </Card>
     </Link>
@@ -275,6 +226,8 @@ const THRESHOLDS = [5, 10, 15, 20] as const;
 type Threshold = (typeof THRESHOLDS)[number];
 
 type Filter = "all" | "live" | "upcoming" | "finished" | "value";
+const FILTER_TO_VIEW: Record<Filter, string> = { all: "", live: "live", upcoming: "upcoming", finished: "results", value: "edges" };
+const VIEW_TO_FILTER: Record<string, Filter> = { live: "live", upcoming: "upcoming", results: "finished", edges: "value" };
 
 const COMPETITION_IMPORTANCE: Record<number, { rank: number; label: string }> = {
   2: { rank: 100, label: "Elite European" },
@@ -313,6 +266,14 @@ function dateHeading(key: string) {
   return longDate;
 }
 
+function shortDateHeading(key: string) {
+  const today = dublinDateKey(new Date());
+  const tomorrow = dublinDateKey(new Date(Date.now() + 24 * 60 * 60_000));
+  if (key === today) return "Today";
+  if (key === tomorrow) return "Tomorrow";
+  return new Intl.DateTimeFormat("en-IE", { timeZone: "Europe/Dublin", weekday: "short", day: "numeric", month: "short" }).format(new Date(`${key}T12:00:00Z`));
+}
+
 function competitionTheme(name: string, country: string) {
   const key = `${name} ${country}`.toLowerCase();
   if (key.includes("champions league")) return { accent: "border-violet-500/70", glow: "from-violet-500/15", badge: "bg-violet-500/15 text-violet-300 border-violet-500/30" };
@@ -327,11 +288,19 @@ function competitionTheme(name: string, country: string) {
 }
 
 export default function Dashboard() {
-  const [filter, setFilter] = useState<Filter>("all");
   const [threshold, setThreshold] = useState<Threshold>(10);
   const [selectedFixtureDate, setSelectedFixtureDate] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [location, navigate] = useLocation();
   const search = useSearch();
+  // The view lives in the address (?view=live) so the Live tab, links and the back button all agree.
+  const filter: Filter = useMemo(() => VIEW_TO_FILTER[new URLSearchParams(search).get("view") ?? ""] ?? "all", [search]);
+  const setFilter = (next: Filter) => {
+    const params = new URLSearchParams(search);
+    if (next === "all") params.delete("view"); else params.set("view", FILTER_TO_VIEW[next]);
+    const q = params.toString();
+    navigate(q ? `/?${q}` : "/");
+  };
   const selectedLeagueId = useMemo(() => {
     const rawLeagueId = new URLSearchParams(search).get("league_id");
     if (!rawLeagueId || !/^[0-9]+$/.test(rawLeagueId)) return null;
@@ -512,237 +481,215 @@ export default function Dashboard() {
     groupedMatches[0] ??
     null;
 
+  const liveTotal = (matches ?? []).filter((m) => m.status === "live").length;
+  const VIEWS: Array<{ key: Filter; label: string; hint: string }> = [
+    { key: "all", label: "All", hint: "Today and the next 7 days" },
+    { key: "live", label: "Live", hint: "Matches in play now" },
+    { key: "upcoming", label: "Upcoming", hint: "Not started yet, next 8 days" },
+    { key: "finished", label: "Results", hint: "Today's finished matches" },
+    { key: "value", label: "Model edges", hint: "Where our model and the bookmakers disagree" },
+  ];
+  const activeView = VIEWS.find((v) => v.key === filter)!;
+  const toggleCollapsed = (leagueId: number) => setCollapsed((prev) => {
+    const next = new Set(prev);
+    if (next.has(leagueId)) next.delete(leagueId); else next.add(leagueId);
+    return next;
+  });
+
   return (
-    <div className="space-y-6 max-w-[1600px] mx-auto">
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 border-b border-border/50 pb-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
-          <h1 className="shrink-0 text-2xl font-bold tracking-tight">Match Center</h1>
-          <span className="rounded-full border border-primary/25 bg-primary/10 px-2.5 py-1 font-mono text-[10px] text-primary">{scopeLabel[filter]}</span>
+    <div className="mx-auto max-w-[1600px] space-y-5">
+      <header className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-bold tracking-tight">Matches</h1>
           {selectedLeagueId != null && (
             <button
               type="button"
-              onClick={() => navigate("/")}
+              onClick={() => navigate(filter === "all" ? "/" : `/?view=${FILTER_TO_VIEW[filter]}`)}
               data-testid="button-clear-league-filter"
               aria-label="Clear league filter"
-              className="rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground"
+              className="rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
               title="Show matches from all leagues"
             >
-              {visibleMatches?.[0]?.league_name ?? `League ${selectedLeagueId}`} · clear ×
+              {visibleMatches?.[0]?.league_name ?? `League ${selectedLeagueId}`} ×
             </button>
           )}
-          {totalValueBets > 0 && (
-            <div
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-400 text-xs font-mono font-bold"
-              data-testid="badge-total-value-bets"
-            >
-              <Zap className="w-3 h-3" />
-              {totalValueBets} model {totalValueBets === 1 ? "edge" : "edges"} flagged
-            </div>
-          )}
         </div>
+        <p className="text-sm text-muted-foreground">Our win, draw and lose predictions. Tap a match for the full analysis, live updates, stats and odds.</p>
+      </header>
 
-        <div className="flex items-center gap-3 flex-wrap">
-          {/* Threshold selector */}
-          <div className="flex items-center gap-2">
-            <SlidersHorizontal className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="text-xs text-muted-foreground font-mono">threshold:</span>
-            <div className="flex bg-muted/50 p-0.5 rounded text-xs font-mono">
+      {/* Views */}
+      <div className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+        <div role="tablist" aria-label="Show" className="inline-flex gap-1 rounded-lg bg-muted/50 p-1">
+          {VIEWS.map((v) => (
+            <button
+              key={v.key}
+              role="tab"
+              aria-selected={filter === v.key}
+              onClick={() => setFilter(v.key)}
+              data-testid={`button-filter-${v.key}`}
+              title={v.hint}
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-3.5 py-1.5 text-sm font-medium transition-colors ${
+                filter === v.key
+                  ? v.key === "value" ? "bg-yellow-400/15 text-yellow-400 shadow-sm" : "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {v.key === "live" && <span className="h-1.5 w-1.5 rounded-full bg-destructive pulse-dot" />}
+              {v.key === "value" && <Zap className="h-3 w-3" />}
+              {v.label}
+              {v.key === "live" && liveTotal > 0 && filter !== "live" && <span className="font-mono text-[10px] text-destructive">{liveTotal}</span>}
+              {v.key === "value" && totalValueBets > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-yellow-400 px-1 text-[9px] font-black text-black" data-testid="badge-total-value-bets">{totalValueBets}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {filter === "value" && (
+        <div className="flex flex-col gap-3 rounded-lg border border-yellow-400/20 bg-yellow-400/5 p-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-muted-foreground">
+            Upcoming matches where the step 9 model's chance is higher than the bookmakers' by at least the gap you choose.
+            A gap is a difference in probability, not expected profit.
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs text-muted-foreground">Minimum gap</span>
+            <div className="flex rounded bg-muted/50 p-0.5 font-mono text-xs">
               {THRESHOLDS.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setThreshold(t)}
-                  data-testid={`button-threshold-${t}`}
-                  className={`px-2 py-0.5 rounded transition-colors ${
-                    threshold === t ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {t} pp
+                <button key={t} onClick={() => setThreshold(t)} data-testid={`button-threshold-${t}`}
+                  className={`rounded px-2 py-0.5 transition-colors ${threshold === t ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
+                  {t} pts
                 </button>
               ))}
             </div>
           </div>
-
-          {/* Status filter */}
-          <div className="flex bg-muted/50 p-1 rounded-md text-sm font-medium">
-            {(["all", "live", "upcoming", "finished"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                data-testid={`button-filter-${f}`}
-                className={`px-4 py-1.5 rounded-sm capitalize transition-colors ${
-                  filter === f ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {f === "finished" ? "Today’s results" : f} {f === "live" && <Activity className="inline-block w-3 h-3 ml-1 text-destructive" />}
-              </button>
-            ))}
-            <button
-              onClick={() => setFilter("value")}
-              data-testid="button-filter-value"
-              className={`px-4 py-1.5 rounded-sm flex items-center gap-1.5 transition-colors ${
-                filter === "value"
-                  ? "bg-yellow-400/15 shadow-sm text-yellow-400"
-                  : "text-muted-foreground hover:text-yellow-400"
-              }`}
-            >
-              <Zap className="w-3 h-3" />
-              Model edge
-              {totalValueBets > 0 && (
-                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-400 text-black text-[9px] font-black">
-                  {totalValueBets}
-                </span>
-              )}
-            </button>
-          </div>
         </div>
-      </div>
+      )}
 
-      {!isLoading && filter !== "value" && groupedMatches.length > 0 && (
-        <nav
-          aria-label="Jump to fixture date"
-          data-testid="fixture-date-navigation"
-          className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1"
-        >
-          <span className="shrink-0 pr-1 text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-            Dates
-          </span>
-          {groupedMatches.map((dateGroup) => (
-            <button
-              key={dateGroup.date}
-              type="button"
-              data-testid={`button-fixture-date-${dateGroup.date}`}
-              onClick={() => setSelectedFixtureDate(dateGroup.date)}
-              aria-pressed={activeFixtureDate?.date === dateGroup.date}
-              className={`shrink-0 rounded-lg border px-3 py-2 text-left transition-colors ${
-                activeFixtureDate?.date === dateGroup.date
-                  ? "border-primary/50 bg-primary/10 text-foreground"
-                  : "border-border/60 bg-card/60 hover:border-primary/40 hover:bg-primary/5"
-              }`}
-            >
-              <span className="block text-xs font-semibold">{dateHeading(dateGroup.date)}</span>
-              <span className="mt-0.5 block font-mono text-[9px] text-muted-foreground">
-                {dateGroup.fixtureCount} fixture{dateGroup.fixtureCount === 1 ? "" : "s"}
-              </span>
-            </button>
-          ))}
+      {!isLoading && filter !== "value" && groupedMatches.length > 1 && (
+        <nav aria-label="Choose a date" data-testid="fixture-date-navigation" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 md:mx-0 md:px-0">
+          {groupedMatches.map((dateGroup) => {
+            const active = activeFixtureDate?.date === dateGroup.date;
+            return (
+              <button
+                key={dateGroup.date}
+                type="button"
+                data-testid={`button-fixture-date-${dateGroup.date}`}
+                onClick={() => setSelectedFixtureDate(dateGroup.date)}
+                aria-pressed={active}
+                className={`shrink-0 rounded-lg border px-3 py-1.5 text-left transition-colors ${active ? "border-primary/50 bg-primary/10" : "border-border/60 hover:border-primary/40"}`}
+              >
+                <span className="block text-xs font-semibold">{shortDateHeading(dateGroup.date)}</span>
+                <span className="block font-mono text-[10px] text-muted-foreground">{dateGroup.fixtureCount} match{dateGroup.fixtureCount === 1 ? "" : "es"}</span>
+              </button>
+            );
+          })}
         </nav>
       )}
 
       {isLoading ? (
-        <div className="space-y-8">
-          {[1, 2].map((i) => (
-            <div key={i} className="space-y-4">
-              <Skeleton className="h-8 w-64" />
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                {[1, 2, 3, 4].map((j) => (
-                  <Skeleton key={j} className="h-40 w-full" />
-                ))}
-              </div>
-            </div>
-          ))}
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 8 }, (_, j) => <Skeleton key={j} className="h-48 w-full" />)}
         </div>
       ) : isError && !matches ? (
-        <div className="flex flex-col items-center justify-center gap-3 py-24 text-center text-muted-foreground border border-dashed border-destructive/30 rounded-lg">
-          <Trophy className="w-10 h-10 opacity-30" />
+        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-destructive/30 py-24 text-center text-muted-foreground">
+          <Trophy className="h-10 w-10 opacity-30" />
           <p>Match data couldn’t be loaded. Predictions stay frozen after kickoff.</p>
           <button onClick={() => void refetch()} className="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted">Try again</button>
         </div>
       ) : filter === "value" ? (
         valueSortedMatches.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-yellow-400/20 rounded-lg">
-            <Zap className="w-12 h-12 mb-4 opacity-20 text-yellow-400" />
-            <p className="font-mono text-sm">No upcoming step 9 edges at ≥{threshold} percentage points (odds 6.0 or shorter, gap up to 12 points).</p>
-            <p className="text-xs mt-1">Edges compare the prematch model probability with the market-implied probability.</p>
+          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-yellow-400/20 py-24 text-center text-muted-foreground">
+            <Zap className="mb-4 h-12 w-12 text-yellow-400 opacity-20" />
+            <p className="text-sm">No upcoming step 9 edges at ≥{threshold} points (odds 6.0 or shorter, gap up to 12 points).</p>
           </div>
         ) : (
           <div className="space-y-3">
-            <p className="text-xs font-mono text-muted-foreground">
-              {valueSortedMatches.length} upcoming {valueSortedMatches.length === 1 ? "match" : "matches"} · model minus market · ≥{threshold} percentage points
+            <p className="text-xs text-muted-foreground">
+              {valueSortedMatches.length} upcoming {valueSortedMatches.length === 1 ? "match" : "matches"}, biggest gap first
             </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {valueSortedMatches.map((match, idx) => {
-                const bets = valueBetMap.get(match.id) ?? [];
-                const topDelta = bets[0]?.delta ?? 0;
-                return (
-                  <div key={match.id} className="relative">
-                    {/* Rank badge */}
-                    <div className="absolute -top-2 -left-2 z-10 flex items-center gap-1">
-                      <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-400 text-black text-[9px] font-black shadow">
-                        {idx + 1}
-                      </span>
-                      <span className="text-[9px] font-mono font-bold text-yellow-400">+{topDelta.toFixed(0)} pp</span>
-                    </div>
-                    {/* League label */}
-                    <div className="flex items-center gap-1.5 mb-1.5 pl-5">
-                      <LeagueLogo src={match.league_logo} name={match.league_name} className="w-3.5 h-3.5 object-contain" />
-                      <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider truncate">
-                        {match.league_name} · {match.country}
-                      </span>
-                    </div>
-                    <MatchCard match={match} valueBets={bets} modelGaps={modelGapMap.get(match.id) ?? []} xg={xgMap.get(match.id)} kickoffPrediction={kickoffMap.get(match.id)} />
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {valueSortedMatches.map((match, idx) => (
+                <div key={match.id} className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-yellow-400 text-[10px] font-black text-black">{idx + 1}</span>
+                    <LeagueLogo src={match.league_logo} name={match.league_name} className="h-3.5 w-3.5 object-contain" />
+                    <span className="truncate">{match.league_name} · {match.country}</span>
                   </div>
-                );
-              })}
+                  <MatchCard match={match} valueBets={valueBetMap.get(match.id) ?? []} modelGaps={modelGapMap.get(match.id) ?? []} xg={xgMap.get(match.id)} kickoffPrediction={kickoffMap.get(match.id)} showEdgeDetail />
+                </div>
+              ))}
             </div>
           </div>
         )
       ) : !visibleMatches || visibleMatches.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24 text-muted-foreground border border-dashed border-border rounded-lg">
-          <Trophy className="w-12 h-12 mb-4 opacity-20" />
-          <p>No {filter !== "all" ? filter : ""} matches found.</p>
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-24 text-center text-muted-foreground">
+          <Trophy className="mb-4 h-12 w-12 opacity-20" />
+          <p>{filter === "live" ? "No matches in play right now." : filter === "finished" ? "No results yet today." : "No matches found."}</p>
+          {filter !== "all" && <button onClick={() => setFilter("all")} className="mt-3 text-sm text-primary hover:underline">Show all matches</button>}
         </div>
       ) : (
-        <div className="space-y-10">
-          {groupedMatches.filter((dateGroup) => dateGroup.date === activeFixtureDate?.date).map((dateGroup) => (
-            <section key={dateGroup.date} className="space-y-5" data-testid={`fixture-date-${dateGroup.date}`}>
-              <div className="sticky top-14 z-20 flex items-center gap-3 rounded-lg border border-border/60 bg-background/95 px-4 py-3 shadow-sm backdrop-blur">
-                <CalendarDays className="h-5 w-5 text-primary" />
-                <h2 className="text-lg font-bold tracking-tight">{dateHeading(dateGroup.date)}</h2>
-                <span className="ml-auto font-mono text-[10px] text-muted-foreground">{dateGroup.fixtureCount} fixture{dateGroup.fixtureCount === 1 ? "" : "s"}</span>
-              </div>
-              {dateGroup.competitions.map((group) => {
-                const theme = competitionTheme(group.name, group.country);
-                const importance = competitionImportance(group.leagueId);
-                return (
-            <section key={`${dateGroup.date}-${group.leagueId}`} className={`relative overflow-hidden rounded-xl border border-border/50 border-l-4 ${theme.accent} bg-card/35 p-4 sm:p-5 shadow-sm`}>
-              <div className={`pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b ${theme.glow} to-transparent`} />
-              <div className="relative flex items-center gap-3 mb-4">
-                <div className="rounded-lg bg-background/80 border border-border/60 p-1.5 shadow-sm"><LeagueLogo src={group.logo} name={group.name} className="w-7 h-7 object-contain" /></div>
-                <div className="min-w-0">
-                  <h2 className="text-lg font-semibold tracking-tight truncate">{group.name}</h2>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    <span className={`inline-flex px-2 py-0.5 rounded-full border text-[9px] font-mono font-bold uppercase tracking-[0.14em] ${theme.badge}`}>{group.country}</span>
-                    <span className="inline-flex rounded-full border border-border/70 bg-background/60 px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-[0.14em] text-muted-foreground">{importance.label}</span>
-                  </div>
-                </div>
-                <span className="ml-auto text-[10px] font-mono text-muted-foreground">{group.matches.length} fixture{group.matches.length === 1 ? "" : "s"}</span>
-                {(() => {
-                  const leagueValueCount = group.matches.filter((m) => (valueBetMap.get(m.id) ?? []).length > 0).length;
-                  return leagueValueCount > 0 ? (
-                    <span className="text-[10px] font-mono text-yellow-400 flex items-center gap-0.5">
-                      <Zap className="w-2.5 h-2.5" />{leagueValueCount}
-                    </span>
-                  ) : null;
-                })()}
-              </div>
-              <div className="relative grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {group.matches.map((match) => (
-                  <MatchCard
-                    key={match.id}
-                    match={match}
-                    valueBets={valueBetMap.get(match.id) ?? []}
-                    modelGaps={modelGapMap.get(match.id) ?? []}
-                    xg={xgMap.get(match.id)}
-                    kickoffPrediction={kickoffMap.get(match.id)}
-                  />
+        groupedMatches.filter((dateGroup) => dateGroup.date === activeFixtureDate?.date).map((dateGroup) => (
+          <section key={dateGroup.date} className="space-y-4" data-testid={`fixture-date-${dateGroup.date}`}>
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 className="text-lg font-semibold tracking-tight">{dateHeading(dateGroup.date)}</h2>
+              <span className="text-xs text-muted-foreground">{dateGroup.fixtureCount} match{dateGroup.fixtureCount === 1 ? "" : "es"} · {dateGroup.competitions.length} competition{dateGroup.competitions.length === 1 ? "" : "s"}</span>
+            </div>
+
+            {dateGroup.competitions.length > 1 && (
+              <nav aria-label="Jump to competition" className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 md:mx-0 md:flex-wrap md:px-0">
+                {dateGroup.competitions.map((group) => (
+                  <a key={group.leagueId} href={`#competition-${group.leagueId}`}
+                    onClick={(e) => { e.preventDefault(); setCollapsed((prev) => { const n = new Set(prev); n.delete(group.leagueId); return n; }); document.getElementById(`competition-${group.leagueId}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+                    className="flex shrink-0 items-center gap-1.5 rounded-full border border-border/60 bg-card/50 px-2.5 py-1 text-xs text-muted-foreground hover:border-primary/40 hover:text-foreground">
+                    <LeagueLogo src={group.logo} name={group.name} className="h-3.5 w-3.5 object-contain" />
+                    {group.name}
+                    <span className="font-mono text-[10px]">{group.matches.length}</span>
+                  </a>
                 ))}
-              </div>
-            </section>
-                );
-              })}
-            </section>
-          ))}
-        </div>
+              </nav>
+            )}
+
+            {dateGroup.competitions.map((group) => {
+              const theme = competitionTheme(group.name, group.country);
+              const importance = competitionImportance(group.leagueId);
+              const isCollapsed = collapsed.has(group.leagueId);
+              const liveHere = group.matches.filter((m) => m.status === "live").length;
+              const leagueValueCount = group.matches.filter((m) => (valueBetMap.get(m.id) ?? []).length > 0).length;
+              return (
+                <section key={`${dateGroup.date}-${group.leagueId}`} id={`competition-${group.leagueId}`} className={`scroll-mt-20 rounded-xl border border-border/50 border-l-4 ${theme.accent} bg-card/30`}>
+                  <button type="button" onClick={() => toggleCollapsed(group.leagueId)} aria-expanded={!isCollapsed}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left">
+                    <LeagueLogo src={group.logo} name={group.name} className="h-7 w-7 shrink-0 object-contain" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-semibold">{group.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">{group.country} · {importance.label}</div>
+                    </div>
+                    {liveHere > 0 && <span className="rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-semibold text-destructive">{liveHere} live</span>}
+                    {leagueValueCount > 0 && <span className="flex items-center gap-0.5 text-[10px] text-yellow-400"><Zap className="h-2.5 w-2.5" />{leagueValueCount}</span>}
+                    <span className="text-xs text-muted-foreground">{group.matches.length}</span>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
+                  </button>
+                  {!isCollapsed && (
+                    <div className="grid grid-cols-1 gap-3 px-4 pb-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                      {group.matches.map((match) => (
+                        <MatchCard
+                          key={match.id}
+                          match={match}
+                          valueBets={valueBetMap.get(match.id) ?? []}
+                          modelGaps={modelGapMap.get(match.id) ?? []}
+                          xg={xgMap.get(match.id)}
+                          kickoffPrediction={kickoffMap.get(match.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+          </section>
+        ))
       )}
     </div>
   );
