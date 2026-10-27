@@ -16,6 +16,7 @@ import marketIntelligenceRouter from "./marketIntelligence";
 import predictionsRouter from "./predictions";
 import reliabilityRouter from "./reliability";
 import modelRouter from "./model";
+import liveRouter from "./live";
 
 const router: IRouter = Router();
 
@@ -36,5 +37,6 @@ router.use(marketIntelligenceRouter);
 router.use(predictionsRouter);
 router.use(reliabilityRouter);
 router.use(modelRouter);
+router.use(liveRouter);
 
 export default router;

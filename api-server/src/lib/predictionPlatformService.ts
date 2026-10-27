@@ -27,6 +27,7 @@ export interface PredictionSnapshotInput {
 
 export async function savePredictionSnapshot(input: PredictionSnapshotInput): Promise<void> {
   try {
+    if (input.status === "live") (await import("./liveFeed")).noteLivePrediction();
     await db.insert(predictionSnapshots).values({
       fixtureId: input.fixtureId,
       leagueId: input.leagueId ?? null,

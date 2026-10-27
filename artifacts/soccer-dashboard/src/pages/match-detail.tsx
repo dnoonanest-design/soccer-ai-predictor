@@ -4,7 +4,7 @@ import {
   useGetMatchEvents, getGetMatchEventsQueryKey,
   useGetMatchStats, getGetMatchStatsQueryKey,
   useGetMatchPresentation, getGetMatchPresentationQueryKey,
-  BacktestScenario, MatchEvent, TeamStats, PresentationPlayer, PresentationTeam,
+  BacktestScenario, MatchEvent, TeamStats, PresentationPlayer, PresentationTeam, Match,
 } from "@workspace/api-client-react";
 import { useParams, Link, useLocation, useSearch } from "wouter";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -1356,9 +1356,18 @@ export default function MatchDetail() {
   const requestedTab = new URLSearchParams(search).get("tab");
   const tab = ["overview", "prediction", "stats", "odds", "teams"].includes(requestedTab ?? "") ? requestedTab! : "overview";
 
+  const queryClient = useQueryClient();
   const { data: match, isLoading, isError } = useGetMatch(matchId, {
     query: {
       enabled: !isNaN(matchId),
+      // Show the match straight away from the matches list already loaded, then refresh it.
+      placeholderData: () => {
+        for (const [, list] of queryClient.getQueriesData<Match[]>({ queryKey: ["/api/matches"] })) {
+          const found = Array.isArray(list) ? list.find((m) => m.id === matchId) : undefined;
+          if (found) return found;
+        }
+        return undefined;
+      },
       refetchInterval: (query) => {
         const status = (query.state.data as { status?: string } | undefined)?.status;
         return status === "finished" || status === "cancelled" ? false : 15000;

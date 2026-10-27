@@ -114,10 +114,17 @@ if (process.env.NODE_ENV === "production" && fs.existsSync(dashboardDist)) {
     maxAge: "1h",
     etag: true,
     index: false,
+    setHeaders(res, filePath) {
+      // Built files carry a content hash in their name, so browsers can keep
+      // them for a year; a new deploy gets new names. index.html always revalidates.
+      if (/[\\/]assets[\\/]/.test(filePath)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      else if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-cache");
+    },
   }));
 
   app.use((req, res, next) => {
     if (req.path.startsWith("/api")) return next();
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(dashboardDist, "index.html"));
   });
 }
