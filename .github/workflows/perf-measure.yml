@@ -1,0 +1,20 @@
+name: Speed check (temporary)
+on:
+  push:
+    branches: [perf/faster-live]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Measure production
+        run: |
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cp $GITHUB_WORKSPACE/.github/preview/measure.mjs . && node measure.mjs
