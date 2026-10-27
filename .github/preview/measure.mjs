@@ -25,6 +25,10 @@ for (const [name, url, sel] of [["home", "/", "[data-testid^=card-match-]"], ["m
     const ctx = await b.newContext({ viewport: { width: 390, height: 844 } });
     const page = await ctx.newPage();
     let bytes = 0, reqs = 0, js = 0;
+    const timeline = [];
+    const t0 = Date.now();
+    page.on("request", (r) => timeline.push({ u: r.url().replace(BASE, "").slice(0, 60), s: Date.now() - t0, e: null }));
+    page.on("requestfinished", (r) => { const u = r.url().replace(BASE, "").slice(0, 60); const x = timeline.find((y) => y.u === u && y.e == null); if (x) x.e = Date.now() - t0; });
     page.on("response", async (r) => { reqs++; try { const l = Number(r.headers()["content-length"] ?? (await r.body()).length); bytes += l; if (r.url().endsWith(".js")) js += l; } catch {} });
     if (!cold) { await page.goto(BASE + url, { waitUntil: "networkidle" }).catch(() => {}); bytes = 0; reqs = 0; js = 0; }
     const t = Date.now();
@@ -33,6 +37,10 @@ for (const [name, url, sel] of [["home", "/", "[data-testid^=card-match-]"], ["m
     await page.waitForSelector(sel, { timeout: 30000 }).catch(() => {});
     const content = Date.now() - t;
     await page.waitForLoadState("networkidle").catch(() => {});
+    if (name === "match" && cold) {
+      const rel = timeline.filter((x) => !x.u.startsWith("http") || x.u.includes("railway")).map((x) => `${x.u}@${x.s}-${x.e ?? "open"}`);
+      for (let i = 0; i < rel.length; i += 8) note({ tl: rel.slice(i, i + 8) });
+    }
     note({ page: name, cold, domReadyMs: dcl, contentShownMs: content, idleMs: Date.now() - t, requests: reqs, kb: Math.round(bytes / 1024), jsKb: Math.round(js / 1024) });
     await ctx.close();
   }
