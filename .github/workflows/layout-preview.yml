@@ -1,0 +1,35 @@
+name: Layout preview (temporary)
+on:
+  push:
+    branches: [feat/clearer-layout]
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Enable pnpm
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck dashboard
+        run: pnpm run typecheck:libs && pnpm --filter @workspace/soccer-dashboard run typecheck
+      - name: Build dashboard
+        run: pnpm --filter @workspace/soccer-dashboard run build
+      - name: Screenshots
+        run: |
+          npm install --no-save playwright@1.48.2
+          npx playwright install --with-deps chromium
+          node .github/preview/shots.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shots
+          path: shots/
