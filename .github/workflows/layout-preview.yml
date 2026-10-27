@@ -3,7 +3,7 @@ on:
   push:
     branches: [feat/clearer-layout]
 permissions:
-  contents: read
+  contents: write
 jobs:
   preview:
     runs-on: ubuntu-latest
@@ -25,11 +25,16 @@ jobs:
         run: pnpm --filter @workspace/soccer-dashboard run build
       - name: Screenshots
         run: |
-          npm install --no-save playwright@1.48.2
-          npx playwright install --with-deps chromium
-          node .github/preview/shots.mjs
-      - uses: actions/upload-artifact@v4
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install playwright@1.48.2 >/dev/null 2>&1 || echo "::error::playwright install failed"
+          cd /tmp/pw && npx playwright install --with-deps chromium >/dev/null 2>&1 || echo "::error::chromium install failed"
+          cp $GITHUB_WORKSPACE/.github/preview/shots.mjs /tmp/pw/shots.mjs
+          cd /tmp/pw && DIST=$GITHUB_WORKSPACE/dashboard-dist node shots.mjs 2>&1 | tee shots.log || true
+          while read -r line; do echo "::notice::$line"; done < /tmp/pw/shots.log
+      - name: Publish screenshots to a temporary branch
         if: always()
-        with:
-          name: shots
-          path: shots/
+        run: |
+          cd /tmp/pw && test -d shots || exit 0
+          git init -q out && cp -r shots out/ && cp shots.log out/ && cd out
+          git config user.name preview && git config user.email preview@users.noreply.github.com
+          git add -A && git commit -qm "layout preview screenshots"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/preview-shots

@@ -6,7 +6,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 const API = "https://soccer-ai-predictor-production.up.railway.app";
-const DIST = path.resolve("dashboard-dist");
+const DIST = process.env.DIST ?? path.resolve("dashboard-dist");
 const server = http.createServer((req, res) => {
   if (req.url.startsWith("/api/")) {
     const up = https.request(API + req.url, { method: req.method, headers: { accept: req.headers.accept ?? "*/*" } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
