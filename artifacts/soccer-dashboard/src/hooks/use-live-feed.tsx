@@ -20,7 +20,7 @@ export function isLiveQuery(key: readonly unknown[], liveIds: Set<number>): bool
 }
 
 /**
- * Listens to /api/live/stream and refreshes only the live data on screen when a
+ * Listens to /api/live/updates and refreshes only the live data on screen when a
  * score, minute, status or live prediction changes. Polling stays on, so if the
  * stream drops (or the browser has no EventSource) nothing goes stale for long.
  */
@@ -34,7 +34,7 @@ export function LiveFeedProvider({ children }: { children: React.ReactNode }) {
     let previousIds = new Set<number>();
     const start = () => {
       if (source || document.visibilityState === "hidden") return;
-      source = new EventSource("/api/live/stream");
+      source = new EventSource("/api/live/updates");
       source.onopen = () => setState((s) => ({ ...s, connected: true }));
       source.onerror = () => setState((s) => ({ ...s, connected: false }));
       source.addEventListener("live", (event) => {

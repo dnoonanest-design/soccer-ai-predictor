@@ -13,7 +13,7 @@ import { SquadPanel } from "@/pages/match-squad";
 import { HeadToHead } from "@/components/head-to-head";
 import { RecentFormPanel } from "@/components/team-recent-results";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment } from "react";
+import { Fragment, useEffect } from "react";
 import { ArrowLeft, Trophy, TrendingUp, TrendingDown, Minus, BarChart2, Clock, Swords, Activity, Users, Star } from "lucide-react";
 import { format } from "date-fns";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -1357,6 +1357,15 @@ export default function MatchDetail() {
   const tab = ["overview", "prediction", "stats", "odds", "teams"].includes(requestedTab ?? "") ? requestedTab! : "overview";
 
   const queryClient = useQueryClient();
+  // Start the betting analysis at the same time as the match itself, not after it.
+  useEffect(() => {
+    if (Number.isNaN(matchId)) return;
+    void queryClient.prefetchQuery({
+      queryKey: ["betting-analysis", matchId],
+      queryFn: async () => { const r = await fetch(`/api/matches/${matchId}/betting-analysis`, { headers: { Accept: "application/json" } }); return r.ok ? r.json() : null; },
+      staleTime: 15_000,
+    });
+  }, [matchId, queryClient]);
   const { data: match, isLoading, isError } = useGetMatch(matchId, {
     query: {
       enabled: !isNaN(matchId),

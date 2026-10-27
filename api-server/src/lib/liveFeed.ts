@@ -1,7 +1,8 @@
 /**
  * Push live changes to open screens instead of waiting for their next poll.
  *
- * GET /api/live/stream is a Server-Sent Events stream. Every few seconds the
+ * GET /api/live/updates is a Server-Sent Events stream (/api/live/stream is the
+ * older pressure-alerts stream). Every few seconds the
  * server compares a cheap fingerprint of the live matches (status, minute,
  * score, from the 15-second live cache) and the time of the newest stored live
  * prediction; when either changes it sends one event, and the browser refreshes

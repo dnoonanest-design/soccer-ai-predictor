@@ -1,4 +1,4 @@
-const CACHE_NAME = "soccer-dashboard-v6";
+const CACHE_NAME = "soccer-dashboard-v7";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -18,7 +18,7 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   // The live update stream must go straight to the network, never through a cache.
-  if (url.pathname === "/api/live/stream") return;
+  if (url.pathname === "/api/live/updates" || url.pathname === "/api/live/stream") return;
   if (url.pathname.startsWith("/api/")) {
     event.respondWith(fetch(request).catch(() => caches.match(request)));
     return;

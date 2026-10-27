@@ -9,7 +9,7 @@ const HEARTBEAT_MS = 25_000;
 let open = 0;
 
 /** Server-Sent Events: one "live" event whenever a live score, minute, status or live prediction changes. */
-router.get("/live/stream", (req, res) => {
+router.get("/live/updates", (req, res) => {
   if (open >= 500) {
     res.status(503).json({ error: "Too many live connections; the app keeps polling instead" });
     return;
