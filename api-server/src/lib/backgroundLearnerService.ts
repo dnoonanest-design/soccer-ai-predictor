@@ -19,7 +19,10 @@ type JobStatus = "idle" | "running" | "disabled";
 
 const ENABLED = process.env.BACKGROUND_LEARNER_ENABLED !== "false";
 
-const LIVE_INTERVAL_MS    = Math.max(60_000,           Number(process.env.BACKGROUND_LIVE_STATS_MS     ?? 60_000));
+// Live predictions every 30 seconds while the API-Football allowance is comfortable
+// (quota mode "full"); every 60 seconds otherwise.
+const LIVE_INTERVAL_MS    = Math.max(30_000,           Number(process.env.BACKGROUND_LIVE_STATS_MS     ?? 30_000));
+const LIVE_SLOW_INTERVAL_MS = 60_000;
 const SETTLE_INTERVAL_MS  = Math.max(10 * 60_000,      Number(process.env.BACKGROUND_SETTLE_MS         ?? 10 * 60_000));
 const TRAIN_INTERVAL_MS   = Math.max(6 * 60 * 60_000,  Number(process.env.BACKGROUND_TRAIN_MS          ?? 6 * 60 * 60_000));
 const BIWEEKLY_UPDATE_INTERVAL_MS = Math.max(14 * 24 * 60 * 60_000, Number(process.env.BACKGROUND_BIWEEKLY_UPDATE_MS ?? 14 * 24 * 60 * 60_000));
@@ -191,6 +194,10 @@ async function computeAndStoreMatch(match: Match) {
 export async function runLiveDeepStatCollection() {
   if (!ENABLED) return { disabled: true, checked: 0, stored: 0 };
   if (liveStatus === "running") return { skipped: true, reason: "live job already running" };
+  if (lastLiveRun && Date.now() - lastLiveRun.getTime() < LIVE_SLOW_INTERVAL_MS - 5_000) {
+    const { getQuotaOptimizationStatus } = await import("./quotaOptimizationService");
+    if (getQuotaOptimizationStatus().mode !== "full") return { skipped: true, reason: "quota not in full mode: live predictions every 60s" };
+  }
   liveStatus = "running";
   const startedAt = new Date();
   let checked = 0;

@@ -7,7 +7,7 @@ import {
   XGPrediction,
 } from "@workspace/api-client-react";
 import { useState, useMemo } from "react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { format } from "date-fns";
 import { Trophy, Activity, Zap, SlidersHorizontal, CalendarDays, ChevronDown } from "lucide-react";
@@ -149,9 +149,19 @@ function MatchCard({ match, valueBets, modelGaps, xg, kickoffPrediction, showEdg
   const odds = match.odds;
   const hasPrices = odds?.home_odds != null || odds?.draw_odds != null || odds?.away_odds != null;
   const showScore = isLive || isFinished;
+  const queryClient = useQueryClient();
+  // Start loading the match page as soon as a finger or pointer lands on the card.
+  const prefetch = () => {
+    void queryClient.prefetchQuery({
+      queryKey: ["betting-analysis", match.id],
+      queryFn: async () => { const r = await fetch(`/api/matches/${match.id}/betting-analysis`); return r.ok ? r.json() : null; },
+      staleTime: 15_000,
+    });
+    void import("@/pages/match-detail");
+  };
 
   return (
-    <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`} className="block h-full">
+    <Link href={`/matches/${match.id}`} data-testid={`card-match-${match.id}`} className="block h-full" onPointerEnter={prefetch} onTouchStart={prefetch} onFocus={prefetch}>
       <Card
         className={`group flex h-full cursor-pointer flex-col gap-3 border-border/50 p-4 transition-colors hover:border-primary/40 hover:bg-muted/40 ${
           isLive ? "border-l-2 border-l-destructive" : ""
@@ -348,7 +358,7 @@ export default function Dashboard() {
   const { data: storedData } = useQuery({
     queryKey: ["stored-predictions", 8],
     queryFn: async () => {
-      const response = await fetch("/api/predictions/upcoming?days=8");
+      const response = await fetch("/api/predictions/upcoming?days=8&compact=1");
       if (!response.ok) throw new Error("Stored predictions unavailable");
       return response.json() as Promise<{ fixtures: Array<{ fixture_id: number; prediction: { home_win: number; draw: number; away_win: number; home_xg?: number | null; away_xg?: number | null } }> }>;
     },

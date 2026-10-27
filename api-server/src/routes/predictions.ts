@@ -346,6 +346,22 @@ router.get("/predictions/upcoming", async (req, res) => {
   const rawDays = Number(req.query.days ?? 8);
   const days = Number.isFinite(rawDays) ? Math.max(1, Math.min(14, Math.floor(rawDays))) : 8;
   const { start, end } = upcomingPredictionRange(new Date(), days);
+  if (req.query.compact === "1") {
+    // Just what the match cards need (about a tenth of the full response).
+    try {
+      const fixtures = await readPredictions(start, end);
+      setStoredPredictionHeaders(res);
+      return res.json({
+        fixtures: fixtures.map((f) => ({
+          fixture_id: f.fixture_id,
+          prediction: { home_win: f.prediction.home_win, draw: f.prediction.draw, away_win: f.prediction.away_win, home_xg: f.prediction.home_xg, away_xg: f.prediction.away_xg },
+        })),
+      });
+    } catch (err) {
+      logger.error({ err }, "compact prediction read failed");
+      return res.status(500).json({ error: "Failed to fetch stored predictions" });
+    }
+  }
   return sendRange(res, start, end, `next-${days}-days`);
 });
 

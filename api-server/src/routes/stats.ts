@@ -12,8 +12,11 @@ const router = Router();
 
 
 
+let xgMemo: { at: number; body: unknown } | null = null;
 router.get("/xg", async (_req, res) => {
   try {
+    res.set("Cache-Control", "public, max-age=10");
+    if (xgMemo && Date.now() - xgMemo.at < 10_000) return res.json(xgMemo.body);
     // Read the latest canonical snapshots. This endpoint must not run a second,
     // simplified probability model or trigger a quota-heavy fixture-wide scan.
     const result = await pool.query(`
@@ -26,12 +29,15 @@ router.get("/xg", async (_req, res) => {
           away_win_prob AS away_win,
           created_at
         FROM prediction_snapshots
+        WHERE created_at > NOW() - INTERVAL '10 days'
         ORDER BY fixture_id, created_at DESC
       ) latest
       ORDER BY created_at DESC
       LIMIT 250
     `);
-    return res.json({ predictions: result.rows, source: "canonical_prediction_snapshots" });
+    const body = { predictions: result.rows, source: "canonical_prediction_snapshots" };
+    xgMemo = { at: Date.now(), body };
+    return res.json(body);
   } catch (err) {
     logger.error({ err }, "Failed to compute bulk xG predictions");
     return res.status(500).json({ error: "Failed to compute xG predictions" });

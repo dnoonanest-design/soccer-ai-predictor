@@ -4,6 +4,7 @@ import { useGetDashboardSummary, getGetDashboardSummaryQueryKey } from "@workspa
 import { format } from "date-fns";
 import { Activity, Trophy, ServerCrash, BarChart2, LineChart, TabletSmartphone, Settings, CalendarDays, MoreHorizontal, Radio } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useLiveFeed } from "@/hooks/use-live-feed";
 
 export type OddsFormat = "decimal" | "fractional";
 
@@ -103,7 +104,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
       queryKey: getGetDashboardSummaryQueryKey(),
     },
   });
-  const liveCount = summary?.live_count ?? 0;
+  const feed = useLiveFeed();
+  const liveCount = feed.liveCount ?? summary?.live_count ?? 0;
   const moreActive = MORE_ITEMS.some((i) => i.href === location);
 
   return (
@@ -147,6 +149,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
             {isError ? (
               <span className="flex items-center gap-1 text-destructive"><ServerCrash className="h-3.5 w-3.5" />Connection problem</span>
+            ) : feed.connected ? (
+              <span className="flex items-center gap-1.5" title={feed.lastEventAt ? `Last live change ${format(new Date(feed.lastEventAt), "HH:mm:ss")}` : "Connected for live updates"} data-testid="live-updates-on">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 pulse-dot" />
+                <span className="hidden sm:inline">Live updates on</span>
+              </span>
             ) : summary?.last_updated ? (
               <span className="hidden sm:inline">Updated {format(new Date(summary.last_updated), "HH:mm")}</span>
             ) : null}
