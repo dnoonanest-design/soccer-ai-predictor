@@ -57,7 +57,7 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
   /** How the served 1X2 numbers were blended with the bookmakers' consensus. */
   market_blend?: { model_weight: number; bookmakers: number; odds_observed_at: string };
   /** Over 2.5 / BTTS taken from the bookmakers' consensus (API-Football). */
-  goal_market_blend?: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts"> };
+  goal_market_blend?: { bookmakers: number; odds_observed_at: string; markets: Array<"over_25" | "btts">; own_weight?: number };
   /** Cup tie between divisions: each club's tier and the formula's numbers before the division-gap forecast. */
   cross_division?: { home_tier: number; away_tier: number; formula: { home_win: number; draw: number; away_win: number } };
 };
