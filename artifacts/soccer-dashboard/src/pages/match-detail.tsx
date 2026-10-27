@@ -1452,7 +1452,7 @@ export default function MatchDetail() {
             {tabs.map((t) => (
               <TabsTrigger key={t.key} value={t.key} className="px-3.5 py-1.5" data-testid={`tab-${t.key}`}>
                 {t.key === "stats" && isLive && <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-destructive pulse-dot" />}
-                {t.label}
+                {t.key === "teams" ? <><span className="sm:hidden">Teams</span><span className="hidden sm:inline">{t.label}</span></> : t.label}
               </TabsTrigger>
             ))}
           </TabsList>
