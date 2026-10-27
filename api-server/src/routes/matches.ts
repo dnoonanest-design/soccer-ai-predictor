@@ -8,6 +8,8 @@ import {
 } from "../lib/apiFootballReliability";
 import { sortFixturesForDisplay } from "../lib/fixtureOrdering";
 import { fillMissingOdds } from "../lib/apiFootballOdds";
+import { buildBettingAnalysis, loadLiveBookmakers, loadLiveReadings } from "../lib/bettingAnalysis";
+import { readPredictions } from "./predictions";
 
 const BLOCKED_NAME_KEYWORDS = [
   "reserve", "reserva", " res ", "res.", "u20", "u19", "u18", "u17", "u16", "u15",
@@ -88,6 +90,41 @@ router.get("/matches/:match_id", async (req, res) => {
     }
 
     return res.json((await fillMissingOdds([match]))[0]);
+  } catch (err) {
+    return handleMatchRouteError(err, res);
+  }
+});
+
+/** Win/draw/lose analysis before and during the match, from stored predictions and odds. */
+router.get("/matches/:match_id/betting-analysis", async (req, res) => {
+  try {
+    const id = parseInt(req.params.match_id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ error: "Invalid match ID" });
+    const found = await getMatchById(id);
+    if (!found || !inProductScope(found)) return res.status(404).json({ error: "Match not found" });
+    const [match] = await fillMissingOdds([found]);
+    const kickoff = new Date(match.kickoff);
+    const [stored, liveRows, liveBooks] = await Promise.all([
+      readPredictions(new Date(kickoff.getTime() - 60_000), new Date(kickoff.getTime() + 60_000)).catch(() => []),
+      match.status === "upcoming" ? Promise.resolve([]) : loadLiveReadings(id),
+      match.status === "live" ? loadLiveBookmakers(id).catch(() => null) : Promise.resolve(null),
+    ]);
+    const pre = stored.find((f: any) => f.fixture_id === id)?.prediction;
+    const o: any = match.odds;
+    const preBooks = match.status === "upcoming" && o?.home_win != null && o?.draw != null && o?.away_win != null
+      ? { home: Number(o.home_win), draw: Number(o.draw), away: Number(o.away_win), source: o.bookmaker ?? "Bookmaker", updated_at: o.last_updated ?? null }
+      : null;
+    res.set("Cache-Control", match.status === "live" ? "public, max-age=15" : "public, max-age=60");
+    return res.json(buildBettingAnalysis({
+      fixtureId: id,
+      status: match.status,
+      minute: match.minute ?? null,
+      score: { home: match.score?.home ?? null, away: match.score?.away ?? null },
+      teams: { home: match.home_team.name, away: match.away_team.name },
+      prematch: pre ? { home: pre.home_win, draw: pre.draw, away: pre.away_win } : null,
+      liveRows,
+      bookmakers: liveBooks ?? preBooks,
+    }));
   } catch (err) {
     return handleMatchRouteError(err, res);
   }

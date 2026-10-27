@@ -1242,6 +1242,106 @@ function ExplanationCard({ matchId, status }: { matchId: number; status: string 
   );
 }
 
+type BettingAnalysisData = {
+  phase: "pre-match" | "live" | "finished";
+  minute: number | null;
+  score: { home: number | null; away: number | null };
+  teams: { home: string; away: string };
+  current: { home: number; draw: number; away: number } | null;
+  kickoff: { home: number; draw: number; away: number } | null;
+  change: { home: number; draw: number; away: number } | null;
+  pick: { outcome: "home" | "draw" | "away"; label: string; percent: number; strength: string } | null;
+  timeline: Array<{ minute: number; home: number; draw: number; away: number }>;
+  bookmakers: { home: number; draw: number; away: number; source: string; updated_at: string | null } | null;
+  note: string;
+};
+
+/** Small line chart of home/draw/away chances through the match. */
+function AnalysisTimeline({ points }: { points: BettingAnalysisData["timeline"] }) {
+  if (points.length < 2) return null;
+  const W = 320, H = 90, maxMin = Math.max(90, ...points.map((p) => p.minute));
+  const x = (m: number) => (m / maxMin) * W;
+  const y = (v: number) => H - (v / 100) * H;
+  const line = (k: "home" | "draw" | "away") => points.map((p, i) => `${i ? "L" : "M"}${x(p.minute).toFixed(1)},${y(p[k]).toFixed(1)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H + 12}`} className="w-full h-24" role="img" aria-label="Win, draw and lose chances through the match">
+      {[25, 50, 75].map((v) => <line key={v} x1={0} x2={W} y1={y(v)} y2={y(v)} className="stroke-border" strokeWidth={0.5} strokeDasharray="2 3" />)}
+      <line x1={x(45)} x2={x(45)} y1={0} y2={H} className="stroke-border" strokeWidth={0.5} />
+      <path d={line("home")} fill="none" className="stroke-primary" strokeWidth={2} />
+      <path d={line("draw")} fill="none" className="stroke-muted-foreground" strokeWidth={1.5} />
+      <path d={line("away")} fill="none" className="stroke-chart-2" strokeWidth={2} />
+      <text x={0} y={H + 10} className="fill-muted-foreground" fontSize={8}>KO</text>
+      <text x={x(45) - 6} y={H + 10} className="fill-muted-foreground" fontSize={8}>HT</text>
+      <text x={W - 14} y={H + 10} className="fill-muted-foreground" fontSize={8}>{maxMin}'</text>
+    </svg>
+  );
+}
+
+/** Who our prediction says wins, draws or loses — before and during the match. */
+function BettingAnalysisCard({ matchId, status }: { matchId: number; status: string }) {
+  const { data } = useQuery({
+    queryKey: ["betting-analysis", matchId],
+    refetchInterval: status === "live" ? 30_000 : status === "upcoming" ? 5 * 60_000 : false,
+    queryFn: async () => {
+      const res = await fetch(`/api/matches/${matchId}/betting-analysis`, { headers: { Accept: "application/json" } });
+      if (!res.ok) return null;
+      return (await res.json()) as BettingAnalysisData;
+    },
+  });
+  if (!data) return null;
+  const shown = data.current ?? data.kickoff;
+  const rows: Array<["home" | "draw" | "away", string, string]> = [
+    ["home", data.teams.home, "bg-primary"],
+    ["draw", "Draw", "bg-muted-foreground"],
+    ["away", data.teams.away, "bg-chart-2"],
+  ];
+  const heading = data.phase === "live" ? `Live${data.minute != null ? ` · ${data.minute}'` : ""}` : data.phase === "pre-match" ? "Before kick-off" : "Full time";
+  return (
+    <Card className="p-4 border-border/60" data-testid="betting-analysis">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h2 className="font-bold text-sm">Betting analysis</h2>
+        <span className={`text-[10px] font-mono uppercase ${data.phase === "live" ? "text-red-500" : "text-muted-foreground"}`}>{heading}</span>
+      </div>
+      <p className="text-sm font-semibold leading-snug" data-testid="betting-analysis-note">{data.note}</p>
+      {shown && (
+        <div className="mt-3 space-y-2">
+          {rows.map(([k, label, color]) => {
+            const change = data.change?.[k];
+            return (
+              <div key={k}>
+                <div className="flex items-center justify-between text-xs">
+                  <span className={data.pick?.outcome === k ? "font-bold" : "text-muted-foreground"}>{label}</span>
+                  <span className="font-mono">
+                    {shown[k].toFixed(1)}%
+                    {change != null && Math.abs(change) >= 0.5 && (
+                      <span className={`ml-2 text-[10px] ${change > 0 ? "text-emerald-500" : "text-red-500"}`}>{change > 0 ? "▲" : "▼"}{Math.abs(change).toFixed(1)}</span>
+                    )}
+                    {data.bookmakers && <span className="ml-2 text-[10px] text-muted-foreground">odds {data.bookmakers[k].toFixed(0)}%</span>}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded bg-muted overflow-hidden"><div className={`h-full ${color}`} style={{ width: `${Math.max(0, Math.min(100, shown[k]))}%` }} /></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {data.timeline.length >= 2 && (
+        <div className="mt-3">
+          <div className="text-[10px] uppercase text-muted-foreground mb-1">How it has moved{data.kickoff ? " since kick-off" : ""}</div>
+          <AnalysisTimeline points={data.timeline} />
+        </div>
+      )}
+      {data.phase === "live" && data.kickoff && (
+        <p className="mt-2 text-[10px] text-muted-foreground">At kick-off: {data.teams.home} {data.kickoff.home.toFixed(0)}% · draw {data.kickoff.draw.toFixed(0)}% · {data.teams.away} {data.kickoff.away.toFixed(0)}%. ▲▼ show the change since then.</p>
+      )}
+      <p className="mt-2 text-[10px] text-muted-foreground">
+        {data.bookmakers ? `"Odds" is what ${data.bookmakers.source} imply, shown for comparison. ` : ""}
+        Percentages are estimates, not guarantees. Please bet responsibly.
+      </p>
+    </Card>
+  );
+}
+
 export default function MatchDetail() {
   const oddsFormat = useOddsFormat();
   const params = useParams();
@@ -1362,6 +1462,8 @@ export default function MatchDetail() {
           </div>
         </div>
       </Card>
+
+      <BettingAnalysisCard matchId={match.id} status={match.status} />
 
       <FixtureOddsMovement fixtureId={match.id} kickoff={match.kickoff} status={match.status} />
 
