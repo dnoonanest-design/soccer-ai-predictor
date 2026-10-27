@@ -10,7 +10,10 @@ let open = 0;
 
 /** Server-Sent Events: one "live" event whenever a live score, minute, status or live prediction changes. */
 router.get("/live/stream", (req, res) => {
-  if (open >= 500) return res.status(503).json({ error: "Too many live connections; the app keeps polling instead" });
+  if (open >= 500) {
+    res.status(503).json({ error: "Too many live connections; the app keeps polling instead" });
+    return;
+  }
   open++;
   res.set({
     "Content-Type": "text/event-stream",
