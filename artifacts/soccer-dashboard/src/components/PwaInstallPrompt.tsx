@@ -74,7 +74,7 @@ export function PwaInstallPrompt() {
   if (!showInstall && (!pushSupported || pushEnabled)) return null;
 
   return (
-    <div className="fixed left-3 right-3 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-50 mx-auto max-w-3xl rounded-xl border border-border/70 bg-card/95 p-3 shadow-2xl backdrop-blur supports-[backdrop-filter]:bg-card/80 md:left-auto md:right-5 md:max-w-md ipad-touch-target" data-testid="pwa-install-prompt">
+    <div className="fixed left-3 right-3 bottom-[calc(env(safe-area-inset-bottom)+4.75rem)] md:bottom-5 z-50 mx-auto max-w-3xl rounded-xl border border-border/70 bg-card/95 p-3 shadow-2xl backdrop-blur supports-[backdrop-filter]:bg-card/80 md:left-auto md:right-5 md:max-w-md ipad-touch-target" data-testid="pwa-install-prompt">
       <div className="flex items-start gap-3">
         <div className="mt-1 rounded-lg bg-primary/15 p-2 text-primary"><Download className="h-4 w-4" /></div>
         <div className="min-w-0 flex-1">

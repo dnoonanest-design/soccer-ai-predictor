@@ -291,7 +291,7 @@ async function applyMarketToPrediction(match: PredictionMatch, result: Canonical
         ...(goals ? { goal_market_blend: goals.goal_market_blend } : {}),
         pipeline_version: `${pred.pipeline_version}+market`,
         reasons: [
-          `Includes bookmaker odds (${applied.market_blend.bookmakers} bookmaker${applied.market_blend.bookmakers === 1 ? "" : "s"}): the most accurate pre-match estimate in testing. Model alone: home ${applied.independent.home}% · draw ${applied.independent.draw}% · away ${applied.independent.away}%.`,
+          `Our prediction with bookmaker odds as a ${Math.round(100 - 100 * applied.market_blend.model_weight)}% input (${applied.market_blend.bookmakers} bookmaker${applied.market_blend.bookmakers === 1 ? "" : "s"}). Our model alone: home ${applied.independent.home}% · draw ${applied.independent.draw}% · away ${applied.independent.away}%.`,
           ...(pred.reasons ?? []),
         ],
       },

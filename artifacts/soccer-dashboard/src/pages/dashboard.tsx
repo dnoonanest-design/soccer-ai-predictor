@@ -135,7 +135,7 @@ function TeamRow({ team, score, showScore, price, oddsFormat }: { team: Match["h
         <span className="truncate font-medium">{team.name}</span>
       </div>
       {showScore ? <span className="font-mono text-lg font-bold">{score ?? "-"}</span>
-        : price ? <span className="font-mono text-[11px] text-muted-foreground" title="Bookmaker price">{formatOdds(price, oddsFormat)}</span> : null}
+        : null}
     </div>
   );
 }
@@ -207,10 +207,10 @@ function MatchCard({ match, valueBets, modelGaps, xg, kickoffPrediction, showEdg
           <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-muted-foreground" data-testid={`fixture-bookmaker-odds-${match.id}`}>
             {hasPrices ? (
               <>
-                <span title={`Home · draw · away. ${odds.bookmaker || odds.bookmaker_key || "Bookmaker"}, ${isLive ? "live" : "pre-match"}. Bookmaker prices are a 30% input to our prediction.`}>
+                <span className="whitespace-nowrap" title={`Home · draw · away. ${odds.bookmaker || odds.bookmaker_key || "Bookmaker"}, ${isLive ? "live" : "pre-match"}. Bookmaker prices are a 30% input to our prediction.`}>
                   Odds {formatOdds(odds.home_odds, oddsFormat)} · {formatOdds(odds.draw_odds, oddsFormat)} · {formatOdds(odds.away_odds, oddsFormat)}
                 </span>
-                <span className="truncate" title={odds.last_updated ?? undefined}>{odds.bookmaker || odds.bookmaker_key || "Bookmaker"}</span>
+                <span className="min-w-0 truncate" title={odds.last_updated ?? undefined}>{(odds.bookmaker || odds.bookmaker_key || "Bookmaker").replace(/\s*\(via [^)]*\)/i, "")}</span>
               </>
             ) : (
               <span title="Odds are unavailable or incomplete, so this fixture is excluded from model edge calculations.">No bookmaker odds yet</span>
@@ -632,7 +632,7 @@ export default function Dashboard() {
       ) : (
         groupedMatches.filter((dateGroup) => dateGroup.date === activeFixtureDate?.date).map((dateGroup) => (
           <section key={dateGroup.date} className="space-y-4" data-testid={`fixture-date-${dateGroup.date}`}>
-            <div className="flex items-baseline justify-between gap-3">
+            <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-3">
               <h2 className="text-lg font-semibold tracking-tight">{dateHeading(dateGroup.date)}</h2>
               <span className="text-xs text-muted-foreground">{dateGroup.fixtureCount} match{dateGroup.fixtureCount === 1 ? "" : "es"} · {dateGroup.competitions.length} competition{dateGroup.competitions.length === 1 ? "" : "s"}</span>
             </div>

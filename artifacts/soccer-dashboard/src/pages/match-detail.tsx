@@ -85,7 +85,7 @@ function FixtureOddsMovement({ fixtureId, kickoff, status }: { fixtureId: number
 
   return <Card className="overflow-hidden border-border/50" data-testid="fixture-odds-movement">
     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/50 px-4 py-3">
-      <div><h2 className="font-mono text-xs font-bold uppercase tracking-widest">Bookmaker odds movement</h2><p className="mt-1 text-[10px] text-muted-foreground">Stored market snapshots from 72 hours before kickoff until one minute before. Odds are display and evaluation data only.</p></div>
+      <div><h2 className="font-mono text-xs font-bold uppercase tracking-widest">Bookmaker odds movement</h2><p className="mt-1 text-[10px] text-muted-foreground">Stored market snapshots from 72 hours before kickoff until one minute before. Bookmaker prices are a 30% input to our prediction.</p></div>
       <span className={`rounded-full border px-2 py-1 font-mono text-[9px] font-bold uppercase ${tracking ? "border-primary/30 bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}>{tracking ? "Tracking" : "Tracking closed"}</span>
     </div>
     {isLoading ? <div className="space-y-2 p-4"><Skeleton className="h-10 w-full"/><Skeleton className="h-10 w-full"/></div> : isError ? <p className="p-4 text-xs text-muted-foreground">Odds history is temporarily unavailable.</p> : marketRows.length === 0 ? <p className="p-4 text-xs text-muted-foreground">No bookmaker snapshots have been recorded for this match yet. Coverage depends on the bookmaker feed and league mapping.</p> : <>
