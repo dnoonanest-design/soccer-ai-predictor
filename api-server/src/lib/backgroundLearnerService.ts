@@ -512,7 +512,7 @@ export async function runAutomaticRecalibration() {
     const adaptive = await runAdaptiveLearningCycle();
     const influence = await analyzeCircumstanceInfluence();
     const aiAwareness = await runAiAwarenessCycle();
-    const playerAnalysis = await runBatchAIPlayerAnalysis(20).then(() => ({ completed: true })).catch((err) => ({ completed: false, error: String(err?.message ?? err) }));
+    const playerAnalysis = await runBatchAIPlayerAnalysis().then(() => ({ completed: true })).catch((err) => ({ completed: false, error: String(err?.message ?? err) }));
     const report = await getCalibrationReport();
     const sampleSize = Number(adaptive.featureWeights.sampleSize ?? 0);
     lastTrainRun = new Date();

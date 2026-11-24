@@ -495,7 +495,9 @@ export async function runPromotionGate(): Promise<string | null> {
   const eligible = report.standings.filter((s) => s.eligible).sort((a, b) => (b.brierGain ?? 0) - (a.brierGain ?? 0));
   if (!eligible.length || !PROMOTION_RULES.autoPromote) return null;
   const recent = await pool.query(
-    `SELECT 1 FROM model_promotion_log WHERE decided_at > NOW() - ($1 || ' days')::interval LIMIT 1`,
+    // The 1X2 cooldown ignores in-play and goal-market decisions, which have their own gates.
+    `SELECT 1 FROM model_promotion_log WHERE decided_at > NOW() - ($1 || ' days')::interval
+        AND new_champion NOT LIKE 'inplay%' AND new_champion NOT LIKE 'goals:%' LIMIT 1`,
     [String(PROMOTION_RULES.minDaysBetweenPromotions)],
   );
   if (recent.rowCount) return null;
@@ -608,6 +610,8 @@ export async function runChallengerCycle() {
     await refitCalibration();
     await refitLegacyCalibration();
     promoted = await runPromotionGate();
+    const { runGoalMarketGate } = await import("./goalMarketChampion");
+    if (await runGoalMarketGate()) promoted = promoted ?? "goals:step9-strength-ratings";
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     logger.warn({ err }, "challenger cycle failed");

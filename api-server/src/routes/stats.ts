@@ -91,9 +91,12 @@ router.get("/matches/:match_id/stats", async (req, res) => {
           } else if (match.status === "live") {
             // In play: fresh prices quoted at the current score only.
             try {
-              const { ensureLiveMarket, liveMarketInformedForecast } = await import("../lib/marketBlend");
-              await ensureLiveMarket();
-              marketInformed = liveMarketInformedForecast(match, { home: prediction.home_win, draw: prediction.draw, away: prediction.away_win });
+              const { ensureLiveMarket, liveMarketInformedForecast, LIVE_MARKET_DISPLAY_MAX_MINUTE } = await import("../lib/marketBlend");
+              // Shown only while it has tested better than the live model (see marketBlend.ts).
+              if (match.minute != null && match.minute < LIVE_MARKET_DISPLAY_MAX_MINUTE) {
+                await ensureLiveMarket();
+                marketInformed = liveMarketInformedForecast(match, { home: prediction.home_win, draw: prediction.draw, away: prediction.away_win });
+              }
             } catch { marketInformed = null; }
           }
           // Pre-match odds at 3 days, 2 days, 1 day and the latest read (stored reads only).

@@ -208,28 +208,58 @@ export const INPLAY_MARKET_CHALLENGER = "inplay-market-blend";
 export const LIVE_PRICE_MAX_AGE_MS = 2 * 60_000;
 const LIVE_REFRESH_MS = 30_000;
 
-export type LivePrice = { h: number; d: number; a: number; scoreHome: number | null; scoreAway: number | null; updatedAt: number };
+export type LivePrice = { h: number; d: number; a: number; scoreHome: number | null; scoreAway: number | null; updatedAt: number; minute?: number | null };
+
+/**
+ * The in-play odds box is shown up to this minute only. Audit (24 Nov 2026,
+ * 656 checkpoints): the odds blend beat the live model before the hour
+ * (0.517-0.527 vs 0.541-0.570 Brier) and lost badly after it (80+: 0.237 vs
+ * 0.113), largely from prices set before a late goal. The challenger keeps
+ * recording at every minute so the fixed version can be judged.
+ */
+export const LIVE_MARKET_DISPLAY_MAX_MINUTE = Number(process.env.LIVE_MARKET_DISPLAY_MAX_MINUTE ?? 60);
+/** From this minute, a price that makes the leading side the outsider is treated as stale. */
+const LIVE_SANITY_FROM_MINUTE = 60;
 
 let livePrices = new Map<number, LivePrice[]>();
+/** When the app first stored a price at each fixture's score ("h-a"), i.e. soon after that score was reached. */
+let scoreFirstSeen = new Map<number, Map<string, number>>();
 let liveRefreshedAt = 0;
 let liveRefreshing: Promise<void> | null = null;
 
 async function refreshLive(): Promise<void> {
   const res = await pool.query(
     `SELECT DISTINCT ON (fixture_id, bookmaker_key)
-            fixture_id, implied_home_prob h, implied_draw_prob d, implied_away_prob a,
+            fixture_id, implied_home_prob h, implied_draw_prob d, implied_away_prob a, minute,
             score_home, score_away, COALESCE(bookmaker_updated_at, observed_at) AS updated_at
        FROM inplay_odds_snapshots
       WHERE observed_at > NOW() - INTERVAL '10 minutes'
       ORDER BY fixture_id, bookmaker_key, observed_at DESC`,
   );
+  // Each stored price carries the score the app saw when it saved the price,
+  // not the score when the bookmaker set it. The first time a score appears is
+  // close to when it happened, so only prices updated after that are current.
+  const seen = await pool.query(
+    `SELECT fixture_id, score_home, score_away, MIN(observed_at) first_seen
+       FROM inplay_odds_snapshots
+      WHERE observed_at > NOW() - INTERVAL '4 hours' AND score_home IS NOT NULL AND score_away IS NOT NULL
+      GROUP BY fixture_id, score_home, score_away`,
+  );
+  const nextSeen = new Map<number, Map<string, number>>();
+  for (const r of seen.rows as any[]) {
+    const id = Number(r.fixture_id);
+    const m = nextSeen.get(id) ?? new Map<string, number>();
+    m.set(`${r.score_home}-${r.score_away}`, new Date(r.first_seen).getTime());
+    nextSeen.set(id, m);
+  }
+  scoreFirstSeen = nextSeen;
   const next = new Map<number, LivePrice[]>();
   for (const r of res.rows as any[]) {
     const id = Number(r.fixture_id);
     const list = next.get(id) ?? [];
     list.push({ h: Number(r.h), d: Number(r.d), a: Number(r.a),
       scoreHome: r.score_home == null ? null : Number(r.score_home), scoreAway: r.score_away == null ? null : Number(r.score_away),
-      updatedAt: new Date(r.updated_at).getTime() });
+      updatedAt: new Date(r.updated_at).getTime(), minute: r.minute == null ? null : Number(r.minute) });
     next.set(id, list);
   }
   livePrices = next;
@@ -245,11 +275,27 @@ export async function ensureLiveMarket(): Promise<void> {
   await liveRefreshing;
 }
 
-/** Consensus of fresh prices quoted at exactly this score, or null. */
-export function liveConsensusFrom(prices: LivePrice[], score: { home: number | null; away: number | null }, now: number): MarketConsensus | null {
+/**
+ * Pure: is this price plausible for the score? From the hour, a side that is
+ * ahead cannot be priced as less likely to win than the side behind.
+ */
+export function priceFitsScore(p: Pick<LivePrice, "h" | "a" | "minute">, score: { home: number; away: number }): boolean {
+  if (p.minute == null || p.minute < LIVE_SANITY_FROM_MINUTE || score.home === score.away) return true;
+  return score.home > score.away ? p.h >= p.a : p.a >= p.h;
+}
+
+/**
+ * Consensus of fresh prices quoted at exactly this score, or null. With
+ * `scoreSince` (when the current score was first seen), a price must also
+ * have been updated after it, so a price set before the latest goal is never used.
+ */
+export function liveConsensusFrom(prices: LivePrice[], score: { home: number | null; away: number | null }, now: number, scoreSince?: number | null): MarketConsensus | null {
   if (score.home == null || score.away == null) return null;
+  const sc = { home: score.home, away: score.away };
   const usable = prices.filter((p) => p.scoreHome === score.home && p.scoreAway === score.away
-    && p.updatedAt <= now + 30_000 && now - p.updatedAt <= LIVE_PRICE_MAX_AGE_MS);
+    && p.updatedAt <= now + 30_000 && now - p.updatedAt <= LIVE_PRICE_MAX_AGE_MS
+    && (scoreSince == null || p.updatedAt >= scoreSince)
+    && priceFitsScore(p, sc));
   return consensusFromRows(usable.map((p) => ({ h: p.h, d: p.d, a: p.a, observedAt: p.updatedAt })));
 }
 
@@ -263,7 +309,9 @@ export type LiveMarketInformed = Omit<MarketInformed, "model"> & { model: "live-
  */
 export function liveMarketInformedForecast(match: LiveMatchLike, served: { home: number; draw: number; away: number }, now = Date.now()): LiveMarketInformed | null {
   if (match.status !== "live" || !match.score) return null;
-  const market = liveConsensusFrom(livePrices.get(match.id) ?? [], match.score, now);
+  const since = match.score.home == null || match.score.away == null ? null
+    : scoreFirstSeen.get(match.id)?.get(`${match.score.home}-${match.score.away}`) ?? null;
+  const market = liveConsensusFrom(livePrices.get(match.id) ?? [], match.score, now, since);
   if (!market) return null;
   const t = served.home + served.draw + served.away;
   if (!(t > 0)) return null;
@@ -280,8 +328,9 @@ export function liveMarketInformedForecast(match: LiveMatchLike, served: { home:
 }
 
 /** Test hook. */
-export function __setLivePricesForTests(entries: Array<[number, LivePrice[]]>): void {
+export function __setLivePricesForTests(entries: Array<[number, LivePrice[]]>, firstSeen: Array<[number, Array<[string, number]>]> = []): void {
   livePrices = new Map(entries);
+  scoreFirstSeen = new Map(firstSeen.map(([id, list]) => [id, new Map(list)]));
   liveRefreshedAt = Date.now();
 }
 
