@@ -5,7 +5,7 @@ vi.mock("../logger", () => ({ logger: { warn: () => {}, info: () => {}, debug: (
 const strength = vi.hoisted(() => ({ value: null as null | { probs: { home: number; draw: number; away: number } } }));
 vi.mock("../strengthModel", () => ({ forecastStrength: () => strength.value }));
 
-const { __setLivePricesForTests, __setMarketConsensusForTests, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket, goalConsensusFrom, goalsWithMarket, goalMarketsForServedPrediction } = await import("../marketBlend");
+const { __setLivePricesForTests, __setMarketConsensusForTests, priceFitsScore, liveConsensusFrom, LIVE_MARKET_DISPLAY_MAX_MINUTE, blendWithMarket, consensusFromRows, getMarketConsensus, liveMarketInformedForecast, marketInformedForecast, marketForServedPrediction, oddsMovementFrom, servedWithMarket, goalConsensusFrom, goalsWithMarket, goalMarketsForServedPrediction } = await import("../marketBlend");
 const { sealedWithoutOdds, withLatestMarket } = await import("../servedPredictionMarket");
 
 const now = Date.parse("2026-10-25T12:00:00Z");
@@ -81,6 +81,27 @@ describe("odds-informed in-play forecast", () => {
   it("is in-play only", () => {
     __setLivePricesForTests([[9, [price({})]]]);
     expect(liveMarketInformedForecast({ ...live, status: "upcoming" }, served, now)).toBeNull();
+  });
+
+  it("ignores a price set before the current score was reached, even if saved after it", () => {
+    // Saved with the 1-0 score, but the bookmaker last updated it before the goal was first seen.
+    __setLivePricesForTests([[9, [price({ updatedAt: now - 60_000 })]]], [[9, [["1-0", now - 40_000]]]]);
+    expect(liveMarketInformedForecast(live, served, now)).toBeNull();
+    __setLivePricesForTests([[9, [price({ updatedAt: now - 20_000 })]]], [[9, [["1-0", now - 40_000]]]]);
+    expect(liveMarketInformedForecast(live, served, now)).not.toBeNull();
+  });
+
+  it("drops a late price that makes the leading side the outsider", () => {
+    expect(priceFitsScore({ h: 20, a: 60, minute: 75 }, { home: 1, away: 0 })).toBe(false);
+    expect(priceFitsScore({ h: 20, a: 60, minute: 30 }, { home: 1, away: 0 })).toBe(true);
+    expect(priceFitsScore({ h: 20, a: 60, minute: 80 }, { home: 1, away: 1 })).toBe(true);
+    expect(priceFitsScore({ h: 70, a: 10, minute: 85 }, { home: 0, away: 2 })).toBe(false);
+    const stale = { h: 15, d: 65, a: 20, scoreHome: 1, scoreAway: 0, updatedAt: now - 30_000, minute: 90 };
+    expect(liveConsensusFrom([stale], { home: 1, away: 0 }, now)).toBeNull();
+  });
+
+  it("is shown on the match page only before the hour by default", () => {
+    expect(LIVE_MARKET_DISPLAY_MAX_MINUTE).toBe(60);
   });
 });
 

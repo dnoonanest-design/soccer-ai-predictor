@@ -44,6 +44,8 @@ export type CanonicalPrediction = Omit<EnhancedPrediction, "over_15" | "over_25"
   raw_components?: RawPredictionComponents;
   /** Which model produced the served 1X2 numbers ("legacy" or a promoted challenger). */
   serving_model?: string;
+  /** Set when the goal-market champion (goalMarketChampion.ts) produced the own over/under and BTTS numbers. */
+  goal_model?: string;
   /**
    * In play only: the model not currently serving, scored beside the served
    * numbers at live checkpoints (percentages).
@@ -416,7 +418,8 @@ export async function createCanonicalPrediction(
   if (!live && !options.legacyOnly) {
     const { applyServingChampion } = await import("./modelChallengerService");
     const served = await applyServingChampion(predictionMatch, result);
-    return applyMarketToPrediction(predictionMatch, served);
+    const { applyGoalChampion } = await import("./goalMarketChampion");
+    return applyMarketToPrediction(predictionMatch, await applyGoalChampion(predictionMatch, served));
   }
   if (live && !options.legacyOnly) {
     const { applyInPlayModel } = await import("./inPlayModelService");

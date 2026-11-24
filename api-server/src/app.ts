@@ -62,6 +62,7 @@ const adminMutationPaths = [
   /^\/tracker\/\d+\/settle$/,
   /^\/live\/alerts$/,
   /^\/model\/challengers\/(?:run|rollback)$/,
+  /^\/model\/goal-markets\/rollback$/,
   /^\/model\/inplay\/(?:run|rollback)$/,
   /^\/model\/odds\/backfill$/,
   /^\/model\/ratings\/backfill$/,

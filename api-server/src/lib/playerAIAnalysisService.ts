@@ -3,29 +3,37 @@ import { playerProfiles, playerAiSignals, playerMatchStats } from "@workspace/db
 import { eq, desc, and, gte, isNull, lt, or } from "drizzle-orm";
 import { logger } from "./logger.js";
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5";
+import { anthropicKey, callClaude } from "./anthropicClient";
+
+/**
+ * Write-ups are display-only, so they are kept cheap: one batch a day of
+ * PLAYER_AI_BATCH players (default 10). At 20 players every 6 hours they cost
+ * about $0.14 a day and used up a $5 credit in about five weeks (Nov 2026).
+ */
+const PLAYER_AI_INTERVAL_MS = Number(process.env.PLAYER_AI_INTERVAL_MS ?? 24 * 60 * 60_000);
+const PLAYER_AI_BATCH = Math.max(0, Number(process.env.PLAYER_AI_BATCH ?? 10));
+let lastBatchAt = 0;
 
 // Generative AI describes already-computed player evidence; it cannot create
 // or promote prediction weights.
-export async function analysePlayerWithAI(playerId: number): Promise<void> {
+/** Returns false when Claude is unavailable (billing, key, rate limit), so a batch can stop. */
+export async function analysePlayerWithAI(playerId: number): Promise<boolean> {
   try {
-    if (!ANTHROPIC_API_KEY) {
+    if (!anthropicKey()) {
       logger.warn({ playerId }, "Skipping AI player analysis: ANTHROPIC_API_KEY is not configured");
-      return;
+      return false;
     }
     const profile = await db.query.playerProfiles.findFirst({
       where: eq(playerProfiles.playerId, playerId)
     });
-    if (!profile) return;
+    if (!profile) return true;
 
     const recentMatches = await db.select().from(playerMatchStats)
       .where(eq(playerMatchStats.playerId, playerId))
       .orderBy(desc(playerMatchStats.matchDate))
       .limit(20);
 
-    if (recentMatches.length < 5) return;
+    if (recentMatches.length < 5) return true;
 
     const prompt = `You are a football analytics explanation assistant. Describe cautious, testable patterns in this player's recent data. Do not calculate or invent probabilities, correlations, predictive power, causal effects or numerical signal strength. The application calculates all trusted statistics separately.
 
@@ -53,10 +61,10 @@ LAST 20 MATCHES (most recent first):
 ${recentMatches.map((m, i) => `Match ${i+1}: ${m.matchDate?.toISOString().split("T")[0]} | ${m.isInternational ? "INT" : "CLUB"} | ${m.minutesPlayed}mins | Rating: ${m.rating ?? "N/A"} | Goals: ${m.goals} | Assists: ${m.assists} | Shots: ${m.shots} | PassAcc: ${m.passAccuracy ?? "N/A"}% | Tackles: ${m.successfulTackles} | YC: ${m.yellowCards} | Result: ${m.teamResult}`).join("\n")}
 
 Your task:
-1. Identify up to 5 candidate patterns specific to this player.
+1. Identify up to 3 candidate patterns specific to this player, one sentence each.
 2. Describe the observations behind each pattern without claiming causation.
 3. State clearly that small samples are uncertain.
-4. Write a 2-3 sentence insight summary.
+4. Write a 2 sentence insight summary.
 
 Respond in JSON only:
 {
@@ -69,30 +77,13 @@ Respond in JSON only:
   "insightSummary": "string"
 }`;
 
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 4000,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Anthropic request failed with status ${response.status}`);
+    const reply = await callClaude(prompt, 3000, "player write-up");
+    if (!reply.text) {
+      // Paused (billing, key, rate limit): mark nothing, stop the batch.
+      if (reply.paused) return false;
+      throw new Error(reply.error ?? "no reply");
     }
-
-    const data = await response.json() as any;
-    if (data.stop_reason === "max_tokens") throw new Error("Claude's reply was cut off (token limit)");
-    // Use the text blocks only; a reply can start with a non-text block.
-    const text = (Array.isArray(data.content) ? data.content : [])
-      .filter((c: any) => c?.type === "text" && typeof c.text === "string")
-      .map((c: any) => c.text).join("\n");
+    const text = reply.text;
     const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean) as Record<string, unknown>;
     // Generative AI is an explanation layer only. It is forbidden from
@@ -122,16 +113,21 @@ Respond in JSON only:
 
     logger.info({ playerId, playerName: profile.playerName, signalsFound: descriptions.length }, "AI player explanation complete");
   } catch (err) {
-    logger.error({ err, playerId }, "AI player analysis failed");
+    logger.error({ playerId }, `AI player analysis failed: ${err instanceof Error ? err.message : String(err)}`);
+    // Try this player again in two days rather than at the front of every batch.
+    await db.update(playerProfiles).set({ aiLastAnalysedAt: new Date() }).where(eq(playerProfiles.playerId, playerId)).catch(() => {});
   }
+  return true;
 }
 
 // Run AI analysis on players who have enough data and haven't been analysed recently
-export async function runBatchAIPlayerAnalysis(limit = 20): Promise<void> {
-  if (!ANTHROPIC_API_KEY) {
+export async function runBatchAIPlayerAnalysis(limit = PLAYER_AI_BATCH): Promise<void> {
+  if (!anthropicKey()) {
     logger.info("AI player explanations disabled: ANTHROPIC_API_KEY is not configured");
     return;
   }
+  if (limit <= 0 || Date.now() - lastBatchAt < PLAYER_AI_INTERVAL_MS) return;
+  lastBatchAt = Date.now();
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 
   const players = await db.select().from(playerProfiles)
@@ -145,7 +141,10 @@ export async function runBatchAIPlayerAnalysis(limit = 20): Promise<void> {
   logger.info({ count: players.length }, "starting batch AI player analysis");
 
   for (const player of players) {
-    await analysePlayerWithAI(player.playerId);
+    if (!(await analysePlayerWithAI(player.playerId))) {
+      logger.warn("batch AI player analysis stopped: Claude is unavailable");
+      break;
+    }
     // Rate limit - wait 2s between AI calls
     await new Promise(r => setTimeout(r, 2000));
   }

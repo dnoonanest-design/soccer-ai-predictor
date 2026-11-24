@@ -9,9 +9,8 @@
  */
 import type { Match } from "./soccerService";
 import { createCanonicalPrediction, type CanonicalPrediction } from "./canonicalPredictionService";
-import { logger } from "./logger";
+import { anthropicKey, callClaude } from "./anthropicClient";
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const CACHE_MS = 30 * 60_000;
 const cache = new Map<number, { value: MatchExplanation; at: number }>();
 
@@ -77,8 +76,7 @@ export function wholeSentences(text: string, max: number): string {
 }
 
 async function claudeExplanation(match: Match, p: CanonicalPrediction, flags: DataFlag[]): Promise<{ text: string | null; error?: string }> {
-  const key = process.env.ANTHROPIC_API_KEY?.trim().replace(/^["']|["']$/g, "");
-  if (!key) return { text: null };
+  if (!anthropicKey()) return { text: null };
   const facts = {
     match: `${match.home_team.name} vs ${match.away_team.name}`,
     competition: match.league_name,
@@ -92,38 +90,9 @@ async function claudeExplanation(match: Match, p: CanonicalPrediction, flags: Da
 Use ONLY the facts below. Do not add any number, statistic, injury, or claim that is not in the facts.
 Do not change or round the probabilities into new values, and do not give betting advice.
 Facts (JSON): ${JSON.stringify(facts)}`;
-  try {
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5",
-        // Room for any reasoning the model does before writing; the reply itself is three sentences.
-        max_tokens: 2000,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!response.ok) {
-      // Anthropic's error body names the problem (e.g. credit balance, invalid key, unknown model).
-      let detail = "";
-      try {
-        const body = (await response.json()) as { error?: { type?: string; message?: string } };
-        detail = [body.error?.type, body.error?.message].filter(Boolean).join(": ");
-      } catch { /* body not JSON */ }
-      throw new Error(`Anthropic request failed with status ${response.status}${detail ? ` (${detail.slice(0, 200)})` : ""}`);
-    }
-    const data = (await response.json()) as { content?: Array<{ type?: string; text?: string }>; stop_reason?: string };
-    if (data.stop_reason === "max_tokens") return { text: null, error: "Claude's reply was cut off (token limit); using the template" };
-    // Use every text block, not just the first content block.
-    const text = (data.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text!.trim()).join(" ").trim();
-    return text
-      ? { text: wholeSentences(text, 900) }
-      : { text: null, error: `Anthropic returned no text (stop reason: ${data.stop_reason ?? "unknown"}; blocks: ${(data.content ?? []).map((c) => c.type).join(",") || "none"})` };
-  } catch (err) {
-    const error = (err instanceof Error ? err.message : String(err)).replaceAll(key, "[key]");
-    logger.warn({ error, fixtureId: match.id }, "Claude explanation unavailable; using template");
-    return { text: null, error };
-  }
+  // Room for any reasoning the model does before writing; the reply itself is three sentences.
+  const r = await callClaude(prompt, 2000, "match explanation");
+  return r.text ? { text: wholeSentences(r.text.replace(/\s*\n+\s*/g, " "), 900) } : { text: null, ...(r.error ? { error: r.error } : {}) };
 }
 
 export async function explainMatch(match: Match): Promise<MatchExplanation> {

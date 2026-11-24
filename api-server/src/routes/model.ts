@@ -3,6 +3,7 @@ import { logger } from "../lib/logger";
 import { getChallengerFixtures, getChallengerReport, rollbackToLegacy, runChallengerCycle } from "../lib/modelChallengerService";
 import { backfillShotStatistics, ensureTeamRatings, getTeamRatingsStatus } from "../lib/teamRatingsProvider";
 import { getInPlayReport, refitInPlayModel, rollbackInPlay, runInPlayCycle } from "../lib/inPlayModelService";
+import { getGoalMarketReport, rollbackGoalMarkets } from "../lib/goalMarketChampion";
 import { explainMatch } from "../lib/matchExplanationService";
 import { getMatchById } from "../lib/soccerService";
 import { isTrackedLeague } from "../lib/leagueConfig";
@@ -135,6 +136,26 @@ router.post("/model/inplay/run", async (_req, res) => {
   } catch (err) {
     logger.error({ err }, "in-play cycle failed");
     return res.status(500).json({ error: "Failed to run in-play cycle" });
+  }
+});
+
+/** Goal markets (over 2.5, both teams to score): their own champion and gate. */
+router.get("/model/goal-markets", async (_req, res) => {
+  try {
+    return res.json(await getGoalMarketReport());
+  } catch (err) {
+    logger.error({ err }, "goal-market report failed");
+    return res.status(500).json({ error: "Failed to build goal-market report" });
+  }
+});
+
+router.post("/model/goal-markets/rollback", async (req, res) => {
+  try {
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 500) : "manual rollback";
+    return res.json({ rolledBack: await rollbackGoalMarkets(reason) });
+  } catch (err) {
+    logger.error({ err }, "goal-market rollback failed");
+    return res.status(500).json({ error: "Failed to roll back" });
   }
 });
 
